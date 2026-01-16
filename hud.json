@@ -1,0 +1,305 @@
+{
+  "hud": {
+    "meta": {
+      "version": "0.1.0-prototype",
+      "product": "brandstudios.ai",
+      "surface": "OS HUD",
+      "layout": {
+        "mode": "transparent_hud",
+        "inspiration": "Ironman suit interface (semi-transparent glass, floating panels, micro-animations)",
+        "density": "high",
+        "motion": {
+          "enabled": true,
+          "style": "subtle parallax + scanline sweep + panel float",
+          "reduced_motion_supported": true
+        }
+      },
+      "iconography": {
+        "chatbot_icon": {
+          "id": "pancake-bot",
+          "label": "Pancake Chatbot",
+          "style": "uniquely-styled pancake stack with cyber HUD ring + tiny 'syrup' data-stream",
+          "render": {
+            "type": "svg",
+            "asset_ref": "mock://assets/icons/pancake-bot.svg",
+            "fallback": "Use circular badge with stacked pancake glyph and small mic + spark icons"
+          },
+          "states": {
+            "idle": "soft glow",
+            "listening": "pulse ring",
+            "thinking": "rotating arc segments",
+            "error": "red corner notch + warning glyph"
+          }
+        }
+      },
+      "theme": {
+        "background": {
+          "type": "transparent",
+          "backdrop_filter": "blur(14px) saturate(140%)",
+          "noise": "subtle",
+          "scanlines": "very light",
+          "vignette": "soft"
+        },
+        "palette": {
+          "primary": "#0F1956",
+          "accent": "#ED4C14",
+          "cream": "#FAFAF8",
+          "hud_cyan": "#3DE7FF",
+          "hud_lime": "#B6FF4A",
+          "danger": "#FF4D4D",
+          "warning": "#FFB020"
+        },
+        "typography": {
+          "ui": "Manrope",
+          "display": "Playfair Display",
+          "mono": "JetBrains Mono"
+        }
+      }
+    },
+
+    "clients": [
+      {
+        "id": "client_cylndr",
+        "name": "Cylndr",
+        "agentic_features_workflow": "Ingest → Brand DNA embed → Drift lint (BDE) → Generate (Temp-gen) → HITL approve → Deliver (C2PA + export) → Insight loop",
+        "dna": "Brand DNA: CYLNDR / Makers’ Studio (navy + orange), retro-institutional typography, bronco mark; governance: strict drift thresholds + overlay rules",
+        "runs": 128,
+        "status": "active",
+        "hitl_review_needed": true,
+        "configuration": {
+          "llm": "OpenAI GPT-5 (reasoning)",
+          "agent_tool": "Atlas Browser Agent",
+          "creative_tool": "Google Veo 3.1"
+        },
+        "switch_options": {
+          "llm": ["OpenAI GPT-5 (reasoning)", "Anthropic Claude Opus 4.5", "Google Gemini 2.0 Pro"],
+          "agent_tool": ["Atlas Browser Agent", "Playwright Runner", "Supabase Queue Worker"],
+          "creative_tool": ["Google Veo 3.1", "OpenAI Sora 2", "Runway Gen-3"]
+        },
+        "links": {
+          "project_home": "mock://projects/cylndr/overview",
+          "brand_dna": "mock://projects/cylndr/dna",
+          "latest_run": "mock://projects/cylndr/runs/128",
+          "assets": [
+            "mock://assets/cylndr/brand-kit.zip",
+            "mock://assets/cylndr/overlays/bronco-pack.svg"
+          ]
+        }
+      },
+      {
+        "id": "client_jenni_kayne",
+        "name": "Jenni Kayne",
+        "agentic_features_workflow": "Ingest → Style/voice calibration → Product/collection tagging → Generate variants → QA gates → Publish-ready exports",
+        "dna": "Brand DNA: calm minimal luxury, warm neutrals, tactile materials; governance: avoid loud saturation, keep negative space",
+        "runs": 42,
+        "status": "pending",
+        "hitl_review_needed": false,
+        "configuration": {
+          "llm": "Anthropic Claude Opus 4.5",
+          "agent_tool": "Supabase Queue Worker",
+          "creative_tool": "OpenAI Sora 2"
+        },
+        "switch_options": {
+          "llm": ["Anthropic Claude Opus 4.5", "OpenAI GPT-5 (reasoning)", "Google Gemini 2.0 Pro"],
+          "agent_tool": ["Supabase Queue Worker", "Atlas Browser Agent", "Zapier MCP Connector"],
+          "creative_tool": ["OpenAI Sora 2", "Google Veo 3.1", "Midjourney V7"]
+        },
+        "links": {
+          "project_home": "mock://projects/jenni-kayne/overview",
+          "brand_dna": "mock://projects/jenni-kayne/dna",
+          "latest_run": "mock://projects/jenni-kayne/runs/42",
+          "assets": [
+            "mock://assets/jenni-kayne/lookbook-refs.pdf",
+            "mock://assets/jenni-kayne/typography-guidelines.md"
+          ]
+        }
+      },
+      {
+        "id": "client_lilydale",
+        "name": "Lilydale",
+        "agentic_features_workflow": "Intake → Rapid DNA draft → Prompt scaffolds → Batch generation → HITL review → Delivery + performance tags",
+        "dna": "Brand DNA: (empty state) not yet ingested",
+        "runs": 0,
+        "status": "completed",
+        "hitl_review_needed": true,
+        "configuration": {
+          "llm": "Google Gemini 2.0 Pro",
+          "agent_tool": "Playwright Runner",
+          "creative_tool": "Runway Gen-3"
+        },
+        "switch_options": {
+          "llm": ["Google Gemini 2.0 Pro", "OpenAI GPT-5 (reasoning)", "Anthropic Claude Opus 4.5"],
+          "agent_tool": ["Playwright Runner", "Atlas Browser Agent", "Supabase Queue Worker"],
+          "creative_tool": ["Runway Gen-3", "Google Veo 3.1", "OpenAI Sora 2"]
+        },
+        "links": {
+          "project_home": "mock://projects/lilydale/overview",
+          "brand_dna": null,
+          "latest_run": null,
+          "assets": []
+        }
+      }
+    ],
+
+    "intake": {
+      "new_client_name": "",
+      "initial_configuration": {
+        "llm": "OpenAI GPT-5 (reasoning)",
+        "agent_tool": "Atlas Browser Agent",
+        "creative_tool": "Google Veo 3.1"
+      },
+      "switch_options": {
+        "llm": [
+          "OpenAI GPT-5 (reasoning)",
+          "Anthropic Claude Opus 4.5",
+          "Google Gemini 2.0 Pro",
+          "OpenAI GPT-4.1 (fallback)"
+        ],
+        "agent_tool": [
+          "Atlas Browser Agent",
+          "Playwright Runner",
+          "Supabase Queue Worker",
+          "Zapier MCP Connector"
+        ],
+        "creative_tool": [
+          "Google Veo 3.1",
+          "OpenAI Sora 2",
+          "Runway Gen-3",
+          "Midjourney V7"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "step_name",
+            "label": "Client name",
+            "type": "text_input",
+            "required": true
+          },
+          {
+            "id": "step_config",
+            "label": "Initial agent configuration",
+            "type": "triple_selector",
+            "required": true,
+            "fields": ["llm", "agent_tool", "creative_tool"],
+            "swap_behavior": "Each selector is swappable per client; changes persist per-project and are audit-logged."
+          },
+          {
+            "id": "step_assets",
+            "label": "Seed assets",
+            "type": "file_drop + url_import",
+            "required": false,
+            "accepted": ["pdf", "png", "jpg", "mp4", "zip", "md"],
+            "mock_examples": [
+              "mock://intake/examples/brand-guidelines.pdf",
+              "mock://intake/examples/logo-pack.zip",
+              "mock://intake/examples/hero-video.mp4"
+            ]
+          },
+          {
+            "id": "step_governance",
+            "label": "Governance preset",
+            "type": "preset_picker",
+            "required": true,
+            "options": [
+              "Strict (enterprise)",
+              "Standard (brand teams)",
+              "Fast (exploration)"
+            ]
+          },
+          {
+            "id": "step_confirm",
+            "label": "Create project",
+            "type": "primary_action",
+            "required": true
+          }
+        ],
+        "agentic_onboarding": {
+          "enabled": true,
+          "behavior": "Upon creation, an onboarding agent runs: creates namespaces, sets thresholds, drafts DNA, and produces a first-run checklist for HITL approval.",
+          "outputs": [
+            "mock://onboarding/output/dna-draft.md",
+            "mock://onboarding/output/gov-rules.json",
+            "mock://onboarding/output/first-run-plan.md"
+          ]
+        }
+      }
+    },
+
+    "ui_options": {
+      "realistic_theme": {
+        "hud_style": "Ironman-like transparent panels, rounded rectangles, thin strokes, neon edge highlights, micro-grid overlays, radial dials",
+        "panel_material": "glassmorphism (blur + faint noise)",
+        "component_library": "shadcn/ui-like controls + custom HUD adornments",
+        "mock_asset_refs": {
+          "hud_background_overlay": "mock://assets/hud/transparent-grid-overlay.png",
+          "arc_elements": "mock://assets/hud/arc-segments.svg",
+          "status_glyphs": "mock://assets/hud/status-glyphs.svg",
+          "pancake_icon": "mock://assets/icons/pancake-bot.svg"
+        },
+        "behavior_notes": [
+          "Client cards float in a vertical stack; selecting a client expands its panel to show config + latest runs.",
+          "A right-side mini-timeline shows run events with timestamps and HITL checkpoints.",
+          "A top-left 'Pancake Bot' opens chat; bot can be context-scoped to selected client."
+        ]
+      }
+    },
+
+    "data_model": {
+      "supports_overflow": true,
+      "overflow_strategy": {
+        "type": "virtualized_list",
+        "max_visible": 3,
+        "navigation": "scroll + search + status filters",
+        "grouping": "by status then most recent activity"
+      },
+      "empty_states": {
+        "no_projects": {
+          "clients": [],
+          "message": "No client projects yet. Use Intake to create your first project.",
+          "cta": "Open Intake"
+        },
+        "missing_fields": {
+          "behavior": "Render placeholders (null-safe). If dna or runs missing, show 'Not available' and a 'Retry fetch' action.",
+          "placeholders": {
+            "agentic_features_workflow": "(no workflow defined)",
+            "dna": "(no DNA ingested)",
+            "runs": "-",
+            "status": "pending",
+            "hitl_review_needed": false
+          }
+        }
+      },
+      "error_state_schema": {
+        "error": {
+          "code": "string",
+          "message": "string",
+          "details": {
+            "source": "config|data|network|permissions",
+            "client_id": "string or null",
+            "retryable": true,
+            "timestamp": "ISO-8601"
+          }
+        }
+      }
+    },
+
+    "error_handling": {
+      "missing_fields": "If any client fields are null/missing, the UI must remain stable: show placeholder copy, visually mark the field as 'unknown', and provide a per-field retry action. Do not block navigation.",
+      "project_overflow": "If >3 projects exist, show only 3 as 'pinned' and virtualize the rest in a scrollable list. Add search, status filter chips, and an 'All Projects' drawer.",
+      "config_error": {
+        "error": {
+          "code": "CONFIG_FETCH_FAILED",
+          "message": "Could not load agent configuration for selected client.",
+          "details": {
+            "source": "data",
+            "client_id": "client_cylndr",
+            "retryable": true,
+            "timestamp": "2026-01-15T00:00:00-08:00"
+          }
+        },
+        "ui_behavior": "Show a compact error toast + inline error state in the client panel with a 'Retry' button and a 'View logs' link. Preserve last-known-good config if available."
+      }
+    }
+  }
+}

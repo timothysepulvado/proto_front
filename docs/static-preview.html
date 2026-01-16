@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BrandStudios OS HUD</title>
+    <style>
+      :root {
+        --primary: #0F1956;
+        --accent: #ED4C14;
+        --cream: #FAFAF8;
+        --hud-cyan: #3DE7FF;
+        --hud-lime: #B6FF4A;
+        --danger: #FF4D4D;
+        --warning: #FFB020;
+        --glass: rgba(255, 255, 255, 0.08);
+        --glass-strong: rgba(255, 255, 255, 0.16);
+        --ink: rgba(6, 10, 26, 0.95);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Manrope", "Segoe UI", "Helvetica Neue", sans-serif;
+        background: #05070f;
+        color: var(--cream);
+      }
+
+      .hud {
+        min-height: 100vh;
+        position: relative;
+        overflow: hidden;
+        background:
+          radial-gradient(1200px 600px at 10% 0%, rgba(61, 231, 255, 0.16), transparent 60%),
+          radial-gradient(900px 540px at 88% 8%, rgba(182, 255, 74, 0.12), transparent 55%),
+          radial-gradient(1000px 700px at 60% 95%, rgba(237, 76, 20, 0.16), transparent 60%),
+          linear-gradient(180deg, rgba(15, 25, 86, 0.42) 0%, rgba(5, 7, 15, 0.9) 60%, rgba(0, 0, 0, 0.95) 100%);
+      }
+
+      .hud::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          repeating-linear-gradient(180deg, rgba(255,255,255,0.08) 0px, rgba(255,255,255,0.08) 1px, rgba(0,0,0,0) 3px, rgba(0,0,0,0) 7px),
+          linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+        background-size: auto, 26px 26px, 26px 26px;
+        opacity: 0.16;
+        pointer-events: none;
+      }
+
+      .hud::after {
+        content: "";
+        position: absolute;
+        inset: -20% 0 0 0;
+        background: linear-gradient(90deg, transparent 0%, rgba(61, 231, 255, 0.5) 45%, rgba(182, 255, 74, 0.45) 55%, transparent 100%);
+        opacity: 0.08;
+        transform: skewX(-18deg);
+        animation: scanSweep 7s linear infinite;
+        pointer-events: none;
+      }
+
+      @keyframes scanSweep {
+        0% { transform: translateX(-30%) skewX(-18deg); }
+        100% { transform: translateX(30%) skewX(-18deg); }
+      }
+
+      .top-rail {
+        position: relative;
+        z-index: 2;
+        padding: 24px 32px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .top-rail .left {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+      }
+
+      .top-rail .dot {
+        height: 10px;
+        width: 10px;
+        border-radius: 999px;
+        background: var(--hud-cyan);
+        box-shadow: 0 0 16px var(--hud-cyan);
+      }
+
+      .top-rail .meta {
+        font-size: 12px;
+        color: rgba(250, 250, 248, 0.7);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .top-rail .pill {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.7);
+      }
+
+      .layout {
+        position: relative;
+        z-index: 2;
+        display: grid;
+        grid-template-columns: 360px minmax(0, 1fr) 320px;
+        gap: 18px;
+        padding: 12px 32px 36px;
+      }
+
+      .panel {
+        border-radius: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(10, 16, 35, 0.5);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04), 0 20px 60px rgba(0,0,0,0.45);
+        backdrop-filter: blur(18px) saturate(140%);
+        padding: 18px;
+      }
+
+      .panel h3 {
+        margin: 0 0 10px 0;
+        font-weight: 600;
+        font-size: 14px;
+        color: rgba(250, 250, 248, 0.9);
+      }
+
+      .subtle {
+        color: rgba(250, 250, 248, 0.6);
+        font-size: 11px;
+      }
+
+      .clients {
+        display: grid;
+        gap: 12px;
+      }
+
+      .client-card {
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.04);
+        transition: transform 0.3s ease, border 0.3s ease, box-shadow 0.3s ease;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .client-card:hover {
+        transform: translateY(-2px);
+        border-color: rgba(255,255,255,0.28);
+      }
+
+      .client-card.active {
+        border-color: rgba(61,231,255,0.7);
+        box-shadow: 0 0 24px rgba(61,231,255,0.2);
+      }
+
+      .client-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        gap: 12px;
+      }
+
+      .status-chip {
+        font-size: 10px;
+        letter-spacing: 0.03em;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.18);
+        color: rgba(255,255,255,0.75);
+        text-transform: uppercase;
+      }
+
+      .metric-row {
+        display: flex;
+        gap: 10px;
+        font-size: 11px;
+        color: rgba(255,255,255,0.7);
+        flex-wrap: wrap;
+      }
+
+      .details {
+        display: grid;
+        gap: 12px;
+      }
+
+      .detail-block {
+        border-radius: 16px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(255,255,255,0.03);
+        padding: 12px;
+      }
+
+      .detail-block h4 {
+        margin: 0 0 8px 0;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: rgba(255,255,255,0.6);
+      }
+
+      .detail-block p {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.5;
+        color: rgba(255,255,255,0.78);
+      }
+
+      .pill-grid {
+        display: grid;
+        gap: 8px;
+      }
+
+      .pill-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .pill-item {
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.14);
+        background: rgba(255,255,255,0.06);
+        font-size: 11px;
+        color: rgba(255,255,255,0.75);
+      }
+
+      .sidebar {
+        display: grid;
+        gap: 12px;
+      }
+
+      .timeline {
+        display: grid;
+        gap: 10px;
+      }
+
+      .timeline-item {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        font-size: 11px;
+        color: rgba(255,255,255,0.7);
+      }
+
+      .timeline-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--hud-cyan);
+        box-shadow: 0 0 8px var(--hud-cyan);
+      }
+
+      .pancake {
+        width: 46px;
+        height: 46px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255,255,255,0.2);
+        background: rgba(255,255,255,0.08);
+        box-shadow: 0 0 16px rgba(61,231,255,0.35);
+      }
+
+      .pancake svg {
+        width: 26px;
+        height: 26px;
+      }
+
+      .hud-label {
+        font-family: "JetBrains Mono", "SF Mono", monospace;
+        font-size: 11px;
+        color: rgba(255,255,255,0.55);
+        letter-spacing: 0.05em;
+      }
+
+      .cta {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.2);
+        background: rgba(237, 76, 20, 0.18);
+        color: rgba(255,255,255,0.9);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      .grid-note {
+        font-size: 10px;
+        color: rgba(255,255,255,0.45);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+      }
+
+      .divider {
+        height: 1px;
+        background: rgba(255,255,255,0.08);
+        margin: 10px 0;
+      }
+
+      @media (max-width: 1100px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="hud">
+      <div class="top-rail">
+        <div class="left">
+          <div class="dot"></div>
+          <div>
+            <div class="meta" id="product"></div>
+            <div class="subtle" id="surface"></div>
+          </div>
+          <div class="subtle" id="version"></div>
+        </div>
+        <div class="pill">
+          <div class="pancake" aria-label="Pancake Bot">
+            <svg viewBox="0 0 64 64" fill="none">
+              <defs>
+                <linearGradient id="panc" x1="0" x2="1">
+                  <stop offset="0" stop-color="#FAFAF8" stop-opacity="0.95" />
+                  <stop offset="1" stop-color="#EDC9A1" stop-opacity="0.9" />
+                </linearGradient>
+              </defs>
+              <rect x="12" y="16" width="40" height="10" rx="5" fill="url(#panc)" />
+              <rect x="10" y="28" width="44" height="10" rx="5" fill="url(#panc)" opacity="0.92" />
+              <rect x="8" y="40" width="48" height="10" rx="5" fill="url(#panc)" opacity="0.85" />
+              <circle cx="48" cy="14" r="4" fill="#ED4C14" />
+              <path d="M48 14 C44 18, 44 24, 42 28" stroke="#ED4C14" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </div>
+          <div>
+            <div class="hud-label">Pancake Bot</div>
+            <div class="subtle" id="bot-state">idle · soft glow</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="layout">
+        <section class="panel" id="clients-panel">
+          <h3>Client Stack</h3>
+          <div class="subtle" id="client-summary"></div>
+          <div class="divider"></div>
+          <div class="clients" id="clients"></div>
+        </section>
+
+        <section class="panel" id="details-panel">
+          <h3>Client Control</h3>
+          <div class="details" id="details"></div>
+        </section>
+
+        <section class="panel" id="side-panel">
+          <h3>Intake + System</h3>
+          <div class="sidebar" id="sidebar"></div>
+        </section>
+      </div>
+    </div>
+
+    <script id="hud-data" type="application/json">
+{
+  "hud": {
+    "meta": {
+      "version": "0.1.0-prototype",
+      "product": "brandstudios.ai",
+      "surface": "OS HUD",
+      "layout": {
+        "mode": "transparent_hud",
+        "inspiration": "Ironman suit interface (semi-transparent glass, floating panels, micro-animations)",
+        "density": "high",
+        "motion": {
+          "enabled": true,
+          "style": "subtle parallax + scanline sweep + panel float",
+          "reduced_motion_supported": true
+        }
+      },
+      "iconography": {
+        "chatbot_icon": {
+          "id": "pancake-bot",
+          "label": "Pancake Chatbot",
+          "style": "uniquely-styled pancake stack with cyber HUD ring + tiny 'syrup' data-stream",
+          "render": {
+            "type": "svg",
+            "asset_ref": "mock://assets/icons/pancake-bot.svg",
+            "fallback": "Use circular badge with stacked pancake glyph and small mic + spark icons"
+          },
+          "states": {
+            "idle": "soft glow",
+            "listening": "pulse ring",
+            "thinking": "rotating arc segments",
+            "error": "red corner notch + warning glyph"
+          }
+        }
+      },
+      "theme": {
+        "background": {
+          "type": "transparent",
+          "backdrop_filter": "blur(14px) saturate(140%)",
+          "noise": "subtle",
+          "scanlines": "very light",
+          "vignette": "soft"
+        },
+        "palette": {
+          "primary": "#0F1956",
+          "accent": "#ED4C14",
+          "cream": "#FAFAF8",
+          "hud_cyan": "#3DE7FF",
+          "hud_lime": "#B6FF4A",
+          "danger": "#FF4D4D",
+          "warning": "#FFB020"
+        },
+        "typography": {
+          "ui": "Manrope",
+          "display": "Playfair Display",
+          "mono": "JetBrains Mono"
+        }
+      }
+    },
+    "clients": [
+      {
+        "id": "client_cylndr",
+        "name": "Cylndr",
+        "agentic_features_workflow": "Ingest → Brand DNA embed → Drift lint (BDE) → Generate (Temp-gen) → HITL approve → Deliver (C2PA + export) → Insight loop",
+        "dna": "Brand DNA: CYLNDR / Makers’ Studio (navy + orange), retro-institutional typography, bronco mark; governance: strict drift thresholds + overlay rules",
+        "runs": 128,
+        "status": "active",
+        "hitl_review_needed": true,
+        "configuration": {
+          "llm": "OpenAI GPT-5 (reasoning)",
+          "agent_tool": "Atlas Browser Agent",
+          "creative_tool": "Google Veo 3.1"
+        },
+        "switch_options": {
+          "llm": [
+            "OpenAI GPT-5 (reasoning)",
+            "Anthropic Claude Opus 4.5",
+            "Google Gemini 2.0 Pro"
+          ],
+          "agent_tool": [
+            "Atlas Browser Agent",
+            "Playwright Runner",
+            "Supabase Queue Worker"
+          ],
+          "creative_tool": [
+            "Google Veo 3.1",
+            "OpenAI Sora 2",
+            "Runway Gen-3"
+          ]
+        },
+        "links": {
+          "project_home": "mock://projects/cylndr/overview",
+          "brand_dna": "mock://projects/cylndr/dna",
+          "latest_run": "mock://projects/cylndr/runs/128",
+          "assets": [
+            "mock://assets/cylndr/brand-kit.zip",
+            "mock://assets/cylndr/overlays/bronco-pack.svg"
+          ]
+        }
+      },
+      {
+        "id": "client_jenni_kayne",
+        "name": "Jenni Kayne",
+        "agentic_features_workflow": "Ingest → Style/voice calibration → Product/collection tagging → Generate variants → QA gates → Publish-ready exports",
+        "dna": "Brand DNA: calm minimal luxury, warm neutrals, tactile materials; governance: avoid loud saturation, keep negative space",
+        "runs": 42,
+        "status": "pending",
+        "hitl_review_needed": false,
+        "configuration": {
+          "llm": "Anthropic Claude Opus 4.5",
+          "agent_tool": "Supabase Queue Worker",
+          "creative_tool": "OpenAI Sora 2"
+        },
+        "switch_options": {
+          "llm": [
+            "Anthropic Claude Opus 4.5",
+            "OpenAI GPT-5 (reasoning)",
+            "Google Gemini 2.0 Pro"
+          ],
+          "agent_tool": [
+            "Supabase Queue Worker",
+            "Atlas Browser Agent",
+            "Zapier MCP Connector"
+          ],
+          "creative_tool": [
+            "OpenAI Sora 2",
+            "Google Veo 3.1",
+            "Midjourney V7"
+          ]
+        },
+        "links": {
+          "project_home": "mock://projects/jenni-kayne/overview",
+          "brand_dna": "mock://projects/jenni-kayne/dna",
+          "latest_run": "mock://projects/jenni-kayne/runs/42",
+          "assets": [
+            "mock://assets/jenni-kayne/lookbook-refs.pdf",
+            "mock://assets/jenni-kayne/typography-guidelines.md"
+          ]
+        }
+      },
+      {
+        "id": "client_lilydale",
+        "name": "Lilydale",
+        "agentic_features_workflow": "Intake → Rapid DNA draft → Prompt scaffolds → Batch generation → HITL review → Delivery + performance tags",
+        "dna": "Brand DNA: (empty state) not yet ingested",
+        "runs": 0,
+        "status": "completed",
+        "hitl_review_needed": true,
+        "configuration": {
+          "llm": "Google Gemini 2.0 Pro",
+          "agent_tool": "Playwright Runner",
+          "creative_tool": "Runway Gen-3"
+        },
+        "switch_options": {
+          "llm": [
+            "Google Gemini 2.0 Pro",
+            "OpenAI GPT-5 (reasoning)",
+            "Anthropic Claude Opus 4.5"
+          ],
+          "agent_tool": [
+            "Playwright Runner",
+            "Atlas Browser Agent",
+            "Supabase Queue Worker"
+          ],
+          "creative_tool": [
+            "Runway Gen-3",
+            "Google Veo 3.1",
+            "OpenAI Sora 2"
+          ]
+        },
+        "links": {
+          "project_home": "mock://projects/lilydale/overview",
+          "brand_dna": null,
+          "latest_run": null,
+          "assets": []
+        }
+      }
+    ],
+    "intake": {
+      "new_client_name": "",
+      "initial_configuration": {
+        "llm": "OpenAI GPT-5 (reasoning)",
+        "agent_tool": "Atlas Browser Agent",
+        "creative_tool": "Google Veo 3.1"
+      },
+      "switch_options": {
+        "llm": [
+          "OpenAI GPT-5 (reasoning)",
+          "Anthropic Claude Opus 4.5",
+          "Google Gemini 2.0 Pro",
+          "OpenAI GPT-4.1 (fallback)"
+        ],
+        "agent_tool": [
+          "Atlas Browser Agent",
+          "Playwright Runner",
+          "Supabase Queue Worker",
+          "Zapier MCP Connector"
+        ],
+        "creative_tool": [
+          "Google Veo 3.1",
+          "OpenAI Sora 2",
+          "Runway Gen-3",
+          "Midjourney V7"
+        ]
+      },
+      "workflow": {
+        "steps": [
+          {
+            "id": "step_name",
+            "label": "Client name",
+            "type": "text_input",
+            "required": true
+          },
+          {
+            "id": "step_config",
+            "label": "Initial agent configuration",
+            "type": "triple_selector",
+            "required": true,
+            "fields": [
+              "llm",
+              "agent_tool",
+              "creative_tool"
+            ],
+            "swap_behavior": "Each selector is swappable per client; changes persist per-project and are audit-logged."
+          },
+          {
+            "id": "step_assets",
+            "label": "Seed assets",
+            "type": "file_drop + url_import",
+            "required": false,
+            "accepted": [
+              "pdf",
+              "png",
+              "jpg",
+              "mp4",
+              "zip",
+              "md"
+            ],
+            "mock_examples": [
+              "mock://intake/examples/brand-guidelines.pdf",
+              "mock://intake/examples/logo-pack.zip",
+              "mock://intake/examples/hero-video.mp4"
+            ]
+          },
+          {
+            "id": "step_governance",
+            "label": "Governance preset",
+            "type": "preset_picker",
+            "required": true,
+            "options": [
+              "Strict (enterprise)",
+              "Standard (brand teams)",
+              "Fast (exploration)"
+            ]
+          },
+          {
+            "id": "step_confirm",
+            "label": "Create project",
+            "type": "primary_action",
+            "required": true
+          }
+        ],
+        "agentic_onboarding": {
+          "enabled": true,
+          "behavior": "Upon creation, an onboarding agent runs: creates namespaces, sets thresholds, drafts DNA, and produces a first-run checklist for HITL approval.",
+          "outputs": [
+            "mock://onboarding/output/dna-draft.md",
+            "mock://onboarding/output/gov-rules.json",
+            "mock://onboarding/output/first-run-plan.md"
+          ]
+        }
+      }
+    },
+    "ui_options": {
+      "realistic_theme": {
+        "hud_style": "Ironman-like transparent panels, rounded rectangles, thin strokes, neon edge highlights, micro-grid overlays, radial dials",
+        "panel_material": "glassmorphism (blur + faint noise)",
+        "component_library": "shadcn/ui-like controls + custom HUD adornments",
+        "mock_asset_refs": {
+          "hud_background_overlay": "mock://assets/hud/transparent-grid-overlay.png",
+          "arc_elements": "mock://assets/hud/arc-segments.svg",
+          "status_glyphs": "mock://assets/hud/status-glyphs.svg",
+          "pancake_icon": "mock://assets/icons/pancake-bot.svg"
+        },
+        "behavior_notes": [
+          "Client cards float in a vertical stack; selecting a client expands its panel to show config + latest runs.",
+          "A right-side mini-timeline shows run events with timestamps and HITL checkpoints.",
+          "A top-left 'Pancake Bot' opens chat; bot can be context-scoped to selected client."
+        ]
+      }
+    },
+    "data_model": {
+      "supports_overflow": true,
+      "overflow_strategy": {
+        "type": "virtualized_list",
+        "max_visible": 3,
+        "navigation": "scroll + search + status filters",
+        "grouping": "by status then most recent activity"
+      },
+      "empty_states": {
+        "no_projects": {
+          "clients": [],
+          "message": "No client projects yet. Use Intake to create your first project.",
+          "cta": "Open Intake"
+        },
+        "missing_fields": {
+          "behavior": "Render placeholders (null-safe). If dna or runs missing, show 'Not available' and a 'Retry fetch' action.",
+          "placeholders": {
+            "agentic_features_workflow": "(no workflow defined)",
+            "dna": "(no DNA ingested)",
+            "runs": "-",
+            "status": "pending",
+            "hitl_review_needed": false
+          }
+        }
+      },
+      "error_state_schema": {
+        "error": {
+          "code": "string",
+          "message": "string",
+          "details": {
+            "source": "config|data|network|permissions",
+            "client_id": "string or null",
+            "retryable": true,
+            "timestamp": "ISO-8601"
+          }
+        }
+      }
+    },
+    "error_handling": {
+      "missing_fields": "If any client fields are null/missing, the UI must remain stable: show placeholder copy, visually mark the field as 'unknown', and provide a per-field retry action. Do not block navigation.",
+      "project_overflow": "If >3 projects exist, show only 3 as 'pinned' and virtualize the rest in a scrollable list. Add search, status filter chips, and an 'All Projects' drawer.",
+      "config_error": {
+        "error": {
+          "code": "CONFIG_FETCH_FAILED",
+          "message": "Could not load agent configuration for selected client.",
+          "details": {
+            "source": "data",
+            "client_id": "client_cylndr",
+            "retryable": true,
+            "timestamp": "2026-01-15T00:00:00-08:00"
+          }
+        },
+        "ui_behavior": "Show a compact error toast + inline error state in the client panel with a 'Retry' button and a 'View logs' link. Preserve last-known-good config if available."
+      }
+    }
+  }
+}
+    </script>
+    <script>
+      const hud = JSON.parse(document.getElementById("hud-data").textContent);
+      const clients = hud.clients || [];
+      const placeholders = hud.data_model?.empty_states?.missing_fields?.placeholders || {};
+      const overflow = hud.data_model?.overflow_strategy?.max_visible ?? 3;
+
+      const product = document.getElementById("product");
+      const surface = document.getElementById("surface");
+      const version = document.getElementById("version");
+
+      product.textContent = hud.meta.product.toUpperCase();
+      surface.textContent = hud.meta.surface;
+      version.textContent = `v${hud.meta.version}`;
+
+      const statusColors = {
+        active: "var(--hud-cyan)",
+        pending: "var(--warning)",
+        completed: "var(--hud-lime)",
+      };
+
+      let selectedId = clients[0]?.id || null;
+
+      const safe = (value, key) => {
+        if (value === null || value === undefined || value === "") {
+          return placeholders[key] ?? "Not available";
+        }
+        return value;
+      };
+
+      function renderClients() {
+        const list = document.getElementById("clients");
+        list.innerHTML = "";
+        if (!clients.length) {
+          const empty = hud.data_model?.empty_states?.no_projects;
+          const card = document.createElement("div");
+          card.className = "client-card";
+          card.innerHTML = `<div class="client-title"><strong>${empty?.message || "No projects"}</strong></div><div class="subtle">${empty?.cta || "Open intake"}</div>`;
+          list.appendChild(card);
+          return;
+        }
+
+        clients.forEach((client) => {
+          const card = document.createElement("button");
+          card.type = "button";
+          card.className = `client-card ${client.id === selectedId ? "active" : ""}`;
+          card.innerHTML = `
+            <div class="client-title">
+              <div>
+                <div style="font-size: 13px; font-weight: 600;">${client.name}</div>
+                <div class="subtle">${safe(client.dna, "dna")}</div>
+              </div>
+              <div class="status-chip" style="border-color:${statusColors[client.status] || "var(--accent)"}">${client.status}</div>
+            </div>
+            <div class="metric-row">
+              <div>Runs: ${safe(client.runs, "runs")}</div>
+              <div>HITL: ${client.hitl_review_needed ? "Required" : "Optional"}</div>
+            </div>
+          `;
+          card.addEventListener("click", () => {
+            selectedId = client.id;
+            renderClients();
+            renderDetails();
+          });
+          list.appendChild(card);
+        });
+
+        const summary = document.getElementById("client-summary");
+        summary.textContent = `Pinned: ${Math.min(clients.length, overflow)} · Overflow: ${clients.length > overflow ? clients.length - overflow : 0}`;
+      }
+
+      function renderDetails() {
+        const panel = document.getElementById("details");
+        panel.innerHTML = "";
+        const client = clients.find((c) => c.id === selectedId) || clients[0];
+        if (!client) return;
+
+        const blocks = [
+          {
+            title: "Agentic workflow",
+            content: safe(client.agentic_features_workflow, "agentic_features_workflow"),
+          },
+          {
+            title: "Brand DNA",
+            content: safe(client.dna, "dna"),
+          },
+        ];
+
+        blocks.forEach((block) => {
+          const el = document.createElement("div");
+          el.className = "detail-block";
+          el.innerHTML = `<h4>${block.title}</h4><p>${block.content}</p>`;
+          panel.appendChild(el);
+        });
+
+        const config = document.createElement("div");
+        config.className = "detail-block";
+        config.innerHTML = `
+          <h4>Configuration</h4>
+          <div class="pill-grid">
+            <div class="pill-row"><span class="pill-item">LLM: ${client.configuration?.llm || "-"}</span></div>
+            <div class="pill-row"><span class="pill-item">Agent: ${client.configuration?.agent_tool || "-"}</span></div>
+            <div class="pill-row"><span class="pill-item">Creative: ${client.configuration?.creative_tool || "-"}</span></div>
+          </div>
+        `;
+        panel.appendChild(config);
+
+        const switches = document.createElement("div");
+        switches.className = "detail-block";
+        switches.innerHTML = `
+          <h4>Swap options</h4>
+          <div class="pill-grid">
+            <div class="pill-row">${(client.switch_options?.llm || []).map((llm) => `<span class="pill-item">${llm}</span>`).join("")}</div>
+            <div class="pill-row">${(client.switch_options?.agent_tool || []).map((tool) => `<span class="pill-item">${tool}</span>`).join("")}</div>
+            <div class="pill-row">${(client.switch_options?.creative_tool || []).map((tool) => `<span class="pill-item">${tool}</span>`).join("")}</div>
+          </div>
+        `;
+        panel.appendChild(switches);
+      }
+
+      function renderSidebar() {
+        const sidebar = document.getElementById("sidebar");
+        sidebar.innerHTML = "";
+
+        const intake = document.createElement("div");
+        intake.className = "detail-block";
+        intake.innerHTML = `
+          <h4>Intake workflow</h4>
+          <div class="pill-grid">
+            ${(hud.intake?.workflow?.steps || []).map((step) => `
+              <div class="timeline-item">
+                <span class="timeline-dot" style="background: var(--accent); box-shadow: 0 0 8px rgba(237,76,20,0.7);"></span>
+                <div>${step.label} <span class="subtle">· ${step.type}</span></div>
+              </div>
+            `).join("")}
+          </div>
+          <div class="divider"></div>
+          <div class="cta">${hud.data_model?.empty_states?.no_projects?.cta || "Open Intake"}</div>
+        `;
+        sidebar.appendChild(intake);
+
+        const theme = document.createElement("div");
+        theme.className = "detail-block";
+        theme.innerHTML = `
+          <h4>HUD style</h4>
+          <p>${hud.ui_options?.realistic_theme?.hud_style || "Ironman-inspired glass panels"}</p>
+          <div class="divider"></div>
+          <div class="subtle">${hud.ui_options?.realistic_theme?.panel_material || "Glassmorphism"}</div>
+        `;
+        sidebar.appendChild(theme);
+
+        const errors = document.createElement("div");
+        errors.className = "detail-block";
+        errors.innerHTML = `
+          <h4>Error handling</h4>
+          <p>${hud.error_handling?.missing_fields || ""}</p>
+          <div class="divider"></div>
+          <p>${hud.error_handling?.project_overflow || ""}</p>
+        `;
+        sidebar.appendChild(errors);
+      }
+
+      renderClients();
+      renderDetails();
+      renderSidebar();
+    </script>
+  </body>
+</html>

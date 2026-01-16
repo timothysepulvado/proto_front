@@ -1,0 +1,629 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  Dna,
+  Layers,
+  PlusCircle,
+  Radar,
+  Settings2,
+  ShieldCheck,
+  Terminal,
+  Workflow,
+  X,
+  Zap,
+} from "lucide-react";
+import hudData from "../hud.json";
+import type { HudClient, HudRoot } from "./types/hud";
+import desktopBg from "./assets/desktop-bg.png";
+import noiseTexture from "./assets/noise.svg";
+
+type Orientation = "horizontal" | "vertical";
+
+type LogEntry = {
+  time: string;
+  msg: string;
+  status: "OK" | "WAIT" | "BUSY";
+};
+
+type DerivedClient = HudClient & {
+  alert: boolean;
+  dnaCode: string;
+  health: number;
+  runsValue: number;
+  runsLabel: string;
+  typeLabel: string;
+  statusLabel: string;
+};
+
+const hudRoot = hudData as HudRoot;
+const hud = hudRoot.hud;
+const placeholders = hud.data_model?.empty_states?.missing_fields?.placeholders ?? {};
+
+const statusLabels: Record<string, string> = {
+  active: "ACTIVE",
+  pending: "PENDING",
+  completed: "COMPLETED",
+};
+
+const typeByName: Record<string, string> = {
+  Cylndr: "CORE",
+  "Jenni Kayne": "RETAIL",
+  Lilydale: "AGRI",
+};
+
+const seedLogs: LogEntry[] = [
+  { time: "12:04:22", msg: "NEURAL_LINK_ESTABLISHED", status: "OK" },
+  { time: "12:04:23", msg: "SYNCING_DNA_SEQUENCES", status: "WAIT" },
+  { time: "12:04:25", msg: "AGENT_CLUSTER_ONLINE", status: "OK" },
+];
+
+const logActions = [
+  "DNA_RECOGNITION",
+  "LLM_COMPUTE_NODE_01",
+  "SORA_RENDER_QUEUE",
+  "VEO_GEN_SYNC",
+  "DRIFT_LINT_CHECK",
+  "C2PA_EXPORT_PASS",
+];
+
+const OverlayEffects = () => (
+  <div className="fixed inset-0 pointer-events-none z-[500] overflow-hidden">
+    <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.1)_50%),linear-gradient(90deg,rgba(255,0,0,0.02),rgba(0,255,0,0.01),rgba(0,0,255,0.02))] bg-[length:100%_4px,3px_100%] z-[501]" />
+    <div
+      className="absolute inset-0 opacity-[0.03] mix-blend-overlay z-[502]"
+      style={{ backgroundImage: `url(${noiseTexture})` }}
+    />
+    <div className="absolute inset-0 shadow-[inset_0_0_150px_rgba(0,0,0,0.5)] z-[503]" />
+  </div>
+);
+
+const TickMarks = ({ count = 40, orientation = "horizontal" }: { count?: number; orientation?: Orientation }) => (
+  <div
+    className={`flex justify-between absolute ${
+      orientation === "horizontal"
+        ? "inset-x-0 top-0 h-2"
+        : "inset-y-0 left-0 w-2 flex-col"
+    }`}
+  >
+    {Array.from({ length: count }).map((_, i) => (
+      <div
+        key={i}
+        className={`${
+          orientation === "horizontal" ? "w-px" : "h-px"
+        } bg-cyan-400/30 ${
+          i % 5 === 0
+            ? orientation === "horizontal"
+              ? "h-2"
+              : "w-2"
+            : orientation === "horizontal"
+              ? "h-1"
+              : "w-1"
+        }`}
+      />
+    ))}
+  </div>
+);
+
+const PancakeCore = ({ active, isDragging }: { active: boolean; isDragging: boolean }) => (
+  <div className="relative w-24 h-24 flex items-center justify-center group pointer-events-none">
+    <div
+      className={`absolute inset-0 bg-cyan-500/20 blur-[40px] rounded-full transition-all duration-1000 ${
+        active ? "opacity-100 scale-150 animate-pulse" : "opacity-40 scale-100 group-hover:opacity-80"
+      }`}
+    />
+
+    <div
+      className={`absolute inset-0 border border-cyan-500/20 rounded-full border-dashed transition-transform duration-[20s] linear ${
+        active ? "scale-110" : "scale-90"
+      }`}
+      style={{ animation: "spin 20s linear infinite" }}
+    />
+    <div
+      className={`absolute inset-4 border border-cyan-400/10 rounded-full transition-transform duration-[12s] linear ${
+        active ? "scale-125" : "scale-100"
+      }`}
+      style={{ animation: "spin-reverse 12s linear infinite" }}
+    />
+
+    <div
+      className={`relative flex flex-col items-center justify-center -space-y-2 transition-all duration-500 transform-gpu ${
+        isDragging ? "scale-90 rotate-12 opacity-80" : "scale-100 rotate-0"
+      } ${active ? "gap-1" : "gap-0"}`}
+    >
+      {[1, 2, 3, 4].map((i) => (
+        <div
+          key={i}
+          className={`h-2.5 rounded-full border transition-all duration-700 ease-out transform-gpu ${
+            i === 1 ? "w-10" : i === 2 ? "w-14" : i === 3 ? "w-16" : "w-12"
+          } ${
+            active
+              ? "bg-cyan-400 border-white shadow-[0_0_25px_rgba(34,211,238,0.8)]"
+              : "bg-gradient-to-r from-cyan-900 via-cyan-600 to-cyan-900 border-cyan-400/30 group-hover:border-cyan-400/60 shadow-lg"
+          }`}
+          style={{
+            transform: active ? `translateZ(${i * 10}px)` : "none",
+            opacity: active ? 1 : 1 - i * 0.15,
+          }}
+        />
+      ))}
+      <div
+        className={`absolute w-3 h-3 bg-white rounded-full blur-[2px] transition-opacity duration-500 ${
+          active ? "opacity-100 animate-pulse" : "opacity-0"
+        }`}
+      />
+    </div>
+  </div>
+);
+
+const CircularTelemetry = ({ percent, label, color = "cyan" }: { percent: number; label: string; color?: "cyan" | "amber" }) => {
+  const circumference = 2 * Math.PI * 48;
+  const dashOffset = circumference - (circumference * percent) / 100;
+
+  return (
+    <div className="relative w-28 h-28 flex items-center justify-center">
+      <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_8px_rgba(34,211,238,0.4)]">
+        <circle cx="56" cy="56" r="48" stroke="currentColor" strokeWidth="1" fill="transparent" className="text-white/5" />
+        <circle
+          cx="56"
+          cy="56"
+          r="48"
+          stroke="currentColor"
+          strokeWidth="3"
+          fill="transparent"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          className={`transition-all duration-1000 ${color === "cyan" ? "text-cyan-400" : "text-amber-500"}`}
+        />
+        {percent > 0 && (
+          <circle
+            cx="56"
+            cy="8"
+            r="3"
+            fill="white"
+            transform={`rotate(${(percent / 100) * 360}, 56, 56)`}
+            className="animate-pulse"
+          />
+        )}
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-sm font-mono font-bold text-white tracking-tighter">{percent}%</span>
+        <span className="text-[8px] uppercase tracking-widest text-cyan-500/50 font-black">{label}</span>
+      </div>
+    </div>
+  );
+};
+
+const formatDna = (value: string | null | undefined, fallback: string) => {
+  if (!value) {
+    return fallback;
+  }
+  const cleaned = value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return cleaned.length > 14 ? cleaned.slice(0, 14) : cleaned;
+};
+
+const parseRuns = (value: number | string | null | undefined, fallback: number | string | undefined) => {
+  const raw = value ?? fallback ?? 0;
+  const parsed = typeof raw === "number" ? raw : Number.parseInt(String(raw), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const formatRunsLabel = (value: number) => String(value).padStart(3, "0");
+
+const computeHealth = (status: string, runs: number, index: number) => {
+  const base = status === "active" ? 86 : status === "pending" ? 42 : status === "completed" ? 78 : 60;
+  const variance = (runs % 12) + index * 2;
+  return Math.min(99, Math.max(18, base + variance));
+};
+
+const buildClients = (list: HudClient[]): DerivedClient[] => {
+  const placeholderDna = typeof placeholders.dna === "string" ? placeholders.dna : "DNA_UNSET";
+  const placeholderStatus = typeof placeholders.status === "string" ? placeholders.status : "pending";
+  const placeholderRuns = placeholders.runs ?? 0;
+
+  return list.map((client, index) => {
+    const status = String(client.status ?? placeholderStatus);
+    const runsValue = parseRuns(client.runs, placeholderRuns);
+    return {
+      ...client,
+      alert: Boolean(client.hitl_review_needed),
+      dnaCode: formatDna(client.dna, placeholderDna),
+      health: computeHealth(status, runsValue, index),
+      runsValue,
+      runsLabel: formatRunsLabel(runsValue),
+      typeLabel: typeByName[client.name] ?? "CUSTOM",
+      statusLabel: statusLabels[status] ?? status.toUpperCase(),
+    };
+  });
+};
+
+export default function App() {
+  const clients = buildClients(hud.clients ?? []);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [activeClient, setActiveClient] = useState(clients[0]?.id ?? "");
+  const [showIntake, setShowIntake] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
+
+  const [position, setPosition] = useState({ x: 100, y: 100 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const hasMovedRef = useRef(false);
+
+  const currentClient = clients.find((client) => client.id === activeClient) ?? clients[0];
+
+  const intakeModules = [
+    { label: "LLM", value: hud.intake.initial_configuration.llm },
+    { label: "Agent Tool", value: hud.intake.initial_configuration.agent_tool },
+    { label: "Creative Tool", value: hud.intake.initial_configuration.creative_tool },
+  ];
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsDragging(true);
+    hasMovedRef.current = false;
+    dragStartPos.current = {
+      x: event.clientX - position.x,
+      y: event.clientY - position.y,
+    };
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    const newX = event.clientX - dragStartPos.current.x;
+    const newY = event.clientY - dragStartPos.current.y;
+    if (Math.abs(newX - position.x) > 5 || Math.abs(newY - position.y) > 5) {
+      hasMovedRef.current = true;
+    }
+    const boundedX = Math.max(0, Math.min(window.innerWidth - 96, newX));
+    const boundedY = Math.max(0, Math.min(window.innerHeight - 96, newY));
+    setPosition({ x: boundedX, y: boundedY });
+  };
+
+  const handlePointerUp = () => setIsDragging(false);
+
+  const handleToggle = () => {
+    if (!hasMovedRef.current) {
+      setIsExpanded((prev) => !prev);
+    }
+  };
+
+  useEffect(() => {
+    if (!isExpanded) return;
+    const interval = window.setInterval(() => {
+      setLogs((prev) => {
+        const action = logActions[Math.floor(Math.random() * logActions.length)];
+        const suffix = Math.random().toString(36).slice(2, 7).toUpperCase();
+        const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+        const next: LogEntry[] = [
+          ...prev,
+          {
+            time: now,
+            msg: `${action}_${suffix}`,
+            status: Math.random() > 0.2 ? "OK" : "BUSY",
+          },
+        ];
+        if (next.length > 6) next.shift();
+        return next;
+      });
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [isExpanded, activeClient]);
+
+  return (
+    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#080a0c]">
+      <div className="absolute inset-0 z-0">
+        <img
+          src={desktopBg}
+          className="w-full h-full object-cover opacity-25 grayscale brightness-50"
+          alt="hud background"
+        />
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff05_1px,transparent_1px),linear-gradient(to_bottom,#ffffff05_1px,transparent_1px)] bg-[size:40px_40px]" />
+      </div>
+
+      <OverlayEffects />
+
+      <div
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onClick={handleToggle}
+        style={{
+          left: position.x,
+          top: position.y,
+          transition: isDragging ? "none" : "all 0.6s cubic-bezier(0.23, 1, 0.32, 1)",
+        }}
+        className="fixed z-[600] cursor-grab active:cursor-grabbing"
+      >
+        <PancakeCore active={isExpanded} isDragging={isDragging} />
+        {!isExpanded && (
+          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap opacity-40 text-[9px] font-mono tracking-[0.3em] uppercase animate-pulse">
+            System_Standby
+          </div>
+        )}
+      </div>
+
+      <div
+        className={`flex-1 flex flex-row relative z-20 transition-all duration-1000 ease-out ${
+          isExpanded ? "opacity-100" : "opacity-0 pointer-events-none scale-[1.05] blur-xl"
+        }`}
+      >
+        <aside className="w-16 h-full border-r border-cyan-500/10 bg-black/60 backdrop-blur-2xl flex flex-col items-center py-8 justify-between relative">
+          <TickMarks count={30} orientation="vertical" />
+
+          <div className="flex flex-col items-center space-y-8 w-full z-10">
+            <div className="p-2 bg-cyan-500/10 rounded-full mb-4 border border-cyan-500/30">
+              <Workflow size={18} className="text-cyan-400" />
+            </div>
+
+            <div className="w-full flex flex-col items-center space-y-5 px-2">
+              {clients.map((client) => (
+                <button
+                  key={client.id}
+                  onClick={() => setActiveClient(client.id)}
+                  className={`group relative flex items-center justify-center transition-all duration-500 ${
+                    activeClient === client.id
+                      ? "scale-110"
+                      : "scale-90 opacity-40 hover:opacity-100"
+                  }`}
+                >
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center border transition-all ${
+                      activeClient === client.id
+                        ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.4)]"
+                        : "bg-white/5 border-white/10"
+                    }`}
+                  >
+                    <Dna size={16} className={activeClient === client.id ? "text-cyan-400" : "text-white"} />
+                  </div>
+
+                  <span className="absolute left-16 bg-cyan-900/90 px-3 py-1 rounded text-[10px] font-mono border border-cyan-500/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none uppercase tracking-widest whitespace-nowrap">
+                    {client.name}
+                  </span>
+
+                  {client.alert && (
+                    <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full animate-ping" />
+                  )}
+                </button>
+              ))}
+              <div className="h-px w-8 bg-white/10 my-2" />
+              <button
+                onClick={() => setShowIntake(true)}
+                className="p-2 rounded-lg hover:bg-cyan-500/10 transition-colors"
+              >
+                <PlusCircle size={20} className="text-cyan-400/50 hover:text-cyan-400" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center space-y-6 mb-4 z-10">
+            <Settings2 size={16} className="text-white/20 hover:text-white cursor-pointer transition-colors" />
+            <div className="text-[9px] font-mono -rotate-90 opacity-20 tracking-[0.2em] whitespace-nowrap uppercase">
+              Brand_OS_v9.4
+            </div>
+          </div>
+        </aside>
+
+        <div className="flex-1 flex flex-col relative">
+          <nav className="h-10 border-b border-cyan-500/10 bg-black/40 backdrop-blur-md flex items-center justify-between px-10 relative">
+            <TickMarks count={100} />
+
+            <div className="flex items-center space-x-10 text-[9px] font-mono tracking-[0.4em] z-10">
+              <span className="text-cyan-400 flex items-center animate-pulse">
+                <ShieldCheck size={12} className="mr-2" /> CORE_SYNC_READY
+              </span>
+              <span className="text-white/40 flex items-center">
+                LATENCY: <span className="text-white ml-2">0.0004ms</span>
+              </span>
+              <span className="text-white/40 flex items-center uppercase">
+                Uptime: <span className="text-white ml-2">99.98%</span>
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-6 z-10">
+              <div className="flex space-x-1.5 h-2 items-center">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div
+                    key={i}
+                    className={`h-1 w-1 rounded-full ${
+                      i < 5 ? "bg-cyan-400 shadow-[0_0_5px_cyan]" : "bg-white/10"
+                    }`}
+                  />
+                ))}
+              </div>
+              <X
+                onClick={() => setIsExpanded(false)}
+                size={18}
+                className="text-white/30 hover:text-red-400 cursor-pointer transition-colors"
+              />
+            </div>
+          </nav>
+
+          <main className="flex-1 p-10 md:p-16 flex flex-col items-center justify-center relative">
+            <div className="absolute inset-0 pointer-events-none opacity-20 flex items-center justify-center overflow-hidden">
+              <div className="w-[800px] h-[800px] border border-cyan-500/10 rounded-full absolute animate-[ping_10s_linear_infinite]" />
+              <div className="w-[1200px] h-[1200px] border border-cyan-500/5 rounded-full absolute" />
+              <div className="absolute top-1/2 left-0 w-full h-px bg-cyan-500/5" />
+              <div className="absolute top-0 left-1/2 w-px h-full bg-cyan-500/5" />
+            </div>
+
+            {currentClient && (
+              <div className="w-full max-w-6xl z-10 space-y-12">
+                <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
+                  <div className="h-24 md:h-28 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
+                  <div className="space-y-2">
+                    <h1 className="text-5xl md:text-7xl xl:text-9xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl">
+                      {currentClient.name}
+                    </h1>
+                    <div className="flex items-center space-x-4">
+                      <p className="text-[11px] font-mono tracking-[0.5em] text-cyan-400/60 uppercase">
+                        Brand_DNA: <span className="text-white font-bold">{currentClient.dnaCode}</span>
+                      </p>
+                      <div className="h-px w-20 bg-cyan-500/30" />
+                      <span className="px-2 py-0.5 border border-cyan-500/50 rounded text-[8px] font-mono text-cyan-400 bg-cyan-500/10">
+                        TYPE_{currentClient.typeLabel}
+                      </span>
+                      <span className="px-2 py-0.5 border border-white/10 rounded text-[8px] font-mono text-white/60 bg-white/5">
+                        {currentClient.statusLabel}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 min-h-[400px]">
+                  <div className="lg:col-span-4 bg-black/40 border border-white/10 backdrop-blur-2xl rounded-[2.5rem] p-10 flex flex-col justify-between shadow-2xl relative group overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent opacity-30" />
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="text-[10px] font-mono tracking-widest opacity-40 uppercase">
+                        Sensors_Telemetry
+                      </span>
+                      <Radar size={16} className="text-cyan-400 animate-pulse" />
+                    </div>
+
+                    <div className="flex justify-center my-4 transform group-hover:scale-105 transition-transform duration-500">
+                      <CircularTelemetry
+                        percent={currentClient.health}
+                        label="Neural_Sync"
+                        color={currentClient.health < 50 ? "amber" : "cyan"}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 mt-6">
+                      <div className="bg-white/5 p-4 rounded-3xl border border-white/5 flex flex-col items-center">
+                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Process_Nodes</span>
+                        <span className="text-2xl font-bold font-mono tracking-tighter">
+                          {currentClient.runsLabel}
+                        </span>
+                      </div>
+                      <div className="bg-white/5 p-4 rounded-3xl border border-white/5 flex flex-col items-center">
+                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Integrity</span>
+                        <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">
+                          NOMINAL
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="lg:col-span-8 bg-black/20 border border-white/10 backdrop-blur-xl rounded-[2.5rem] p-10 flex flex-col shadow-2xl relative">
+                    <div className="flex justify-between items-center mb-8">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_10px_cyan]" />
+                        <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
+                          Agentic_Workflow_Stream
+                        </span>
+                      </div>
+                      <Terminal size={14} className="opacity-30" />
+                    </div>
+
+                    <div className="flex-1 space-y-2.5 font-mono text-[11px] overflow-hidden">
+                      {logs.map((log, i) => (
+                        <div
+                          key={`${log.time}-${i}`}
+                          className={`flex justify-between py-2.5 px-4 rounded-xl transition-all duration-500 border-l-2 ${
+                            i === logs.length - 1
+                              ? "bg-cyan-500/10 border-cyan-400 translate-x-1 text-white"
+                              : "border-white/5 text-white/40"
+                          }`}
+                        >
+                          <div className="flex space-x-4">
+                            <span className="opacity-30">[{log.time}]</span>
+                            <span>{log.msg}</span>
+                          </div>
+                          <span className={log.status === "OK" ? "text-cyan-400" : "text-amber-500"}>
+                            // {log.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-8 flex space-x-5">
+                      <button className="flex-1 py-5 bg-white text-black font-black uppercase text-xs rounded-2xl hover:bg-cyan-400 transition-all shadow-[0_0_30px_rgba(255,255,255,0.1)] active:scale-95 group flex items-center justify-center">
+                        <Zap size={14} className="mr-2" /> Initialize Neural Run
+                      </button>
+                      <button className="px-6 border border-white/10 rounded-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/50 hover:text-white">
+                        <Settings2 size={18} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      </div>
+
+      {showIntake && (
+        <div className="fixed inset-0 z-[700] flex items-center justify-center p-6 bg-black/60 backdrop-blur-xl fade-zoom-in">
+          <div className="w-full max-w-2xl bg-[#0a0c10] border border-cyan-500/30 rounded-[3rem] p-12 shadow-[0_0_100px_rgba(0,0,0,0.8)] relative overflow-hidden">
+            <TickMarks count={50} />
+
+            <div className="flex justify-between items-center mb-10 border-b border-white/10 pb-8">
+              <div className="flex items-center">
+                <div className="w-10 h-10 rounded-full bg-cyan-500/20 flex items-center justify-center mr-4 border border-cyan-500/40">
+                  <Layers className="text-cyan-400" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold tracking-[0.3em] text-white uppercase">DNA_Injection_Module</h2>
+                  <p className="text-[9px] font-mono text-cyan-400 opacity-50 uppercase tracking-[0.2em]">
+                    SEQUENCE_READY_FOR_BOOTSTRAP
+                  </p>
+                </div>
+              </div>
+              <X
+                onClick={() => setShowIntake(false)}
+                className="cursor-pointer text-white/20 hover:text-white transition-colors"
+              />
+            </div>
+
+            <div className="space-y-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-mono opacity-40 ml-1 tracking-widest">
+                    Entity_Descriptor
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="BRAND_NAME"
+                    className="w-full bg-white/5 border border-white/10 p-5 rounded-2xl outline-none focus:border-cyan-400/50 font-mono text-white transition-all text-sm"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-mono opacity-40 ml-1 tracking-widest">
+                    DNA_Protocol
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={hud.intake.initial_configuration.llm}
+                    className="w-full bg-white/5 border border-white/10 p-5 rounded-2xl outline-none focus:border-cyan-400/50 font-mono text-white transition-all text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {intakeModules.map((module) => (
+                  <div
+                    key={module.label}
+                    className="p-5 rounded-3xl bg-white/5 border border-white/10 hover:border-cyan-400/40 transition-all cursor-pointer group text-center"
+                  >
+                    <span className="block text-[8px] opacity-30 mb-2 uppercase font-mono tracking-tighter">
+                      {module.label}
+                    </span>
+                    <span className="font-bold text-xs tracking-widest group-hover:text-cyan-400 transition-colors">
+                      {module.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(34,211,238,0.3)] hover:bg-white transition-all active:scale-95">
+                EXECUTE_SEQUENCE_STREAMS
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
