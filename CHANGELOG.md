@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-01-16
+
+- Tightened HUD layout spacing and reduced client detail stack width/height for a lighter overlay.
+- Shifted top status bar into a smaller floating cluster.
+- Added client detail collapse behavior tied to the active client button.
+
 ## [0.1.2] - 2026-01-15
 
 - Replaced external background and grain URLs with local assets.

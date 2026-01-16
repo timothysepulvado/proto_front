@@ -70,10 +70,10 @@ const OverlayEffects = () => (
   <div className="fixed inset-0 pointer-events-none z-[500] overflow-hidden">
     <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.1)_50%),linear-gradient(90deg,rgba(255,0,0,0.02),rgba(0,255,0,0.01),rgba(0,0,255,0.02))] bg-[length:100%_4px,3px_100%] z-[501]" />
     <div
-      className="absolute inset-0 opacity-[0.03] mix-blend-overlay z-[502]"
+      className="absolute inset-0 opacity-[0.02] mix-blend-overlay z-[502]"
       style={{ backgroundImage: `url(${noiseTexture})` }}
     />
-    <div className="absolute inset-0 shadow-[inset_0_0_150px_rgba(0,0,0,0.5)] z-[503]" />
+    <div className="absolute inset-0 shadow-[inset_0_0_140px_rgba(0,0,0,0.35)] z-[503]" />
   </div>
 );
 
@@ -246,6 +246,7 @@ export default function App() {
   const [activeClient, setActiveClient] = useState(clients[0]?.id ?? "");
   const [showIntake, setShowIntake] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
+  const [isClientDetailOpen, setIsClientDetailOpen] = useState(true);
 
   const [position, setPosition] = useState({ x: 100, y: 100 });
   const [isDragging, setIsDragging] = useState(false);
@@ -259,6 +260,12 @@ export default function App() {
     { label: "Agent Tool", value: hud.intake.initial_configuration.agent_tool },
     { label: "Creative Tool", value: hud.intake.initial_configuration.creative_tool },
   ];
+
+  useEffect(() => {
+    if (isExpanded) {
+      setIsClientDetailOpen(true);
+    }
+  }, [isExpanded]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -317,7 +324,7 @@ export default function App() {
       <div className="absolute inset-0 z-0">
         <img
           src={desktopBg}
-          className="w-full h-full object-cover opacity-25 grayscale brightness-50"
+          className="w-full h-full object-cover opacity-45 brightness-90"
           alt="hud background"
         />
         <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff05_1px,transparent_1px),linear-gradient(to_bottom,#ffffff05_1px,transparent_1px)] bg-[size:40px_40px]" />
@@ -351,19 +358,32 @@ export default function App() {
           isExpanded ? "opacity-100" : "opacity-0 pointer-events-none scale-[1.05] blur-xl"
         }`}
       >
-        <aside className="w-16 h-full border-r border-cyan-500/10 bg-black/60 backdrop-blur-2xl flex flex-col items-center py-8 justify-between relative">
-          <TickMarks count={30} orientation="vertical" />
+        <aside
+          className={`h-full border-r border-transparent flex flex-col items-center py-5 justify-between relative overflow-hidden transition-[width,transform,opacity,background-color,backdrop-filter] duration-500 ${
+            isExpanded
+              ? "w-12 opacity-100 bg-black/20 backdrop-blur-xl translate-x-0 border-cyan-500/10"
+              : "w-0 opacity-0 bg-transparent backdrop-blur-none -translate-x-4"
+          }`}
+        >
+          <TickMarks count={24} orientation="vertical" />
 
-          <div className="flex flex-col items-center space-y-8 w-full z-10">
-            <div className="p-2 bg-cyan-500/10 rounded-full mb-4 border border-cyan-500/30">
-              <Workflow size={18} className="text-cyan-400" />
+          <div className="flex flex-col items-center space-y-5 w-full z-10">
+            <div className="p-1.5 bg-cyan-500/10 rounded-full mb-1 border border-cyan-500/30">
+              <Workflow size={14} className="text-cyan-400" />
             </div>
 
-            <div className="w-full flex flex-col items-center space-y-5 px-2">
+            <div className="w-full flex flex-col items-center space-y-3 px-1">
               {clients.map((client) => (
                 <button
                   key={client.id}
-                  onClick={() => setActiveClient(client.id)}
+                  onClick={() => {
+                    if (client.id === activeClient) {
+                      setIsClientDetailOpen((prev) => !prev);
+                      return;
+                    }
+                    setActiveClient(client.id);
+                    setIsClientDetailOpen(true);
+                  }}
                   className={`group relative flex items-center justify-center transition-all duration-500 ${
                     activeClient === client.id
                       ? "scale-110"
@@ -371,13 +391,13 @@ export default function App() {
                   }`}
                 >
                   <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center border transition-all ${
+                    className={`w-8 h-8 rounded-lg flex items-center justify-center border transition-all ${
                       activeClient === client.id
                         ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.4)]"
                         : "bg-white/5 border-white/10"
                     }`}
                   >
-                    <Dna size={16} className={activeClient === client.id ? "text-cyan-400" : "text-white"} />
+                    <Dna size={12} className={activeClient === client.id ? "text-cyan-400" : "text-white"} />
                   </div>
 
                   <span className="absolute left-16 bg-cyan-900/90 px-3 py-1 rounded text-[10px] font-mono border border-cyan-500/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none uppercase tracking-widest whitespace-nowrap">
@@ -394,13 +414,13 @@ export default function App() {
                 onClick={() => setShowIntake(true)}
                 className="p-2 rounded-lg hover:bg-cyan-500/10 transition-colors"
               >
-                <PlusCircle size={20} className="text-cyan-400/50 hover:text-cyan-400" />
+                <PlusCircle size={18} className="text-cyan-400/50 hover:text-cyan-400" />
               </button>
             </div>
           </div>
 
-          <div className="flex flex-col items-center space-y-6 mb-4 z-10">
-            <Settings2 size={16} className="text-white/20 hover:text-white cursor-pointer transition-colors" />
+          <div className="flex flex-col items-center space-y-3 mb-4 z-10">
+            <Settings2 size={14} className="text-white/20 hover:text-white cursor-pointer transition-colors" />
             <div className="text-[9px] font-mono -rotate-90 opacity-20 tracking-[0.2em] whitespace-nowrap uppercase">
               Brand_OS_v9.4
             </div>
@@ -408,41 +428,43 @@ export default function App() {
         </aside>
 
         <div className="flex-1 flex flex-col relative">
-          <nav className="h-10 border-b border-cyan-500/10 bg-black/40 backdrop-blur-md flex items-center justify-between px-10 relative">
-            <TickMarks count={100} />
+          <div className="pt-6 md:pt-8 px-8 md:px-10">
+            <nav className="group h-9 w-full max-w-2xl ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative">
+              <TickMarks count={80} />
 
-            <div className="flex items-center space-x-10 text-[9px] font-mono tracking-[0.4em] z-10">
-              <span className="text-cyan-400 flex items-center animate-pulse">
-                <ShieldCheck size={12} className="mr-2" /> CORE_SYNC_READY
-              </span>
-              <span className="text-white/40 flex items-center">
-                LATENCY: <span className="text-white ml-2">0.0004ms</span>
-              </span>
-              <span className="text-white/40 flex items-center uppercase">
-                Uptime: <span className="text-white ml-2">99.98%</span>
-              </span>
-            </div>
-
-            <div className="flex items-center space-x-6 z-10">
-              <div className="flex space-x-1.5 h-2 items-center">
-                {[1, 2, 3, 4, 5, 6].map((i) => (
-                  <div
-                    key={i}
-                    className={`h-1 w-1 rounded-full ${
-                      i < 5 ? "bg-cyan-400 shadow-[0_0_5px_cyan]" : "bg-white/10"
-                    }`}
-                  />
-                ))}
+              <div className="flex items-center space-x-6 text-[8px] font-mono tracking-[0.35em] z-10">
+                <span className="text-cyan-400 flex items-center animate-pulse">
+                  <ShieldCheck size={11} className="mr-2" /> CORE_SYNC_READY
+                </span>
+                <span className="text-white/40 flex items-center">
+                  LATENCY: <span className="text-white ml-2">0.0004ms</span>
+                </span>
+                <span className="text-white/40 flex items-center uppercase">
+                  Uptime: <span className="text-white ml-2">99.98%</span>
+                </span>
               </div>
-              <X
-                onClick={() => setIsExpanded(false)}
-                size={18}
-                className="text-white/30 hover:text-red-400 cursor-pointer transition-colors"
-              />
-            </div>
-          </nav>
 
-          <main className="flex-1 p-10 md:p-16 flex flex-col items-center justify-center relative">
+              <div className="flex items-center space-x-4 z-10">
+                <div className="flex space-x-1.5 h-2 items-center">
+                  {[1, 2, 3, 4, 5, 6].map((i) => (
+                    <div
+                      key={i}
+                      className={`h-1 w-1 rounded-full ${
+                        i < 5 ? "bg-cyan-400 shadow-[0_0_5px_cyan]" : "bg-white/10"
+                      }`}
+                    />
+                  ))}
+                </div>
+                <X
+                  onClick={() => setIsExpanded(false)}
+                  size={16}
+                  className="text-white/30 hover:text-red-400 cursor-pointer transition-colors"
+                />
+              </div>
+            </nav>
+          </div>
+
+          <main className="flex-1 p-6 md:p-10 flex flex-col items-start justify-start relative">
             <div className="absolute inset-0 pointer-events-none opacity-20 flex items-center justify-center overflow-hidden">
               <div className="w-[800px] h-[800px] border border-cyan-500/10 rounded-full absolute animate-[ping_10s_linear_infinite]" />
               <div className="w-[1200px] h-[1200px] border border-cyan-500/5 rounded-full absolute" />
@@ -450,12 +472,12 @@ export default function App() {
               <div className="absolute top-0 left-1/2 w-px h-full bg-cyan-500/5" />
             </div>
 
-            {currentClient && (
-              <div className="w-full max-w-6xl z-10 space-y-12">
+            {currentClient && isClientDetailOpen && (
+              <div className="w-full max-w-[480px] z-10 space-y-4 ml-4">
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
-                  <div className="h-24 md:h-28 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
-                  <div className="space-y-2">
-                    <h1 className="text-5xl md:text-7xl xl:text-9xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl">
+                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
+                <div className="space-y-2">
+                    <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
                       {currentClient.name}
                     </h1>
                     <div className="flex items-center space-x-4">
@@ -473,17 +495,17 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 min-h-[400px]">
-                  <div className="lg:col-span-4 bg-black/40 border border-white/10 backdrop-blur-2xl rounded-[2.5rem] p-10 flex flex-col justify-between shadow-2xl relative group overflow-hidden">
+                <div className="grid grid-cols-1 gap-4">
+                  <div className="bg-black/20 border border-white/5 backdrop-blur-2xl rounded-[2rem] p-5 flex flex-col justify-between shadow-2xl relative group overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent opacity-30" />
-                    <div className="flex justify-between items-center mb-4">
+                    <div className="flex justify-between items-center mb-3">
                       <span className="text-[10px] font-mono tracking-widest opacity-40 uppercase">
                         Sensors_Telemetry
                       </span>
                       <Radar size={16} className="text-cyan-400 animate-pulse" />
                     </div>
 
-                    <div className="flex justify-center my-4 transform group-hover:scale-105 transition-transform duration-500">
+                    <div className="flex justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
                       <CircularTelemetry
                         percent={currentClient.health}
                         label="Neural_Sync"
@@ -491,14 +513,14 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 mt-6">
-                      <div className="bg-white/5 p-4 rounded-3xl border border-white/5 flex flex-col items-center">
+                    <div className="grid grid-cols-2 gap-2.5 mt-3">
+                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
                         <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Process_Nodes</span>
                         <span className="text-2xl font-bold font-mono tracking-tighter">
                           {currentClient.runsLabel}
                         </span>
                       </div>
-                      <div className="bg-white/5 p-4 rounded-3xl border border-white/5 flex flex-col items-center">
+                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
                         <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Integrity</span>
                         <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">
                           NOMINAL
@@ -507,8 +529,8 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="lg:col-span-8 bg-black/20 border border-white/10 backdrop-blur-xl rounded-[2.5rem] p-10 flex flex-col shadow-2xl relative">
-                    <div className="flex justify-between items-center mb-8">
+                  <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative">
+                    <div className="flex justify-between items-center mb-4">
                       <div className="flex items-center space-x-3">
                         <div className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_10px_cyan]" />
                         <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
@@ -518,7 +540,7 @@ export default function App() {
                       <Terminal size={14} className="opacity-30" />
                     </div>
 
-                    <div className="flex-1 space-y-2.5 font-mono text-[11px] overflow-hidden">
+                    <div className="flex-1 space-y-2 font-mono text-[10px] overflow-hidden">
                       {logs.map((log, i) => (
                         <div
                           key={`${log.time}-${i}`}
@@ -539,11 +561,11 @@ export default function App() {
                       ))}
                     </div>
 
-                    <div className="mt-8 flex space-x-5">
-                      <button className="flex-1 py-5 bg-white text-black font-black uppercase text-xs rounded-2xl hover:bg-cyan-400 transition-all shadow-[0_0_30px_rgba(255,255,255,0.1)] active:scale-95 group flex items-center justify-center">
+                    <div className="mt-4 flex space-x-3">
+                      <button className="flex-1 py-3 bg-white text-black font-black uppercase text-xs rounded-2xl hover:bg-cyan-400 transition-all shadow-[0_0_30px_rgba(255,255,255,0.1)] active:scale-95 group flex items-center justify-center">
                         <Zap size={14} className="mr-2" /> Initialize Neural Run
                       </button>
-                      <button className="px-6 border border-white/10 rounded-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/50 hover:text-white">
+                      <button className="px-4 border border-white/10 rounded-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/50 hover:text-white">
                         <Settings2 size={18} />
                       </button>
                     </div>
@@ -553,6 +575,18 @@ export default function App() {
             )}
           </main>
         </div>
+
+        <aside
+          className={`h-full border-l border-transparent flex flex-col items-center py-6 relative pointer-events-none overflow-hidden transition-[width,transform,opacity,background-color,backdrop-filter] duration-500 ${
+            isExpanded
+              ? "w-12 opacity-100 bg-black/10 backdrop-blur-sm translate-x-0 border-cyan-500/10"
+              : "w-0 opacity-0 bg-transparent backdrop-blur-none translate-x-4"
+          }`}
+        >
+          <TickMarks count={26} orientation="vertical" />
+          <div className="flex-1" />
+          <div className="w-6 h-px bg-cyan-500/20 mb-4" />
+        </aside>
       </div>
 
       {showIntake && (
