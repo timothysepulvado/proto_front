@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - Start HUD with no client detail open by default; requires explicit client selection.
 
+## [0.1.5] - 2026-01-16
+
+- Scoped scanline/noise/vignette effects to HUD panels only and removed background overlays.
+
 ## [0.1.2] - 2026-01-15
 
 - Replaced external background and grain URLs with local assets.
