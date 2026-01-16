@@ -66,14 +66,14 @@ const logActions = [
   "C2PA_EXPORT_PASS",
 ];
 
-const OverlayEffects = () => (
-  <div className="fixed inset-0 pointer-events-none z-[500] overflow-hidden">
-    <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.1)_50%),linear-gradient(90deg,rgba(255,0,0,0.02),rgba(0,255,0,0.01),rgba(0,0,255,0.02))] bg-[length:100%_4px,3px_100%] z-[501]" />
+const OverlayEffects = ({ className = "" }: { className?: string }) => (
+  <div className={`absolute inset-0 pointer-events-none overflow-hidden z-10 ${className}`}>
+    <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.1)_50%),linear-gradient(90deg,rgba(255,0,0,0.02),rgba(0,255,0,0.01),rgba(0,0,255,0.02))] bg-[length:100%_4px,3px_100%]" />
     <div
-      className="absolute inset-0 opacity-[0.02] mix-blend-overlay z-[502]"
+      className="absolute inset-0 opacity-[0.02] mix-blend-overlay"
       style={{ backgroundImage: `url(${noiseTexture})` }}
     />
-    <div className="absolute inset-0 shadow-[inset_0_0_140px_rgba(0,0,0,0.35)] z-[503]" />
+    <div className="absolute inset-0 shadow-[inset_0_0_60px_rgba(0,0,0,0.35)]" />
   </div>
 );
 
@@ -324,13 +324,10 @@ export default function App() {
       <div className="absolute inset-0 z-0">
         <img
           src={desktopBg}
-          className="w-full h-full object-cover opacity-45 brightness-90"
+          className="w-full h-full object-cover opacity-100"
           alt="hud background"
         />
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff05_1px,transparent_1px),linear-gradient(to_bottom,#ffffff05_1px,transparent_1px)] bg-[size:40px_40px]" />
       </div>
-
-      <OverlayEffects />
 
       <div
         onPointerDown={handlePointerDown}
@@ -425,11 +422,12 @@ export default function App() {
               Brand_OS_v9.4
             </div>
           </div>
+          <OverlayEffects />
         </aside>
 
         <div className="flex-1 flex flex-col relative">
           <div className="pt-6 md:pt-8 px-8 md:px-10">
-            <nav className="group h-9 w-full max-w-2xl ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative">
+            <nav className="group h-9 w-full max-w-2xl ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative overflow-hidden">
               <TickMarks count={80} />
 
               <div className="flex items-center space-x-6 text-[8px] font-mono tracking-[0.35em] z-10">
@@ -461,6 +459,7 @@ export default function App() {
                   className="text-white/30 hover:text-red-400 cursor-pointer transition-colors"
                 />
               </div>
+              <OverlayEffects className="rounded-full" />
             </nav>
           </div>
 
@@ -527,9 +526,10 @@ export default function App() {
                         </span>
                       </div>
                     </div>
+                    <OverlayEffects className="rounded-[2rem]" />
                   </div>
 
-                  <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative">
+                  <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative overflow-hidden">
                     <div className="flex justify-between items-center mb-4">
                       <div className="flex items-center space-x-3">
                         <div className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_10px_cyan]" />
@@ -569,6 +569,7 @@ export default function App() {
                         <Settings2 size={18} />
                       </button>
                     </div>
+                    <OverlayEffects className="rounded-[2rem]" />
                   </div>
                 </div>
               </div>
@@ -586,6 +587,7 @@ export default function App() {
           <TickMarks count={26} orientation="vertical" />
           <div className="flex-1" />
           <div className="w-6 h-px bg-cyan-500/20 mb-4" />
+          <OverlayEffects />
         </aside>
       </div>
 
@@ -656,6 +658,7 @@ export default function App() {
                 EXECUTE_SEQUENCE_STREAMS
               </button>
             </div>
+            <OverlayEffects className="rounded-[3rem]" />
           </div>
         </div>
       )}
