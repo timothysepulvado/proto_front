@@ -246,7 +246,7 @@ export default function App() {
   const [activeClient, setActiveClient] = useState(clients[0]?.id ?? "");
   const [showIntake, setShowIntake] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
-  const [isClientDetailOpen, setIsClientDetailOpen] = useState(true);
+  const [isClientDetailOpen, setIsClientDetailOpen] = useState(false);
 
   const [position, setPosition] = useState({ x: 100, y: 100 });
   const [isDragging, setIsDragging] = useState(false);
@@ -263,7 +263,7 @@ export default function App() {
 
   useEffect(() => {
     if (isExpanded) {
-      setIsClientDetailOpen(true);
+      setIsClientDetailOpen(false);
     }
   }, [isExpanded]);
 
