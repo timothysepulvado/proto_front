@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-01-15
+
+- Replaced external background and grain URLs with local assets.
+- Pruned unused scaffold files and refreshed the file tree.
+
 ## [0.1.1] - 2026-01-15
 
 - Switched the UI to the new CRT/HUD layout with a draggable Pancake Core toggle.

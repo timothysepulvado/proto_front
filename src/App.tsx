@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { PointerEvent } from "react";
 import {
   Dna,
   Layers,
@@ -259,7 +260,7 @@ export default function App() {
     { label: "Creative Tool", value: hud.intake.initial_configuration.creative_tool },
   ];
 
-  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     setIsDragging(true);
     hasMovedRef.current = false;
@@ -269,7 +270,7 @@ export default function App() {
     };
   };
 
-  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!isDragging) return;
     const newX = event.clientX - dragStartPos.current.x;
     const newY = event.clientY - dragStartPos.current.y;
