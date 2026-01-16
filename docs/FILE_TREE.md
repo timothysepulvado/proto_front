@@ -2,6 +2,8 @@
 
 ```
 HUD
+├── .github
+│   └── pull_request_template.md
 ├── docs
 │   ├── DEPENDENCY_POLICY.md
 │   ├── FILE_TREE.md
@@ -17,10 +19,14 @@ HUD
 │   ├── index.css
 │   └── main.tsx
 ├── .devserver.log
+├── .editorconfig
+├── .gitattributes
 ├── .gitignore
 ├── .npmrc
 ├── .nvmrc
 ├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
 ├── eslint.config.js
 ├── hud.json
 ├── index.html
@@ -28,6 +34,8 @@ HUD
 ├── package-lock.json
 ├── package.json
 ├── README.md
+├── SECURITY.md
+├── SUPPORT.md
 ├── tailwind.config.js
 ├── tsconfig.app.json
 ├── tsconfig.json
