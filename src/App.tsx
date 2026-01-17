@@ -644,6 +644,7 @@ export default function App() {
   const runStateLabel = getRunStatusLabel(currentRun?.status);
   const runStateClass = getRunStatusClass(currentRun?.status);
   const lastRunTime = formatTimestamp(currentRun?.startedAt ?? currentRun?.createdAt);
+  const canCancel = currentRun?.status === "running";
 
   return (
     <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#080a0c]">
@@ -800,33 +801,33 @@ export default function App() {
                 <div className="flex items-start justify-between gap-6 fade-slide-in">
                   <div className="flex items-end space-x-6 md:space-x-8">
                     <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
                         {currentClient.name}
                       </h1>
-                      <div className="space-y-2 rounded-2xl border border-white/10 bg-black/35 px-4 py-3 backdrop-blur-xl">
+                      <div className="space-y-3 rounded-3xl border border-white/15 bg-black/55 px-5 py-4 backdrop-blur-2xl shadow-[0_0_40px_rgba(0,0,0,0.6)]">
                         <div className="flex flex-wrap items-center gap-4">
                           <div className="flex flex-col">
-                            <span className="text-[9px] uppercase tracking-[0.35em] text-cyan-400/70">Brand Memory</span>
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-cyan-200/80">Brand Memory</span>
                             <span className="text-[11px] font-mono text-white">{currentClient.memoryId}</span>
                           </div>
                           <div className="h-px w-16 bg-cyan-500/30" />
                           <div className="flex flex-col">
-                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/60">Type</span>
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/75">Type</span>
                             <span className="text-[11px] text-white">{currentClient.typeLabel}</span>
-                            <span className="text-[8px] font-mono text-white/40">
+                            <span className="text-[8px] font-mono text-white/55">
                               TYPE_{currentClient.typeLabel.toUpperCase()}
                             </span>
                           </div>
                           <div className="flex flex-col">
-                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/60">Status</span>
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/75">Status</span>
                             <span className="text-[11px] text-white">{currentClient.statusLabel}</span>
                           </div>
                         </div>
-                        <div className="text-[9px] font-mono text-white/70 uppercase tracking-[0.25em]">
+                        <div className="text-[9px] font-mono text-white/80 uppercase tracking-[0.25em]">
                           ID: {currentClient.internalId} | Client: {currentClient.id}
                         </div>
-                        <div className="flex flex-wrap items-center gap-4 text-[9px] font-mono text-white/70 uppercase tracking-[0.2em]">
+                        <div className="flex flex-wrap items-center gap-4 text-[9px] font-mono text-white/80 uppercase tracking-[0.2em]">
                           <span>
                             Run State: <span className={runStateClass}>{runStateLabel}</span>
                           </span>
@@ -845,6 +846,14 @@ export default function App() {
                       <Terminal size={12} />
                       Logs
                     </button>
+                    {canCancel && (
+                      <button
+                        onClick={handleCancel}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-red-400/40 text-[9px] font-mono uppercase tracking-[0.2em] text-red-200 hover:text-white hover:border-red-300 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    )}
                     <button
                       onClick={() => setShowSettings((prev) => !prev)}
                       className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 text-[9px] font-mono uppercase tracking-[0.2em] text-white/50 hover:text-white hover:border-white/30 transition-colors"
@@ -1062,7 +1071,7 @@ export default function App() {
                             )}
                           </div>
 
-                          {currentRun?.status === "running" && (
+                          {canCancel && (
                             <button
                               onClick={handleCancel}
                               className="px-4 border border-red-400/40 rounded-2xl hover:bg-red-500/10 hover:border-red-300 transition-all text-red-200 uppercase text-[10px] tracking-[0.2em] font-mono"

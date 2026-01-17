@@ -15,6 +15,11 @@ All notable changes to this project will be documented in this file.
 - Improved client header readability with a blurred status card.
 - Added scrollable client detail panel and log wrapping for long lines.
 
+## [0.1.8] - 2026-01-16
+
+- Increased header readability with a stronger blur card and higher contrast metadata text.
+- Surfaced a visible cancel action beside Logs for active runs.
+
 ## [0.1.3] - 2026-01-16
 
 - Tightened HUD layout spacing and reduced client detail stack width/height for a lighter overlay.
