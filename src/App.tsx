@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import hudData from "../hud.json";
-import type { HudClient, HudRoot } from "./types/hud";
+import type { HudRoot } from "./types/hud";
 import desktopBg from "./assets/desktop-bg.png";
 import noiseTexture from "./assets/noise.svg";
 import {
@@ -27,9 +27,12 @@ import {
   subscribeToLogs,
   approveReview,
   exportRun,
+  getClients,
+  subscribeToClients,
   type Run,
   type RunLog,
   type RunMode,
+  type Client,
 } from "./api";
 
 type Orientation = "horizontal" | "vertical";
@@ -41,7 +44,7 @@ type LogEntry = {
   stage?: string;
 };
 
-type DerivedClient = HudClient & {
+type DerivedClient = Client & {
   alert: boolean;
   dnaCode: string;
   health: number;
@@ -221,12 +224,6 @@ const formatDna = (value: string | null | undefined, fallback: string) => {
   return cleaned.length > 14 ? cleaned.slice(0, 14) : cleaned;
 };
 
-const parseRuns = (value: number | string | null | undefined, fallback: number | string | undefined) => {
-  const raw = value ?? fallback ?? 0;
-  const parsed = typeof raw === "number" ? raw : Number.parseInt(String(raw), 10);
-  return Number.isFinite(parsed) ? parsed : 0;
-};
-
 const formatRunsLabel = (value: number) => String(value).padStart(3, "0");
 
 const computeHealth = (status: string, runs: number, index: number) => {
@@ -235,18 +232,17 @@ const computeHealth = (status: string, runs: number, index: number) => {
   return Math.min(99, Math.max(18, base + variance));
 };
 
-const buildClients = (list: HudClient[]): DerivedClient[] => {
+const buildClients = (list: Client[]): DerivedClient[] => {
   const placeholderDna = typeof placeholders.dna === "string" ? placeholders.dna : "DNA_UNSET";
-  const placeholderStatus = typeof placeholders.status === "string" ? placeholders.status : "pending";
-  const placeholderRuns = typeof placeholders.runs === "boolean" ? 0 : (placeholders.runs ?? 0);
 
   return list.map((client, index) => {
-    const status = String(client.status ?? placeholderStatus);
-    const runsValue = parseRuns(client.runs, placeholderRuns);
+    const status = client.status ?? "active";
+    // Use last run status to simulate run count
+    const runsValue = client.lastRunStatus ? 1 : 0;
     return {
       ...client,
-      alert: Boolean(client.hitl_review_needed),
-      dnaCode: formatDna(client.dna, placeholderDna),
+      alert: client.lastRunStatus === "needs_review",
+      dnaCode: formatDna(client.id, placeholderDna),
       health: computeHealth(status, runsValue, index),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
@@ -257,9 +253,13 @@ const buildClients = (list: HudClient[]): DerivedClient[] => {
 };
 
 export default function App() {
-  const clients = buildClients(hud.clients ?? []);
+  // Client state - load from Supabase
+  const [clients, setClients] = useState<DerivedClient[]>([]);
+  const [isLoadingClients, setIsLoadingClients] = useState(true);
+  const [clientError, setClientError] = useState<string | null>(null);
+
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeClient, setActiveClient] = useState(clients[0]?.id ?? "");
+  const [activeClient, setActiveClient] = useState<string>("");
   const [showIntake, setShowIntake] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
   const [isClientDetailOpen, setIsClientDetailOpen] = useState(false);
@@ -278,6 +278,44 @@ export default function App() {
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  // Fetch clients from Supabase on mount
+  useEffect(() => {
+    async function loadClients() {
+      try {
+        setIsLoadingClients(true);
+        const data = await getClients();
+        const derived = buildClients(data);
+        setClients(derived);
+        if (derived.length > 0 && !activeClient) {
+          setActiveClient(derived[0].id);
+        }
+      } catch (err) {
+        setClientError(err instanceof Error ? err.message : "Failed to load clients");
+      } finally {
+        setIsLoadingClients(false);
+      }
+    }
+    loadClients();
+  }, []);
+
+  // Subscribe to client updates
+  useEffect(() => {
+    const unsubscribe = subscribeToClients((updatedClient) => {
+      setClients((prev) => {
+        const index = prev.findIndex((c) => c.id === updatedClient.id);
+        if (index === -1) {
+          // New client
+          return [...prev, ...buildClients([updatedClient])];
+        }
+        // Update existing client
+        const updated = [...prev];
+        updated[index] = buildClients([updatedClient])[0];
+        return updated;
+      });
+    });
+    return unsubscribe;
+  }, []);
 
   const runMenuOptions = [
     { id: "full", label: "Full Pipeline", mode: "full" },
@@ -548,7 +586,15 @@ export default function App() {
             </div>
 
             <div className="w-full flex flex-col items-center space-y-3 px-1">
-              {clients.map((client) => (
+              {isLoadingClients ? (
+                <div className="p-2">
+                  <Loader2 size={16} className="text-cyan-400 animate-spin" />
+                </div>
+              ) : clientError ? (
+                <div className="p-2 text-[8px] text-red-400 text-center">
+                  Error loading
+                </div>
+              ) : clients.map((client) => (
                 <button
                   key={client.id}
                   onClick={() => {

@@ -27,3 +27,16 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code
+.claude/
+
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Worker dev files
+worker/.venv/
+worker/__pycache__/
