@@ -11,7 +11,10 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:api": "npm run --prefix os-api dev",
+    "dev:all": "concurrently -n hud,api -c cyan,magenta \"npm run dev\" \"npm run dev:api\"",
     "build": "tsc -b && vite build",
+    "build:api": "npm run --prefix os-api build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -28,6 +31,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
     "autoprefixer": "10.4.23",
+    "concurrently": "9.2.1",
     "eslint": "9.39.1",
     "eslint-plugin-react-hooks": "7.0.1",
     "eslint-plugin-react-refresh": "0.4.24",
