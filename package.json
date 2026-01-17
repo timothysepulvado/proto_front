@@ -11,6 +11,8 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:all": "npm run dev & npm --prefix os-api run dev",
+    "dev:api": "npm --prefix os-api run dev",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

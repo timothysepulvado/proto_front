@@ -1,0 +1,15 @@
+{
+  "name": "brandstudios-os-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "cors": "2.8.5",
+    "dotenv": "16.5.0",
+    "express": "4.21.2"
+  }
+}

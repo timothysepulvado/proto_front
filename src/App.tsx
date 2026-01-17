@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 import {
+  ChevronDown,
   Dna,
   Layers,
   PlusCircle,
@@ -19,20 +20,74 @@ import noiseTexture from "./assets/noise.svg";
 
 type Orientation = "horizontal" | "vertical";
 
+type RunStageStatus = "pending" | "running" | "complete" | "skipped" | "blocked" | "failed";
+
+type RunStatus =
+  | "ready"
+  | "running"
+  | "needs_review"
+  | "blocked"
+  | "complete"
+  | "failed"
+  | "canceled";
+
 type LogEntry = {
   time: string;
   msg: string;
-  status: "OK" | "WAIT" | "BUSY";
+  stage?: string;
+  level?: "info" | "warn" | "error";
+};
+
+type RunStage = {
+  id: string;
+  label: string;
+  status: RunStageStatus;
+  startedAt?: string;
+  endedAt?: string;
+  message?: string;
+};
+
+type RunRecord = {
+  runId: string;
+  clientId: string;
+  mode: string;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  stages: RunStage[];
+  logs?: LogEntry[];
+  review?: {
+    required: boolean;
+    status?: string;
+    notes?: string;
+    updatedAt?: string;
+  };
+  artifacts?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    path?: string;
+    stage?: string;
+    createdAt?: string;
+  }>;
+};
+
+type ApiClient = HudClient & {
+  last_run?: RunRecord | null;
 };
 
 type DerivedClient = HudClient & {
   alert: boolean;
-  dnaCode: string;
+  internalId: string;
+  memoryId: string;
   health: number;
   runsValue: number;
   runsLabel: string;
   typeLabel: string;
   statusLabel: string;
+  lastRun?: RunRecord | null;
 };
 
 const hudRoot = hudData as HudRoot;
@@ -40,30 +95,34 @@ const hud = hudRoot.hud;
 const placeholders = hud.data_model?.empty_states?.missing_fields?.placeholders ?? {};
 
 const statusLabels: Record<string, string> = {
-  active: "ACTIVE",
-  pending: "PENDING",
-  completed: "COMPLETED",
+  active: "Active",
+  pending: "Pending",
+  completed: "Completed",
 };
 
 const typeByName: Record<string, string> = {
-  Cylndr: "CORE",
-  "Jenni Kayne": "RETAIL",
-  Lilydale: "AGRI",
+  Cylndr: "Core",
+  "Jenni Kayne": "Retail",
+  Lilydale: "Agri",
 };
 
-const seedLogs: LogEntry[] = [
-  { time: "12:04:22", msg: "NEURAL_LINK_ESTABLISHED", status: "OK" },
-  { time: "12:04:23", msg: "SYNCING_DNA_SEQUENCES", status: "WAIT" },
-  { time: "12:04:25", msg: "AGENT_CLUSTER_ONLINE", status: "OK" },
+const pillars = ["Brand Memory", "Creative Studio", "Brand Drift", "Insight Loop"];
+
+const stageTemplates: Array<Pick<RunStage, "id" | "label">> = [
+  { id: "ingest", label: "Ingest and Index" },
+  { id: "generate", label: "Generate" },
+  { id: "drift", label: "Drift Check" },
+  { id: "hitl", label: "HITL Gate" },
+  { id: "export", label: "Export Package" },
 ];
 
-const logActions = [
-  "DNA_RECOGNITION",
-  "LLM_COMPUTE_NODE_01",
-  "SORA_RENDER_QUEUE",
-  "VEO_GEN_SYNC",
-  "DRIFT_LINT_CHECK",
-  "C2PA_EXPORT_PASS",
+const runOptions = [
+  { label: "Full Pipeline", mode: "full", detail: "Brand Memory to Export" },
+  { label: "Ingest and Index", mode: "ingest", detail: "Brand Memory" },
+  { label: "Generate Images", mode: "images", detail: "Temp-gen" },
+  { label: "Generate Video", mode: "video", detail: "Temp-gen" },
+  { label: "Drift Check", mode: "drift", detail: "Brand Drift" },
+  { label: "Export Package", mode: "export", detail: "Export" },
 ];
 
 const OverlayEffects = ({ className = "" }: { className?: string }) => (
@@ -77,7 +136,13 @@ const OverlayEffects = ({ className = "" }: { className?: string }) => (
   </div>
 );
 
-const TickMarks = ({ count = 40, orientation = "horizontal" }: { count?: number; orientation?: Orientation }) => (
+const TickMarks = ({
+  count = 40,
+  orientation = "horizontal",
+}: {
+  count?: number;
+  orientation?: Orientation;
+}) => (
   <div
     className={`flex justify-between absolute ${
       orientation === "horizontal"
@@ -88,9 +153,7 @@ const TickMarks = ({ count = 40, orientation = "horizontal" }: { count?: number;
     {Array.from({ length: count }).map((_, i) => (
       <div
         key={i}
-        className={`${
-          orientation === "horizontal" ? "w-px" : "h-px"
-        } bg-cyan-400/30 ${
+        className={`${orientation === "horizontal" ? "w-px" : "h-px"} bg-cyan-400/30 ${
           i % 5 === 0
             ? orientation === "horizontal"
               ? "h-2"
@@ -155,7 +218,15 @@ const PancakeCore = ({ active, isDragging }: { active: boolean; isDragging: bool
   </div>
 );
 
-const CircularTelemetry = ({ percent, label, color = "cyan" }: { percent: number; label: string; color?: "cyan" | "amber" }) => {
+const CircularTelemetry = ({
+  percent,
+  label,
+  color = "cyan",
+}: {
+  percent: number;
+  label: string;
+  color?: "cyan" | "amber";
+}) => {
   const circumference = 2 * Math.PI * 48;
   const dashOffset = circumference - (circumference * percent) / 100;
 
@@ -194,7 +265,7 @@ const CircularTelemetry = ({ percent, label, color = "cyan" }: { percent: number
   );
 };
 
-const formatDna = (value: string | null | undefined, fallback: string) => {
+const formatCode = (value: string | null | undefined, fallback: string, maxLen = 18) => {
   if (!value) {
     return fallback;
   }
@@ -202,7 +273,7 @@ const formatDna = (value: string | null | undefined, fallback: string) => {
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  return cleaned.length > 14 ? cleaned.slice(0, 14) : cleaned;
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
 };
 
 const parseRuns = (value: number | string | null | undefined, fallback: number | string | undefined) => {
@@ -219,47 +290,229 @@ const computeHealth = (status: string, runs: number, index: number) => {
   return Math.min(99, Math.max(18, base + variance));
 };
 
-const buildClients = (list: HudClient[]): DerivedClient[] => {
-  const placeholderDna = typeof placeholders.dna === "string" ? placeholders.dna : "DNA_UNSET";
+const buildClients = (list: ApiClient[]): DerivedClient[] => {
+  const placeholderMemory = typeof placeholders.dna === "string" ? placeholders.dna : "MEMORY_UNSET";
   const placeholderStatus = typeof placeholders.status === "string" ? placeholders.status : "pending";
   const placeholderRuns = placeholders.runs ?? 0;
 
   return list.map((client, index) => {
     const status = String(client.status ?? placeholderStatus);
     const runsValue = parseRuns(client.runs, placeholderRuns);
+    const internalId = formatCode(client.internal_id ?? client.brand_id ?? client.name, "UNKNOWN");
+    const memoryId = formatCode(client.brand_memory_id ?? client.dna ?? placeholderMemory, "MEMORY_UNSET", 24);
+
     return {
       ...client,
       alert: Boolean(client.hitl_review_needed),
-      dnaCode: formatDna(client.dna, placeholderDna),
+      internalId,
+      memoryId,
       health: computeHealth(status, runsValue, index),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
-      typeLabel: typeByName[client.name] ?? "CUSTOM",
-      statusLabel: statusLabels[status] ?? status.toUpperCase(),
+      typeLabel: typeByName[client.name] ?? "Custom",
+      statusLabel: statusLabels[status] ?? status.charAt(0).toUpperCase() + status.slice(1),
+      lastRun: client.last_run ?? null,
     };
   });
 };
 
+const createDefaultStages = (): RunStage[] =>
+  stageTemplates.map((stage) => ({ ...stage, status: "pending" }));
+
+const formatTimestamp = (value?: string) => {
+  if (!value) return "None";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", { hour12: false });
+};
+
+const formatLogTime = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("en-US", { hour12: false });
+};
+
+const getRunStatusLabel = (status?: RunStatus) => {
+  if (!status) return "Ready";
+  if (status === "needs_review") return "Needs Review";
+  if (status === "blocked" || status === "failed" || status === "canceled") return "Blocked";
+  if (status === "complete") return "Complete";
+  if (status === "running") return "Running";
+  return "Ready";
+};
+
+const getRunStatusClass = (status?: RunStatus) => {
+  if (status === "running") return "text-cyan-400";
+  if (status === "needs_review") return "text-amber-400";
+  if (status === "complete") return "text-lime-400";
+  if (status === "blocked" || status === "failed" || status === "canceled") return "text-red-400";
+  return "text-white/60";
+};
+
+const getStageStatusLabel = (status: RunStageStatus) => {
+  if (status === "running") return "Running";
+  if (status === "complete") return "Complete";
+  if (status === "skipped") return "Skipped";
+  if (status === "blocked" || status === "failed") return "Blocked";
+  return "Pending";
+};
+
+const getStageStatusClass = (status: RunStageStatus) => {
+  if (status === "running") return "text-cyan-400";
+  if (status === "complete") return "text-lime-400";
+  if (status === "skipped") return "text-white/20";
+  if (status === "blocked" || status === "failed") return "text-red-400";
+  return "text-white/40";
+};
+
+const buildRunInputs = (client: DerivedClient, mode: string) => {
+  const basePrompt = `BrandStudios ${client.name} campaign key visual with brand memory alignment.`;
+
+  if (mode === "video") {
+    return {
+      prompt: `Cinematic ${client.name} brand motion study with clean lighting and clear subject focus.`,
+      generate: "video",
+    };
+  }
+
+  if (mode === "images") {
+    return {
+      prompt: `Studio stills for ${client.name} with brand memory alignment and clear product focus.`,
+      generate: "images",
+    };
+  }
+
+  if (mode === "full") {
+    return {
+      prompt: basePrompt,
+      generate: "images",
+    };
+  }
+
+  return { prompt: basePrompt };
+};
+
 export default function App() {
-  const clients = buildClients(hud.clients ?? []);
+  const [clients, setClients] = useState<DerivedClient[]>(buildClients(hud.clients ?? []));
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeClient, setActiveClient] = useState(clients[0]?.id ?? "");
   const [showIntake, setShowIntake] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
   const [isClientDetailOpen, setIsClientDetailOpen] = useState(false);
+  const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [activePillar, setActivePillar] = useState(pillars[0]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showRunFeed, setShowRunFeed] = useState(true);
+  const [currentRun, setCurrentRun] = useState<RunRecord | null>(null);
+  const [runLogs, setRunLogs] = useState<LogEntry[]>([]);
+  const [runStages, setRunStages] = useState<RunStage[]>(createDefaultStages());
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [apiAvailable, setApiAvailable] = useState(true);
 
   const [position, setPosition] = useState({ x: 100, y: 100 });
   const [isDragging, setIsDragging] = useState(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
 
-  const currentClient = clients.find((client) => client.id === activeClient) ?? clients[0];
+  const currentClient = useMemo(
+    () => clients.find((client) => client.id === activeClient) ?? clients[0],
+    [clients, activeClient]
+  );
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
     { label: "Agent Tool", value: hud.intake.initial_configuration.agent_tool },
     { label: "Creative Tool", value: hud.intake.initial_configuration.creative_tool },
   ];
+
+  const loadClients = async () => {
+    try {
+      const response = await fetch("/api/clients");
+      if (!response.ok) throw new Error("Failed to fetch clients");
+      const payload = (await response.json()) as { clients?: ApiClient[] };
+      const nextClients = buildClients(payload.clients ?? []);
+      setClients(nextClients.length > 0 ? nextClients : buildClients(hud.clients ?? []));
+      setApiAvailable(true);
+    } catch (error) {
+      setClients(buildClients(hud.clients ?? []));
+      setApiAvailable(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadClients();
+  }, []);
+
+  useEffect(() => {
+    if (clients.length === 0) return;
+    if (!clients.some((client) => client.id === activeClient)) {
+      setActiveClient(clients[0]?.id ?? "");
+    }
+  }, [clients, activeClient]);
+
+  useEffect(() => {
+    if (!currentClient) return;
+    const lastRun = currentClient.lastRun ?? null;
+    setCurrentRun(lastRun);
+    setRunStages(lastRun?.stages ?? createDefaultStages());
+    setRunLogs((lastRun?.logs ?? []).slice(-8));
+    setIsReviewOpen(false);
+  }, [currentClient?.id, clients]);
+
+  useEffect(() => {
+    if (!currentRun?.runId || !apiAvailable) return;
+
+    const eventSource = new EventSource(`/api/runs/${currentRun.runId}/logs`);
+
+    const handleSnapshot = (event: MessageEvent) => {
+      const payload = JSON.parse(event.data) as { run?: RunRecord; logs?: LogEntry[] };
+      if (payload.run) {
+        setCurrentRun(payload.run);
+        setRunStages(payload.run.stages ?? createDefaultStages());
+      }
+      if (payload.logs) {
+        setRunLogs(payload.logs.slice(-8));
+      }
+    };
+
+    const handleLog = (event: MessageEvent) => {
+      const entry = JSON.parse(event.data) as LogEntry;
+      setRunLogs((prev) => [...prev, entry].slice(-8));
+    };
+
+    const handleStage = (event: MessageEvent) => {
+      const payload = JSON.parse(event.data) as { stage: RunStage };
+      setRunStages((prev) =>
+        prev.map((stage) => (stage.id === payload.stage.id ? { ...stage, ...payload.stage } : stage))
+      );
+    };
+
+    const handleStatus = (event: MessageEvent) => {
+      const payload = JSON.parse(event.data) as { status: RunStatus; updatedAt?: string; endedAt?: string };
+      setCurrentRun((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: payload.status,
+              updatedAt: payload.updatedAt ?? prev.updatedAt,
+              endedAt: payload.endedAt ?? prev.endedAt,
+            }
+          : prev
+      );
+      if (["complete", "needs_review", "blocked", "failed", "canceled"].includes(payload.status)) {
+        void loadClients();
+      }
+    };
+
+    eventSource.addEventListener("snapshot", handleSnapshot);
+    eventSource.addEventListener("log", handleLog);
+    eventSource.addEventListener("stage", handleStage);
+    eventSource.addEventListener("status", handleStatus);
+
+    return () => {
+      eventSource.close();
+    };
+  }, [currentRun?.runId, apiAvailable]);
 
   useEffect(() => {
     if (isExpanded) {
@@ -297,27 +550,83 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    if (!isExpanded) return;
-    const interval = window.setInterval(() => {
-      setLogs((prev) => {
-        const action = logActions[Math.floor(Math.random() * logActions.length)];
-        const suffix = Math.random().toString(36).slice(2, 7).toUpperCase();
-        const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-        const next: LogEntry[] = [
-          ...prev,
-          {
-            time: now,
-            msg: `${action}_${suffix}`,
-            status: Math.random() > 0.2 ? "OK" : "BUSY",
-          },
-        ];
-        if (next.length > 6) next.shift();
-        return next;
+  const startRun = async (mode: string) => {
+    if (!currentClient) return;
+    setRunMenuOpen(false);
+    setIsReviewOpen(false);
+
+    try {
+      const response = await fetch(`/api/clients/${currentClient.id}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, inputs: buildRunInputs(currentClient, mode) }),
       });
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [isExpanded, activeClient]);
+
+      if (!response.ok) throw new Error("Failed to start run");
+
+      const payload = (await response.json()) as { run?: RunRecord };
+      if (payload.run) {
+        setCurrentRun(payload.run);
+        setRunStages(payload.run.stages ?? createDefaultStages());
+        setRunLogs([]);
+      }
+      setApiAvailable(true);
+      setIsClientDetailOpen(true);
+      void loadClients();
+    } catch (error) {
+      setApiAvailable(false);
+    }
+  };
+
+  const handleExport = async () => {
+    if (!currentRun) return;
+    try {
+      const response = await fetch(`/api/runs/${currentRun.runId}/export`, { method: "POST" });
+      if (!response.ok) throw new Error("Export failed");
+      const payload = (await response.json()) as { run?: RunRecord };
+      if (payload.run) {
+        setCurrentRun(payload.run);
+        setRunStages(payload.run.stages ?? runStages);
+      }
+      setApiAvailable(true);
+      void loadClients();
+    } catch (error) {
+      setApiAvailable(false);
+    }
+  };
+
+  const handleReview = async (decision: "approve" | "reject") => {
+    if (!currentRun) return;
+
+    const endpoint = decision === "approve" ? "approve" : "reject";
+    try {
+      const response = await fetch(`/api/runs/${currentRun.runId}/review/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: reviewNotes }),
+      });
+
+      if (!response.ok) throw new Error("Review update failed");
+      const payload = (await response.json()) as { run?: RunRecord };
+      if (payload.run) {
+        setCurrentRun(payload.run);
+        setRunStages(payload.run.stages ?? runStages);
+      }
+      setReviewNotes("");
+      setIsReviewOpen(false);
+      setApiAvailable(true);
+      void loadClients();
+    } catch (error) {
+      setApiAvailable(false);
+    }
+  };
+
+  const needsReview = Boolean(
+    (currentRun?.status && currentRun.status === "needs_review") || currentClient?.alert
+  );
+  const runStateLabel = getRunStatusLabel(currentRun?.status);
+  const runStateClass = getRunStatusClass(currentRun?.status);
+  const lastRunTime = formatTimestamp(currentRun?.startedAt ?? currentRun?.createdAt);
 
   return (
     <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#080a0c]">
@@ -345,7 +654,7 @@ export default function App() {
         <PancakeCore active={isExpanded} isDragging={isDragging} />
         {!isExpanded && (
           <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap opacity-40 text-[9px] font-mono tracking-[0.3em] uppercase animate-pulse">
-            System_Standby
+            System Standby
           </div>
         )}
       </div>
@@ -382,9 +691,7 @@ export default function App() {
                     setIsClientDetailOpen(true);
                   }}
                   className={`group relative flex items-center justify-center transition-all duration-500 ${
-                    activeClient === client.id
-                      ? "scale-110"
-                      : "scale-90 opacity-40 hover:opacity-100"
+                    activeClient === client.id ? "scale-110" : "scale-90 opacity-40 hover:opacity-100"
                   }`}
                 >
                   <div
@@ -419,7 +726,7 @@ export default function App() {
           <div className="flex flex-col items-center space-y-3 mb-4 z-10">
             <Settings2 size={14} className="text-white/20 hover:text-white cursor-pointer transition-colors" />
             <div className="text-[9px] font-mono -rotate-90 opacity-20 tracking-[0.2em] whitespace-nowrap uppercase">
-              Brand_OS_v9.4
+              BrandStudios OS v0.9.4
             </div>
           </div>
           <OverlayEffects />
@@ -432,12 +739,12 @@ export default function App() {
 
               <div className="flex items-center space-x-6 text-[8px] font-mono tracking-[0.35em] z-10">
                 <span className="text-cyan-400 flex items-center animate-pulse">
-                  <ShieldCheck size={11} className="mr-2" /> CORE_SYNC_READY
+                  <ShieldCheck size={11} className="mr-2" /> Core Sync Ready
                 </span>
                 <span className="text-white/40 flex items-center">
-                  LATENCY: <span className="text-white ml-2">0.0004ms</span>
+                  Latency: <span className="text-white ml-2">0.0004ms</span>
                 </span>
-                <span className="text-white/40 flex items-center uppercase">
+                <span className="text-white/40 flex items-center">
                   Uptime: <span className="text-white ml-2">99.98%</span>
                 </span>
               </div>
@@ -472,105 +779,319 @@ export default function App() {
             </div>
 
             {currentClient && isClientDetailOpen && (
-              <div className="w-full max-w-[480px] z-10 space-y-4 ml-4">
-                <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
-                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
-                <div className="space-y-2">
-                    <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
-                      {currentClient.name}
-                    </h1>
-                    <div className="flex items-center space-x-4">
-                      <p className="text-[11px] font-mono tracking-[0.5em] text-cyan-400/60 uppercase">
-                        Brand_DNA: <span className="text-white font-bold">{currentClient.dnaCode}</span>
-                      </p>
-                      <div className="h-px w-20 bg-cyan-500/30" />
-                      <span className="px-2 py-0.5 border border-cyan-500/50 rounded text-[8px] font-mono text-cyan-400 bg-cyan-500/10">
-                        TYPE_{currentClient.typeLabel}
-                      </span>
-                      <span className="px-2 py-0.5 border border-white/10 rounded text-[8px] font-mono text-white/60 bg-white/5">
-                        {currentClient.statusLabel}
-                      </span>
+              <div className="w-full max-w-[520px] z-10 space-y-4 ml-4">
+                <div className="flex items-start justify-between gap-6 fade-slide-in">
+                  <div className="flex items-end space-x-6 md:space-x-8">
+                    <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
+                    <div className="space-y-2">
+                      <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
+                        {currentClient.name}
+                      </h1>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex flex-col">
+                          <span className="text-[9px] uppercase tracking-[0.35em] text-cyan-400/60">Brand Memory</span>
+                          <span className="text-[11px] font-mono text-white">{currentClient.memoryId}</span>
+                        </div>
+                        <div className="h-px w-16 bg-cyan-500/30" />
+                        <div className="flex flex-col">
+                          <span className="text-[9px] uppercase tracking-[0.35em] text-white/40">Type</span>
+                          <span className="text-[11px] text-white">{currentClient.typeLabel}</span>
+                          <span className="text-[8px] font-mono text-white/30">
+                            TYPE_{currentClient.typeLabel.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="flex flex-col">
+                          <span className="text-[9px] uppercase tracking-[0.35em] text-white/40">Status</span>
+                          <span className="text-[11px] text-white">{currentClient.statusLabel}</span>
+                        </div>
+                      </div>
+                      <div className="text-[9px] font-mono text-white/40 uppercase tracking-[0.25em]">
+                        ID: {currentClient.internalId} | Client: {currentClient.id}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-4 text-[9px] font-mono text-white/40 uppercase tracking-[0.2em]">
+                        <span>
+                          Run State: <span className={runStateClass}>{runStateLabel}</span>
+                        </span>
+                        <span>Run ID: {currentRun?.runId ?? "None"}</span>
+                        <span>Last Run: {lastRunTime}</span>
+                      </div>
                     </div>
                   </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setShowRunFeed((prev) => !prev)}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 text-[9px] font-mono uppercase tracking-[0.2em] text-white/50 hover:text-white hover:border-white/30 transition-colors"
+                    >
+                      <Terminal size={12} />
+                      Logs
+                    </button>
+                    <button
+                      onClick={() => setShowSettings((prev) => !prev)}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-white/10 text-[9px] font-mono uppercase tracking-[0.2em] text-white/50 hover:text-white hover:border-white/30 transition-colors"
+                    >
+                      <Settings2 size={12} />
+                      Settings
+                    </button>
+                  </div>
                 </div>
+
+                <div className="bg-black/15 border border-white/5 backdrop-blur-xl rounded-[1.75rem] p-4 flex flex-col gap-4">
+                  <div className="flex flex-wrap gap-2">
+                    {pillars.map((pillar) => (
+                      <button
+                        key={pillar}
+                        onClick={() => setActivePillar(pillar)}
+                        className={`px-4 py-2 rounded-full text-[10px] uppercase tracking-[0.25em] transition-colors ${
+                          activePillar === pillar
+                            ? "bg-cyan-500/20 border border-cyan-400/50 text-cyan-200"
+                            : "bg-white/5 border border-white/10 text-white/50 hover:text-white"
+                        }`}
+                      >
+                        {pillar}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-[12px] text-white/70 leading-relaxed">
+                    {activePillar === "Brand Memory" && (
+                      <div className="space-y-2">
+                        <div className="text-white/80">
+                          Reference signals, ingest history, and structured memory for {currentClient.name}.
+                        </div>
+                        <div className="text-[10px] font-mono text-white/40 uppercase tracking-[0.25em]">
+                          Memory ID: {currentClient.memoryId}
+                        </div>
+                      </div>
+                    )}
+                    {activePillar === "Creative Studio" && (
+                      <div className="space-y-2">
+                        <div className="text-white/80">
+                          Temp-gen orchestration, prompts, and creative outputs.
+                        </div>
+                        <div className="text-[10px] font-mono text-white/40 uppercase tracking-[0.25em]">
+                          Default Mode: {currentRun?.mode ?? "Ready"}
+                        </div>
+                      </div>
+                    )}
+                    {activePillar === "Brand Drift" && (
+                      <div className="space-y-2">
+                        <div className="text-white/80">
+                          Drift checks, thresholds, and compliance signals.
+                        </div>
+                        <div className="text-[10px] font-mono text-white/40 uppercase tracking-[0.25em]">
+                          Drift Status:{" "}
+                          {getStageStatusLabel(runStages.find((stage) => stage.id === "drift")?.status ?? "pending")}
+                        </div>
+                      </div>
+                    )}
+                    {activePillar === "Insight Loop" && (
+                      <div className="space-y-2">
+                        <div className="text-white/80">
+                          Run outcomes, approvals, and feedback loops.
+                        </div>
+                        <div className="text-[10px] font-mono text-white/40 uppercase tracking-[0.25em]">
+                          Review: {needsReview ? "Required" : "Clear"}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {showSettings && (
+                  <div className="bg-black/25 border border-white/10 backdrop-blur-xl rounded-[1.75rem] p-4 text-[11px] text-white/70">
+                    <div className="text-[10px] uppercase tracking-[0.25em] text-white/40 mb-3">Client Settings</div>
+                    <div className="space-y-2 font-mono text-white/60">
+                      <div>LLM: {currentClient.configuration?.llm ?? "Not set"}</div>
+                      <div>Agent Tool: {currentClient.configuration?.agent_tool ?? "Not set"}</div>
+                      <div>Creative Tool: {currentClient.configuration?.creative_tool ?? "Not set"}</div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 gap-4">
                   <div className="bg-black/20 border border-white/5 backdrop-blur-2xl rounded-[2rem] p-5 flex flex-col justify-between shadow-2xl relative group overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent opacity-30" />
                     <div className="flex justify-between items-center mb-3">
-                      <span className="text-[10px] font-mono tracking-widest opacity-40 uppercase">
-                        Sensors_Telemetry
-                      </span>
+                      <span className="text-[10px] font-mono tracking-widest opacity-50">Signals</span>
                       <Radar size={16} className="text-cyan-400 animate-pulse" />
                     </div>
 
                     <div className="flex justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
                       <CircularTelemetry
                         percent={currentClient.health}
-                        label="Neural_Sync"
+                        label="Sync"
                         color={currentClient.health < 50 ? "amber" : "cyan"}
                       />
                     </div>
 
                     <div className="grid grid-cols-2 gap-2.5 mt-3">
                       <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Process_Nodes</span>
+                        <span className="text-[8px] opacity-50 uppercase font-mono mb-1">Agents</span>
                         <span className="text-2xl font-bold font-mono tracking-tighter">
                           {currentClient.runsLabel}
                         </span>
                       </div>
                       <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Integrity</span>
-                        <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">
-                          NOMINAL
-                        </span>
+                        <span className="text-[8px] opacity-50 uppercase font-mono mb-1">Health</span>
+                        <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">Normal</span>
                       </div>
                     </div>
                     <OverlayEffects className="rounded-[2rem]" />
                   </div>
 
-                  <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative overflow-hidden">
-                    <div className="flex justify-between items-center mb-4">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_10px_cyan]" />
-                        <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
-                          Agentic_Workflow_Stream
-                        </span>
-                      </div>
-                      <Terminal size={14} className="opacity-30" />
-                    </div>
-
-                    <div className="flex-1 space-y-2 font-mono text-[10px] overflow-hidden">
-                      {logs.map((log, i) => (
-                        <div
-                          key={`${log.time}-${i}`}
-                          className={`flex justify-between py-2.5 px-4 rounded-xl transition-all duration-500 border-l-2 ${
-                            i === logs.length - 1
-                              ? "bg-cyan-500/10 border-cyan-400 translate-x-1 text-white"
-                              : "border-white/5 text-white/40"
-                          }`}
-                        >
-                          <div className="flex space-x-4">
-                            <span className="opacity-30">[{log.time}]</span>
-                            <span>{log.msg}</span>
-                          </div>
-                          <span className={log.status === "OK" ? "text-cyan-400" : "text-amber-500"}>
-                            // {log.status}
-                          </span>
+                  {showRunFeed && (
+                    <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative overflow-hidden">
+                      <div className="flex justify-between items-center mb-4">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_10px_cyan]" />
+                          <span className="text-[10px] font-mono opacity-70 tracking-widest">Run Feed</span>
                         </div>
-                      ))}
-                    </div>
+                        <Terminal size={14} className="opacity-30" />
+                      </div>
 
-                    <div className="mt-4 flex space-x-3">
-                      <button className="flex-1 py-3 bg-white text-black font-black uppercase text-xs rounded-2xl hover:bg-cyan-400 transition-all shadow-[0_0_30px_rgba(255,255,255,0.1)] active:scale-95 group flex items-center justify-center">
-                        <Zap size={14} className="mr-2" /> Initialize Neural Run
-                      </button>
-                      <button className="px-4 border border-white/10 rounded-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/50 hover:text-white">
-                        <Settings2 size={18} />
-                      </button>
+                      <div className="grid grid-cols-1 gap-2 mb-4">
+                        {runStages.map((stage) => (
+                          <div
+                            key={stage.id}
+                            className="flex items-center justify-between px-3 py-2 rounded-xl border border-white/5 text-[10px]"
+                          >
+                            <span className="text-white/70 uppercase tracking-[0.2em]">{stage.label}</span>
+                            <span className={`font-mono uppercase tracking-[0.2em] ${getStageStatusClass(stage.status)}`}>
+                              {getStageStatusLabel(stage.status)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="flex-1 space-y-2 font-mono text-[10px] overflow-hidden">
+                        {runLogs.length === 0 && (
+                          <div className="text-white/40 px-3 py-2 border border-white/5 rounded-xl">
+                            {apiAvailable ? "No run activity yet." : "Run feed offline. Start the os-api to stream logs."}
+                          </div>
+                        )}
+                        {runLogs.map((log, i) => (
+                          <div
+                            key={`${log.time}-${i}`}
+                            className={`flex justify-between py-2.5 px-4 rounded-xl transition-all duration-500 border-l-2 ${
+                              i === runLogs.length - 1
+                                ? "bg-cyan-500/10 border-cyan-400 translate-x-1 text-white"
+                                : "border-white/5 text-white/50"
+                            }`}
+                          >
+                            <div className="flex space-x-4">
+                              <span className="opacity-40">[{formatLogTime(log.time)}]</span>
+                              <span className="uppercase tracking-[0.2em] text-cyan-400/70">
+                                {log.stage ?? "Run"}
+                              </span>
+                              <span>{log.msg}</span>
+                            </div>
+                            <span
+                              className={
+                                log.level === "error"
+                                  ? "text-red-400"
+                                  : log.level === "warn"
+                                    ? "text-amber-400"
+                                    : "text-cyan-400"
+                              }
+                            >
+                              //{" "}
+                              {log.level === "error"
+                                ? "Error"
+                                : log.level === "warn"
+                                  ? "Warn"
+                                  : "OK"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-4 flex flex-col gap-3">
+                        <div className="flex space-x-3">
+                          <div className="relative flex-1">
+                            <div className="flex w-full">
+                              <button
+                                onClick={() => startRun("full")}
+                                className="flex-1 py-3 bg-white text-black font-black uppercase text-xs rounded-l-2xl hover:bg-cyan-400 transition-all shadow-[0_0_30px_rgba(255,255,255,0.1)] active:scale-95 group flex items-center justify-center"
+                              >
+                                <Zap size={14} className="mr-2" /> Run
+                              </button>
+                              <button
+                                onClick={() => setRunMenuOpen((prev) => !prev)}
+                                className="px-4 border border-white/10 rounded-r-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/60 hover:text-white flex items-center justify-center"
+                              >
+                                <ChevronDown size={16} />
+                              </button>
+                            </div>
+
+                            {runMenuOpen && (
+                              <div className="absolute left-0 right-0 bottom-full mb-3 bg-[#0a0c10] border border-cyan-500/30 rounded-2xl shadow-2xl p-2 z-20">
+                                {runOptions.map((option) => (
+                                  <button
+                                    key={option.mode}
+                                    onClick={() => startRun(option.mode)}
+                                    className="w-full text-left px-4 py-3 rounded-xl hover:bg-white/5 transition-colors"
+                                  >
+                                    <div className="text-[11px] text-white uppercase tracking-[0.2em]">
+                                      {option.label}
+                                    </div>
+                                    <div className="text-[9px] font-mono text-white/40 uppercase tracking-[0.2em]">
+                                      {option.detail}
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {needsReview && (
+                            <button
+                              onClick={() => setIsReviewOpen((prev) => !prev)}
+                              className="px-4 border border-amber-400/40 rounded-2xl hover:bg-amber-400/10 hover:border-amber-300 transition-all text-amber-200 uppercase text-[10px] tracking-[0.2em] font-mono"
+                            >
+                              Review
+                            </button>
+                          )}
+
+                          <button
+                            onClick={handleExport}
+                            className="px-4 border border-white/10 rounded-2xl hover:bg-white/5 hover:border-white/30 transition-all text-white/70 uppercase text-[10px] tracking-[0.2em] font-mono"
+                          >
+                            Export
+                          </button>
+                        </div>
+
+                        {needsReview && isReviewOpen && (
+                          <div className="rounded-2xl border border-white/10 bg-black/40 p-4 space-y-3">
+                            <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-white/60">
+                              HITL Review Notes
+                            </div>
+                            <textarea
+                              value={reviewNotes}
+                              onChange={(event) => setReviewNotes(event.target.value)}
+                              placeholder="Notes for review decision"
+                              className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-[11px] text-white/70 outline-none focus:border-cyan-400/50"
+                              rows={3}
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => handleReview("approve")}
+                                className="flex-1 py-2 rounded-xl bg-cyan-400/80 text-black text-[10px] font-mono uppercase tracking-[0.2em] hover:bg-cyan-300"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => handleReview("reject")}
+                                className="flex-1 py-2 rounded-xl border border-red-400/60 text-red-200 text-[10px] font-mono uppercase tracking-[0.2em] hover:bg-red-500/10"
+                              >
+                                Reject
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <OverlayEffects className="rounded-[2rem]" />
                     </div>
-                    <OverlayEffects className="rounded-[2rem]" />
-                  </div>
+                  )}
                 </div>
               </div>
             )}
@@ -602,9 +1123,9 @@ export default function App() {
                   <Layers className="text-cyan-400" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold tracking-[0.3em] text-white uppercase">DNA_Injection_Module</h2>
+                  <h2 className="text-lg font-bold tracking-[0.3em] text-white uppercase">Brand Intake</h2>
                   <p className="text-[9px] font-mono text-cyan-400 opacity-50 uppercase tracking-[0.2em]">
-                    SEQUENCE_READY_FOR_BOOTSTRAP
+                    Intake Ready
                   </p>
                 </div>
               </div>
@@ -618,17 +1139,17 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase font-mono opacity-40 ml-1 tracking-widest">
-                    Entity_Descriptor
+                    Client Name
                   </label>
                   <input
                     type="text"
-                    placeholder="BRAND_NAME"
+                    placeholder="Client name"
                     className="w-full bg-white/5 border border-white/10 p-5 rounded-2xl outline-none focus:border-cyan-400/50 font-mono text-white transition-all text-sm"
                   />
                 </div>
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase font-mono opacity-40 ml-1 tracking-widest">
-                    DNA_Protocol
+                    Brand Memory Protocol
                   </label>
                   <input
                     type="text"
@@ -655,7 +1176,7 @@ export default function App() {
               </div>
 
               <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(34,211,238,0.3)] hover:bg-white transition-all active:scale-95">
-                EXECUTE_SEQUENCE_STREAMS
+                Create Client
               </button>
             </div>
             <OverlayEffects className="rounded-[3rem]" />

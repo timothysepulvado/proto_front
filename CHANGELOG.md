@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.6] - 2026-01-16
+
+- Shifted HUD copy to BrandStudios vocabulary and added four-pillar client scaffolding.
+- Added run controls, stage progress, HITL review handling, and run metadata display.
+- Introduced a local os-api service with SSE log streaming and CLI orchestration for Temp-gen and Brand linter.
+- Added Vite proxying and dev scripts to run HUD and os-api together.
+
 ## [0.1.3] - 2026-01-16
 
 - Tightened HUD layout spacing and reduced client detail stack width/height for a lighter overlay.

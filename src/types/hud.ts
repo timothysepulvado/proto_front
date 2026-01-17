@@ -68,6 +68,9 @@ export interface HudMeta {
 export interface HudClient {
   id: string;
   name: string;
+  brand_id?: string;
+  internal_id?: string;
+  brand_memory_id?: string;
   agentic_features_workflow?: string;
   dna?: string | null;
   runs?: number | string | null;

@@ -60,6 +60,9 @@
     "clients": [
       {
         "id": "client_cylndr",
+        "brand_id": "cylndr",
+        "internal_id": "CYLNDR",
+        "brand_memory_id": "BRAND_DNA_CYLN",
         "name": "Cylndr",
         "agentic_features_workflow": "Ingest → Brand DNA embed → Drift lint (BDE) → Generate (Temp-gen) → HITL approve → Deliver (C2PA + export) → Insight loop",
         "dna": "Brand DNA: CYLNDR / Makers’ Studio (navy + orange), retro-institutional typography, bronco mark; governance: strict drift thresholds + overlay rules",
@@ -88,6 +91,9 @@
       },
       {
         "id": "client_jenni_kayne",
+        "brand_id": "jenni_kayne",
+        "internal_id": "JENNI_KAYNE",
+        "brand_memory_id": "BRAND_DNA_JK",
         "name": "Jenni Kayne",
         "agentic_features_workflow": "Ingest → Style/voice calibration → Product/collection tagging → Generate variants → QA gates → Publish-ready exports",
         "dna": "Brand DNA: calm minimal luxury, warm neutrals, tactile materials; governance: avoid loud saturation, keep negative space",
@@ -116,6 +122,9 @@
       },
       {
         "id": "client_lilydale",
+        "brand_id": "lilydale",
+        "internal_id": "LILYDALE",
+        "brand_memory_id": "BRAND_DNA_LILY",
         "name": "Lilydale",
         "agentic_features_workflow": "Intake → Rapid DNA draft → Prompt scaffolds → Batch generation → HITL review → Delivery + performance tags",
         "dna": "Brand DNA: (empty state) not yet ingested",
