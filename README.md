@@ -7,10 +7,23 @@ React + TypeScript HUD for BrandStudios.ai OS. Features a draggable Ironman-insp
 ```
 HUD/
 ├── src/              # React frontend (Vite + Tailwind v4)
-├── os-api/           # Express backend (SQLite + SSE)
+│   └── lib/supabase.ts  # Supabase client
+├── os-api/           # Express backend (SQLite + SSE) - legacy/local dev
+├── supabase/         # Supabase migrations
 ├── hud.json          # UI data source
+├── .mcp.json         # Supabase MCP config
 └── package.json      # Monorepo scripts
 ```
+
+## Backend
+
+**Supabase** (production):
+- Project: `tfbfzepaccvklpabllao`
+- Tables: `clients`, `runs`, `run_logs`, `artifacts`
+- Realtime enabled on `runs` and `run_logs`
+
+**os-api** (local dev):
+- Express + SQLite fallback for offline development
 
 **External repos (wired but optional):**
 - `Temp-gen/` - Image/video generation CLI (Gemini, Veo)
@@ -29,8 +42,18 @@ nvm use
 npm install
 cd os-api && npm install && cd ..
 
+# Set up environment (copy and fill in values)
+cp .env.example .env
+
 # Run both HUD and API
 npm run dev:all
+```
+
+### Environment Variables
+
+```bash
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key_here
 ```
 
 This starts:
