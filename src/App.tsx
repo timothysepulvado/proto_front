@@ -595,6 +595,23 @@ export default function App() {
     }
   };
 
+  const handleCancel = async () => {
+    if (!currentRun) return;
+    try {
+      const response = await fetch(`/api/runs/${currentRun.runId}/cancel`, { method: "POST" });
+      if (!response.ok) throw new Error("Cancel failed");
+      const payload = (await response.json()) as { run?: RunRecord };
+      if (payload.run) {
+        setCurrentRun(payload.run);
+        setRunStages(payload.run.stages ?? runStages);
+      }
+      setApiAvailable(true);
+      void loadClients();
+    } catch (error) {
+      setApiAvailable(false);
+    }
+  };
+
   const handleReview = async (decision: "approve" | "reject") => {
     if (!currentRun) return;
 
@@ -779,7 +796,7 @@ export default function App() {
             </div>
 
             {currentClient && isClientDetailOpen && (
-              <div className="w-full max-w-[520px] z-10 space-y-4 ml-4">
+              <div className="w-full max-w-[520px] z-10 space-y-4 ml-4 max-h-[calc(100vh-200px)] overflow-y-auto pr-2">
                 <div className="flex items-start justify-between gap-6 fade-slide-in">
                   <div className="flex items-end space-x-6 md:space-x-8">
                     <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
@@ -787,33 +804,35 @@ export default function App() {
                       <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
                         {currentClient.name}
                       </h1>
-                      <div className="flex flex-wrap items-center gap-4">
-                        <div className="flex flex-col">
-                          <span className="text-[9px] uppercase tracking-[0.35em] text-cyan-400/60">Brand Memory</span>
-                          <span className="text-[11px] font-mono text-white">{currentClient.memoryId}</span>
+                      <div className="space-y-2 rounded-2xl border border-white/10 bg-black/35 px-4 py-3 backdrop-blur-xl">
+                        <div className="flex flex-wrap items-center gap-4">
+                          <div className="flex flex-col">
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-cyan-400/70">Brand Memory</span>
+                            <span className="text-[11px] font-mono text-white">{currentClient.memoryId}</span>
+                          </div>
+                          <div className="h-px w-16 bg-cyan-500/30" />
+                          <div className="flex flex-col">
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/60">Type</span>
+                            <span className="text-[11px] text-white">{currentClient.typeLabel}</span>
+                            <span className="text-[8px] font-mono text-white/40">
+                              TYPE_{currentClient.typeLabel.toUpperCase()}
+                            </span>
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[9px] uppercase tracking-[0.35em] text-white/60">Status</span>
+                            <span className="text-[11px] text-white">{currentClient.statusLabel}</span>
+                          </div>
                         </div>
-                        <div className="h-px w-16 bg-cyan-500/30" />
-                        <div className="flex flex-col">
-                          <span className="text-[9px] uppercase tracking-[0.35em] text-white/40">Type</span>
-                          <span className="text-[11px] text-white">{currentClient.typeLabel}</span>
-                          <span className="text-[8px] font-mono text-white/30">
-                            TYPE_{currentClient.typeLabel.toUpperCase()}
+                        <div className="text-[9px] font-mono text-white/70 uppercase tracking-[0.25em]">
+                          ID: {currentClient.internalId} | Client: {currentClient.id}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-4 text-[9px] font-mono text-white/70 uppercase tracking-[0.2em]">
+                          <span>
+                            Run State: <span className={runStateClass}>{runStateLabel}</span>
                           </span>
+                          <span>Run ID: {currentRun?.runId ?? "None"}</span>
+                          <span>Last Run: {lastRunTime}</span>
                         </div>
-                        <div className="flex flex-col">
-                          <span className="text-[9px] uppercase tracking-[0.35em] text-white/40">Status</span>
-                          <span className="text-[11px] text-white">{currentClient.statusLabel}</span>
-                        </div>
-                      </div>
-                      <div className="text-[9px] font-mono text-white/40 uppercase tracking-[0.25em]">
-                        ID: {currentClient.internalId} | Client: {currentClient.id}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-4 text-[9px] font-mono text-white/40 uppercase tracking-[0.2em]">
-                        <span>
-                          Run State: <span className={runStateClass}>{runStateLabel}</span>
-                        </span>
-                        <span>Run ID: {currentRun?.runId ?? "None"}</span>
-                        <span>Last Run: {lastRunTime}</span>
                       </div>
                     </div>
                   </div>
@@ -963,7 +982,7 @@ export default function App() {
                         ))}
                       </div>
 
-                      <div className="flex-1 space-y-2 font-mono text-[10px] overflow-hidden">
+                      <div className="flex-1 space-y-2 font-mono text-[10px] max-h-52 overflow-y-auto pr-1">
                         {runLogs.length === 0 && (
                           <div className="text-white/40 px-3 py-2 border border-white/5 rounded-xl">
                             {apiAvailable ? "No run activity yet." : "Run feed offline. Start the os-api to stream logs."}
@@ -972,18 +991,18 @@ export default function App() {
                         {runLogs.map((log, i) => (
                           <div
                             key={`${log.time}-${i}`}
-                            className={`flex justify-between py-2.5 px-4 rounded-xl transition-all duration-500 border-l-2 ${
+                            className={`flex items-start justify-between py-2.5 px-4 rounded-xl transition-all duration-500 border-l-2 ${
                               i === runLogs.length - 1
                                 ? "bg-cyan-500/10 border-cyan-400 translate-x-1 text-white"
                                 : "border-white/5 text-white/50"
                             }`}
                           >
-                            <div className="flex space-x-4">
-                              <span className="opacity-40">[{formatLogTime(log.time)}]</span>
-                              <span className="uppercase tracking-[0.2em] text-cyan-400/70">
+                            <div className="flex flex-1 min-w-0 items-start gap-4">
+                              <span className="opacity-40 shrink-0">[{formatLogTime(log.time)}]</span>
+                              <span className="uppercase tracking-[0.2em] text-cyan-400/70 shrink-0">
                                 {log.stage ?? "Run"}
                               </span>
-                              <span>{log.msg}</span>
+                              <span className="min-w-0 break-words text-white/80">{log.msg}</span>
                             </div>
                             <span
                               className={
@@ -1042,6 +1061,15 @@ export default function App() {
                               </div>
                             )}
                           </div>
+
+                          {currentRun?.status === "running" && (
+                            <button
+                              onClick={handleCancel}
+                              className="px-4 border border-red-400/40 rounded-2xl hover:bg-red-500/10 hover:border-red-300 transition-all text-red-200 uppercase text-[10px] tracking-[0.2em] font-mono"
+                            >
+                              Cancel
+                            </button>
+                          )}
 
                           {needsReview && (
                             <button

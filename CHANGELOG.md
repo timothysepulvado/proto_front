@@ -9,6 +9,12 @@ All notable changes to this project will be documented in this file.
 - Introduced a local os-api service with SSE log streaming and CLI orchestration for Temp-gen and Brand linter.
 - Added Vite proxying and dev scripts to run HUD and os-api together.
 
+## [0.1.7] - 2026-01-16
+
+- Added a cancel action for in-progress runs.
+- Improved client header readability with a blurred status card.
+- Added scrollable client detail panel and log wrapping for long lines.
+
 ## [0.1.3] - 2026-01-16
 
 - Tightened HUD layout spacing and reduced client detail stack width/height for a lighter overlay.
