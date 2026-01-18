@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-01-18
 **Branch:** `tim-dev`
-**Status:** Phase 3 Complete (Brand_linter/BDE) | HUD Phase 2 Complete
+**Status:** Phase 5 Complete (Brand_linter/BDE) | HUD Phase 2 Complete
 
 ---
 
@@ -11,13 +11,54 @@
 | Component | Location | Branch | Phase | Health | Notes |
 |-----------|----------|--------|-------|--------|-------|
 | **HUD** | `~/Hud` | `tim-dev` | Phase 2 ✅ | 8/10 | Orchestration layer operational |
-| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 3 ✅ | 8/10 | Triple fusion complete |
-| **BDE** | `~/BDE` | `antigravity` | Phase 3 ✅ | 8/10 | Cohere v4 model ID fixed |
+| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 5 ✅ | 10/10 | Triple fusion fully operational |
+| **BDE** | `~/BDE` | `antigravity` | Phase 5 ✅ | 10/10 | All indices aligned |
 | **Temp-gen** | `~/Temp-gen` | - | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
 
 ---
 
-## Phase 3 Completion Summary (2026-01-18)
+## Phase 5 Completion Summary (2026-01-18)
+
+### What Was Done
+
+#### Phase 4: Fix CLIP Index ✅
+- **Problem**: `jennikayne-brand-dna-clip768` was empty (0 vectors)
+- **Root Cause**: No reference images existed at `BDE/data/reference_images/jenni_kayne/`
+- **Solution**: Created directory with 107 images, ran `ingest_clip768.py`
+- **Result**: 106 vectors now in CLIP index, visual similarity working
+
+#### Phase 5: ID Alignment ✅
+- **Problem**: Per-asset fusion failed due to ID format mismatch
+  - CLIP: `jenni_kayne_lifestyle_blend_estate_v1_wide_standing_png`
+  - E5: `jenni_kayne_lifestyle_0000` (sequential)
+  - Cohere: `ref_lifestyle_016` (sequential)
+- **Solution**:
+  - Cleared E5 and Cohere namespaces
+  - Updated `ingest_e5_cohere.py` to use separate indices (E5: 1024D, Cohere: 1536D)
+  - Fixed Cohere model ID to inference profile: `us.cohere.embed-v4:0`
+  - Re-ingested with filename-based IDs
+- **Result**: All indices aligned, triple fusion achieves AUTO_PASS
+
+### Test Results (Post Phase 5)
+```
+CLIP (Visual):    Score 0.9962 ✅ Working (self-match)
+E5 (Semantic):    Score 0.8424 ✅ Working
+Cohere (Multi):   Score 0.5368 ✅ Working
+Gate Decision:    AUTO_PASS ✅
+```
+
+### Session Commits (2026-01-18)
+
+| Repo | Branch | Commit | Description |
+|------|--------|--------|-------------|
+| BDE | `antigravity` | `04b9985` | Phase 5: Fix ID alignment across indices |
+| BDE | `antigravity` | `d423ca5` | docs: Update CONTEXT_HANDOFF.md |
+| Brand_linter | `phase-3` | `f0bab1b` | Phase 5: Update multimodal retriever |
+| HUD | `tim-dev` | (pending) | Update HANDOFF.md with Phase 4+5 |
+
+---
+
+## Phase 3 Summary (Previous Session)
 
 ### What Was Done
 1. **Fixed Cohere v4 Model IDs** across all files
@@ -27,39 +68,11 @@
 2. **Created `cohere_multicrop.py`** in Brand_linter
    - `bedrock_embed_interleaved_query()` - 1536D embeddings via AWS Bedrock
    - `query_cohere_index_maxpool()` - Multi-crop max-pooling strategy
-   - Full test suite with `--test`, `--embed-text`, `--embed-image`
 
-3. **Triple Fusion Pipeline Verified**
-   - CLIP + E5 + Cohere z-score fusion operational
-   - Tested with `multimodal_retriever.py`
-
-4. **Repo Cleanup** (Brand_linter)
+3. **Repo Cleanup** (Brand_linter)
    - Archived legacy docs to `archive/legacy_docs/`
    - Archived experiments to `archive/experiments/`
    - Moved Veo tools to `veo_tooling_export/`
-   - Removed 15 obsolete batch scripts
-   - Removed redundant session handoff files
-
-### Test Results
-```
-E5 (Semantic):    Score 0.8209 ✅ Working
-Cohere (Multi):   Score 0.3206 ✅ Working
-CLIP (Visual):    Score 0.0000 ⚠️ NEEDS INVESTIGATION
-```
-
-### ⚠️ Outstanding: CLIP Index Issue
-- CLIP is returning 0 matches in triple fusion
-- Index `jennikayne-brand-dna-clip768` may be empty or misconfigured
-- **Action Required:** Verify CLIP index has vectors and works with triple fusion
-
-### Session Commits (2026-01-18)
-
-| Repo | Branch | Commit | Description |
-|------|--------|--------|-------------|
-| BDE | `antigravity` | `da8f558` | Phase 3: Cohere v4 model ID fixes + docs |
-| Brand_linter | `phase-3` | `612feba` | Phase 3: cohere_multicrop.py + config |
-| Brand_linter | `phase-3` | `e78e049` | Cleanup: Archive old docs, remove batch scripts |
-| HUD | `tim-dev` | `05e6266` | HANDOFF.md as system-wide source of truth |
 
 ---
 
@@ -126,18 +139,12 @@ cd ~/Hud && npm run dev
 
 ---
 
-## Next Steps (Phase 4)
+## Next Steps (Phase 6)
 
-### Immediate Priority
-1. **🔴 Fix CLIP Index** - Investigate why CLIP returns 0 matches
-   - Check `jennikayne-brand-dna-clip768` index has vectors
-   - Verify CLIP embeddings are being generated correctly
-   - Test CLIP works independently before triple fusion
-
-### After CLIP Fixed
-2. Re-run document ingest with Cohere enabled (no `--skip-cohere`)
-3. Calibrate z-score thresholds based on reference data baseline
-4. Wire up HITL/RL loop for feedback integration
+### Brand_linter / BDE
+1. **Calibrate z-score thresholds** - Current thresholds may need tuning
+2. **Wire up HITL/RL loop** - Integrate feedback into scoring
+3. **Production deployment** - Move from dev to production
 
 ### HUD Phase 3+ Features (Not Yet Implemented)
 - Platform-specific export (Instagram, Amazon, etc.)
@@ -146,6 +153,11 @@ cd ~/Hud && npm run dev
 - Multi-user auth / role-based access
 - Docker deployment
 - File upload UI for brand assets
+
+### Important Notes
+- Use `--top-k 20` for multimodal retriever (better cross-modality overlap)
+- Cohere model ID: `us.cohere.embed-v4:0` (inference profile required)
+- E5 and Cohere require separate indices (different dimensions)
 
 ---
 
@@ -174,10 +186,17 @@ supabase/migrations/002_*.sql - Phase 2 schema
 
 ## Pinecone Index Reference
 
-| Index | Dimension | Purpose | Status |
+### Jenni Kayne (Phase 5 Complete)
+| Index | Dimension | Vectors | Namespace | ID Format | Status |
+|-------|-----------|---------|-----------|-----------|--------|
+| `jennikayne-brand-dna-clip768` | 768D | 106 | `__default__` | filename-based | ✅ Working |
+| `jennikayne-brand-dna-e5` | 1024D | 107 | `e5` | filename-based | ✅ Working |
+| `jennikayne-brand-dna-cohere` | 1536D | 107 | `cohere` | filename-based | ✅ Working |
+
+**ID Format Example**: `jenni_kayne_lifestyle_blend_estate_v1_wide_standing_png`
+
+### Cylndr
+| Index | Dimension | Vectors | Status |
 |-------|-----------|---------|--------|
-| `jennikayne-brand-dna-clip768` | 768D | CLIP visual similarity | ⚠️ Check vectors |
-| `jennikayne-brand-dna-e5` | 1024D | E5 semantic (inference) | ✅ Working |
-| `jennikayne-brand-dna-cohere` | 1536D | Cohere multimodal | ✅ Working |
-| `cylndr-brand-dna-clip768` | 768D | CLIP (cylndr) | ✅ 511 vectors |
-| `cylndr-e5-inference` | 1024D | E5 (cylndr) | ✅ 50 vectors |
+| `cylndr-brand-dna-clip768` | 768D | 511 | ✅ Working |
+| `cylndr-e5-inference` | 1024D | 50 | ✅ Working |
