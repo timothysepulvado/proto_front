@@ -16,6 +16,8 @@ import {
   Terminal,
   Workflow,
   X,
+  Zap,
+  Image as ImageIcon,
 } from "lucide-react";
 import hudData from "../hud.json";
 import type { HudRoot } from "./types/hud";
@@ -29,11 +31,20 @@ import {
   exportRun,
   getClients,
   subscribeToClients,
+  createCampaign,
+  launchCampaign,
+  getClientArtifacts,
+  createHITLDecision,
+  getArtifactDecisions,
   type Run,
   type RunLog,
   type RunMode,
   type Client,
+  type Campaign,
+  type Artifact,
+  type HITLDecisionType,
 } from "./api";
+import { CampaignModal, HITLReviewPanel, ArtifactGallery } from "./components";
 
 type Orientation = "horizontal" | "vertical";
 
@@ -278,6 +289,14 @@ export default function App() {
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
+
+  // Campaign & Artifact state
+  const [showCampaignModal, setShowCampaignModal] = useState(false);
+  const [showArtifactGallery, setShowArtifactGallery] = useState(false);
+  const [showHITLReview, setShowHITLReview] = useState(false);
+  const [clientArtifacts, setClientArtifacts] = useState<Artifact[]>([]);
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const [artifactDecisions, setArtifactDecisions] = useState<Awaited<ReturnType<typeof getArtifactDecisions>>>([]);
 
   // Fetch clients from Supabase on mount
   useEffect(() => {
@@ -534,6 +553,109 @@ export default function App() {
       setRunError(err instanceof Error ? err.message : "Failed to cancel run");
     }
   }, [currentRun]);
+
+  // Campaign handlers
+  const handleCreateCampaign = useCallback(async (campaign: {
+    name: string;
+    prompt: string;
+    deliverables: Campaign["deliverables"];
+    platforms: string[];
+    scheduledAt?: string;
+  }) => {
+    if (!activeClient) return;
+
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [...prev, { time: now, msg: "CAMPAIGN_CREATING", status: "BUSY" }]);
+
+    // Create the campaign
+    const newCampaign = await createCampaign(activeClient, campaign);
+
+    // If running now (no scheduledAt), launch immediately
+    if (!campaign.scheduledAt) {
+      setLogs((prev) => [...prev, { time: now, msg: "CAMPAIGN_LAUNCHING", status: "BUSY" }]);
+      const run = await launchCampaign(newCampaign.id);
+      setCurrentRun(run);
+      setIsRunning(true);
+
+      // Subscribe to logs
+      const unsubscribe = subscribeToLogs(
+        run.runId,
+        (log: RunLog) => {
+          if (log.stage && log.stage !== "system") {
+            setCurrentStage(log.stage);
+          }
+          setLogs((prev) => {
+            const entry: LogEntry = {
+              time: new Date(log.timestamp).toLocaleTimeString("en-US", { hour12: false }),
+              msg: log.message,
+              status: log.level === "error" ? "WAIT" : log.level === "warn" ? "BUSY" : "OK",
+              stage: log.stage,
+            };
+            const next = [...prev, entry];
+            if (next.length > 50) next.shift();
+            return next;
+          });
+        },
+        (result) => {
+          setIsRunning(false);
+          setCurrentRun((prev) => prev ? { ...prev, status: result.status } : null);
+          const endTime = new Date().toLocaleTimeString("en-US", { hour12: false });
+          setLogs((prev) => [
+            ...prev,
+            { time: endTime, msg: `CAMPAIGN_${result.status.toUpperCase()}`, status: result.status === "completed" ? "OK" : "WAIT" },
+          ]);
+        },
+        (error) => {
+          setIsRunning(false);
+          setRunError(error.message);
+        }
+      );
+
+      unsubscribeRef.current = unsubscribe;
+    } else {
+      setLogs((prev) => [...prev, { time: now, msg: "CAMPAIGN_SCHEDULED", status: "OK" }]);
+    }
+
+    setShowCampaignModal(false);
+  }, [activeClient]);
+
+  // Load artifacts for gallery
+  const handleOpenGallery = useCallback(async () => {
+    if (!activeClient) return;
+    try {
+      const artifacts = await getClientArtifacts(activeClient, { limit: 50 });
+      setClientArtifacts(artifacts);
+      setShowArtifactGallery(true);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : "Failed to load artifacts");
+    }
+  }, [activeClient]);
+
+  // HITL Review handlers
+  const handleSelectArtifactForReview = useCallback(async (artifact: Artifact) => {
+    setSelectedArtifact(artifact);
+    // Load previous decisions for this artifact
+    try {
+      const decisions = await getArtifactDecisions(artifact.id);
+      setArtifactDecisions(decisions);
+    } catch {
+      setArtifactDecisions([]);
+    }
+    setShowHITLReview(true);
+    setShowArtifactGallery(false);
+  }, []);
+
+  const handleHITLDecision = useCallback(async (decision: HITLDecisionType, notes?: string) => {
+    if (!selectedArtifact || !currentRun) return;
+    await createHITLDecision(selectedArtifact.id, currentRun.runId, decision, {
+      notes,
+      gradeScores: selectedArtifact.grade,
+    });
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [...prev, { time: now, msg: `HITL_${decision.toUpperCase()}`, status: decision === "approve" ? "OK" : "WAIT" }]);
+    setShowHITLReview(false);
+    setSelectedArtifact(null);
+  }, [selectedArtifact, currentRun]);
 
   return (
     <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#080a0c]">
@@ -830,13 +952,34 @@ export default function App() {
                     {/* Action Row */}
                     <div className="mt-4 space-y-3">
                       {/* Utility Controls */}
-                      <div className="flex justify-end space-x-2">
-                        <button className="p-2 border border-white/10 rounded-lg hover:bg-white/5 hover:border-white/30 transition-all text-white/40 hover:text-white" title="Logs">
-                          <FileText size={14} />
-                        </button>
-                        <button className="p-2 border border-white/10 rounded-lg hover:bg-white/5 hover:border-white/30 transition-all text-white/40 hover:text-white" title="Settings">
-                          <Settings2 size={14} />
-                        </button>
+                      <div className="flex justify-between">
+                        <div className="flex space-x-2">
+                          <button
+                            onClick={() => setShowCampaignModal(true)}
+                            disabled={isRunning}
+                            className="px-3 py-2 border border-cyan-500/30 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 hover:border-cyan-500/50 transition-all text-cyan-400 text-[10px] font-mono uppercase tracking-wider flex items-center space-x-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            title="Create Campaign"
+                          >
+                            <Zap size={12} />
+                            <span>Campaign</span>
+                          </button>
+                          <button
+                            onClick={handleOpenGallery}
+                            className="px-3 py-2 border border-white/10 rounded-lg hover:bg-white/5 hover:border-white/30 transition-all text-white/60 hover:text-white text-[10px] font-mono uppercase tracking-wider flex items-center space-x-1.5"
+                            title="View Gallery"
+                          >
+                            <ImageIcon size={12} />
+                            <span>Gallery</span>
+                          </button>
+                        </div>
+                        <div className="flex space-x-2">
+                          <button className="p-2 border border-white/10 rounded-lg hover:bg-white/5 hover:border-white/30 transition-all text-white/40 hover:text-white" title="Logs">
+                            <FileText size={14} />
+                          </button>
+                          <button className="p-2 border border-white/10 rounded-lg hover:bg-white/5 hover:border-white/30 transition-all text-white/40 hover:text-white" title="Settings">
+                            <Settings2 size={14} />
+                          </button>
+                        </div>
                       </div>
 
                       {/* Main Actions */}
@@ -993,6 +1136,42 @@ export default function App() {
               </button>
             </div>
             <OverlayEffects className="rounded-[3rem]" />
+          </div>
+        </div>
+      )}
+
+      {/* Campaign Modal */}
+      {showCampaignModal && currentClient && (
+        <CampaignModal
+          clientName={currentClient.name}
+          onClose={() => setShowCampaignModal(false)}
+          onSubmit={handleCreateCampaign}
+        />
+      )}
+
+      {/* HITL Review Panel */}
+      {showHITLReview && selectedArtifact && (
+        <HITLReviewPanel
+          artifact={selectedArtifact}
+          previousDecisions={artifactDecisions}
+          onDecision={handleHITLDecision}
+          onClose={() => {
+            setShowHITLReview(false);
+            setSelectedArtifact(null);
+          }}
+        />
+      )}
+
+      {/* Artifact Gallery Modal */}
+      {showArtifactGallery && (
+        <div className="fixed inset-0 z-[700] flex items-center justify-center p-6 bg-black/70 backdrop-blur-xl">
+          <div className="w-full max-w-5xl h-[80vh] bg-[#0a0c10] border border-cyan-500/30 rounded-[2rem] overflow-hidden shadow-[0_0_100px_rgba(0,0,0,0.8)]">
+            <ArtifactGallery
+              artifacts={clientArtifacts}
+              onSelect={handleSelectArtifactForReview}
+              onClose={() => setShowArtifactGallery(false)}
+              title={currentClient ? `${currentClient.name} Artifacts` : "Artifacts"}
+            />
           </div>
         </div>
       )}

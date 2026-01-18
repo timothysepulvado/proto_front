@@ -33,7 +33,7 @@ from config import (
     SUPABASE_KEY,
     POLL_INTERVAL_SECONDS,
 )
-from executors import IngestExecutor, CreativeExecutor, GradingExecutor
+from executors import IngestExecutor, CreativeExecutor, GradingExecutor, RAGGeneratorExecutor
 
 
 class Worker:
@@ -247,6 +247,64 @@ class Worker:
                 log_cb("export", "info", "Gathering artifacts from previous runs...")
                 log_cb("export", "info", "Export complete")
                 result = {"status": "completed", "artifacts": []}
+
+            elif mode == "campaign":
+                # Campaign mode: RAG-augmented generation based on campaign prompt
+                prompt = run.get("prompt", "A beautiful brand lifestyle image")
+                campaign_id = run.get("campaign_id")
+
+                log_cb("system", "info", f"Running campaign: {campaign_id or 'direct'}")
+                log_cb("system", "info", f"Prompt: {prompt[:100]}...")
+
+                # Get campaign details for deliverables if available
+                deliverables = {"images": 1}  # Default
+                if campaign_id:
+                    try:
+                        campaign_result = self.supabase.table("campaigns").select("deliverables").eq("id", campaign_id).single().execute()
+                        if campaign_result.data:
+                            deliverables = campaign_result.data.get("deliverables", {"images": 1})
+                            log_cb("system", "info", f"Deliverables: {deliverables}")
+                    except Exception as e:
+                        log_cb("system", "warn", f"Could not fetch campaign details: {e}")
+
+                # Execute RAG generation for each deliverable
+                rag_exec = RAGGeneratorExecutor(log_cb)
+                all_artifacts = []
+                needs_review = False
+
+                # Generate images
+                num_images = deliverables.get("images", 0) + deliverables.get("heroImages", 0) + deliverables.get("lifestyleImages", 0) + deliverables.get("productShots", 0)
+                for i in range(num_images):
+                    log_cb("system", "info", f"Generating image {i + 1}/{num_images}...")
+                    img_result = rag_exec.execute(run_id, client_id, prompt)
+                    if img_result.get("artifacts"):
+                        all_artifacts.extend(img_result["artifacts"])
+                    if img_result.get("hitl_required"):
+                        needs_review = True
+
+                # Generate videos (if any)
+                num_videos = deliverables.get("videos", 0)
+                if num_videos > 0:
+                    creative_exec = CreativeExecutor(log_cb)
+                    for i in range(num_videos):
+                        log_cb("system", "info", f"Generating video {i + 1}/{num_videos}...")
+                        vid_result = creative_exec.execute(run_id, client_id, "video", {"prompt": prompt})
+                        if vid_result.get("artifacts"):
+                            all_artifacts.extend(vid_result["artifacts"])
+
+                # Update campaign status if we have a campaign_id
+                if campaign_id:
+                    try:
+                        final_status = "needs_review" if needs_review else "completed"
+                        self.supabase.table("campaigns").update({"status": final_status}).eq("id", campaign_id).execute()
+                    except Exception as e:
+                        log_cb("system", "warn", f"Could not update campaign status: {e}")
+
+                result = {
+                    "status": "needs_review" if needs_review else "completed",
+                    "hitl_required": needs_review,
+                    "artifacts": all_artifacts,
+                }
 
             else:
                 log_cb("system", "error", f"Unknown mode: {mode}")
