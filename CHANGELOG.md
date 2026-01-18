@@ -2,7 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - 2026-01-16
+---
+
+## [0.3.0] - 2026-01-18 — Phase 2: Campaign & RAG Generation
+
+### Added
+- **Campaign Creator** (`CampaignModal.tsx`) - Full campaign setup with name, prompt, deliverables (hero/lifestyle/product/video), platform targeting, and scheduling
+- **HITL Review Panel** (`HITLReviewPanel.tsx`) - Review interface with CLIP/E5/Cohere/Fused score breakdown, approve/reject/request changes actions
+- **Artifact Gallery** (`ArtifactGallery.tsx`) - Grid/list view with type filtering, grade badges (A+/A/B/C/D), download actions
+- **Prompt Input** (`PromptInput.tsx`) - Textarea with quick prompt suggestions and brand context indicator
+- **RAG Generator** (`rag_generator.py`) - Queries Pinecone for brand DNA context, augments prompts, grades outputs, auto-fix loop (max 3 attempts)
+- **Campaign mode** in worker - Processes deliverables from campaign table, generates via RAG executor
+- **Database migration** (`002_campaigns_and_config.sql`):
+  - `campaigns` table with deliverables JSONB, platforms, status, scheduling
+  - `hitl_decisions` table with grade scores and reviewer notes
+  - `storage_config` and `pinecone_namespace` columns on clients
+  - `grade` and `thumbnail_url` columns on artifacts
+
+### API Additions
+- Campaign CRUD: `createCampaign`, `getCampaigns`, `updateCampaign`, `deleteCampaign`, `launchCampaign`
+- HITL: `createHITLDecision`, `getHITLDecisions`, `getArtifactDecisions`
+- Artifacts: `getClientArtifacts`, `updateArtifactGrade`
+- Storage: `updateClientStorageConfig`
+- Real-time subscriptions for campaigns and artifacts
+
+### UI Integration
+- Campaign and Gallery buttons in Run Feed action bar
+- Modals wired to App.tsx with full state management
+
+---
+
+## [0.2.0] - 2026-01-16 — Phase 1: Core Pipeline & Supabase
 
 ### Added
 - **os-api backend** - Express server with SQLite storage for run orchestration
