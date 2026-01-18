@@ -33,6 +33,13 @@
    - CLIP + E5 + Cohere z-score fusion operational
    - Tested with `multimodal_retriever.py`
 
+4. **Repo Cleanup** (Brand_linter)
+   - Archived legacy docs to `archive/legacy_docs/`
+   - Archived experiments to `archive/experiments/`
+   - Moved Veo tools to `veo_tooling_export/`
+   - Removed 15 obsolete batch scripts
+   - Removed redundant session handoff files
+
 ### Test Results
 ```
 E5 (Semantic):    Score 0.8209 ✅ Working
@@ -45,6 +52,15 @@ CLIP (Visual):    Score 0.0000 ⚠️ NEEDS INVESTIGATION
 - Index `jennikayne-brand-dna-clip768` may be empty or misconfigured
 - **Action Required:** Verify CLIP index has vectors and works with triple fusion
 
+### Session Commits (2026-01-18)
+
+| Repo | Branch | Commit | Description |
+|------|--------|--------|-------------|
+| BDE | `antigravity` | `da8f558` | Phase 3: Cohere v4 model ID fixes + docs |
+| Brand_linter | `phase-3` | `612feba` | Phase 3: cohere_multicrop.py + config |
+| Brand_linter | `phase-3` | `e78e049` | Cleanup: Archive old docs, remove batch scripts |
+| HUD | `tim-dev` | `05e6266` | HANDOFF.md as system-wide source of truth |
+
 ---
 
 ## Component CHANGELOGs
@@ -54,6 +70,28 @@ CLIP (Visual):    Score 0.0000 ⚠️ NEEDS INVESTIGATION
 | Brand_linter | `~/Desktop/Brand_linter/local_quick_setup/CHANGELOG.md` |
 | BDE | `~/BDE/CHANGELOG.md` |
 | HUD | (this file) |
+
+---
+
+## Brand_linter Repo Structure (Post-Cleanup)
+
+```
+~/Desktop/Brand_linter/local_quick_setup/
+├── tools/
+│   ├── cohere_multicrop.py      # ✅ Phase 3 - Cohere v4 multimodal
+│   ├── multimodal_retriever.py  # ✅ Triple fusion (CLIP + E5 + Cohere)
+│   ├── clip_embedder.py         # CLIP embedding generation
+│   └── ...
+├── data/
+│   ├── brand_profiles.json      # ✅ Updated with Cohere stats
+│   └── test_images/             # Test images for retrieval
+├── archive/
+│   ├── legacy_docs/             # Old Phase 3 planning docs
+│   └── experiments/             # Test scripts, notebooks
+├── veo_tooling_export/          # Veo video generation tools
+├── PROJECT_STATUS.md            # ✅ Phase 3 complete
+└── CHANGELOG.md                 # ✅ Change history
+```
 
 ---
 
