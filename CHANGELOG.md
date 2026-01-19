@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.3.1] - 2026-01-18 — Phase 6: HITL/RL Integration with BDE
+
+### Added (in BDE repo)
+- **HITLStore** abstraction reads HUD's `hitl_decisions` table from Supabase
+- **RL Trainer** now calibrates brand thresholds based on human approval patterns
+- BDE can now automatically adjust `auto_pass_floor` based on HITL feedback
+
+### Integration Status
+- HUD → Supabase → BDE pipeline complete
+- HITL decisions made in HUD are now consumed by BDE's RL trainer
+- Threshold calibration loop operational (run `python tools/rl_trainer.py --brand jenni_kayne`)
+
+### Future Work (Phase 6.5)
+- Generation feedback loop to Temp-gen (not just threshold calibration)
+- Structured rejection categories for prompt refinement
+
+---
+
 ## [0.3.0] - 2026-01-18 — Phase 2: Campaign & RAG Generation
 
 ### Added

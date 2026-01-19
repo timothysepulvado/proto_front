@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-01-18
 **Branch:** `tim-dev`
-**Status:** Phase 5 Complete (Brand_linter/BDE) | HUD Phase 2 Complete
+**Status:** Phase 6 Complete (HITL/RL Integration) | HUD Phase 2 Complete
 
 ---
 
@@ -10,10 +10,60 @@
 
 | Component | Location | Branch | Phase | Health | Notes |
 |-----------|----------|--------|-------|--------|-------|
-| **HUD** | `~/Hud` | `tim-dev` | Phase 2 ✅ | 8/10 | Orchestration layer operational |
+| **HUD** | `~/Hud` | `tim-dev` | Phase 2 ✅ | 9/10 | HITL → Supabase → BDE connected |
 | **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 5 ✅ | 10/10 | Triple fusion fully operational |
-| **BDE** | `~/BDE` | `antigravity` | Phase 5 ✅ | 10/10 | All indices aligned |
+| **BDE** | `~/BDE` | `antigravity` | Phase 6 ✅ | 10/10 | HITL/RL integration complete |
 | **Temp-gen** | `~/Temp-gen` | - | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
+
+---
+
+## Phase 6 Completion Summary (2026-01-18)
+
+### HITL/RL Integration with BDE
+
+Connected HUD's human feedback (stored in Supabase) to BDE's threshold calibration system.
+
+#### What Was Done
+
+1. **Created HITLStore Abstraction** (`BDE/services/ml-worker/core/hitl_store.py`)
+   - Portable data access layer (Supabase now, RDS-ready later)
+   - Methods: `get_decisions()`, `get_approval_stats()`, `get_score_distribution()`
+   - Handles `client_jenni_kayne` vs `jenni_kayne` ID formats
+
+2. **Rewrote RL Trainer** (`BDE/tools/rl_trainer.py`)
+   - Reads from HUD's Supabase `hitl_decisions` table via HITLStore
+   - Adjusts `auto_pass_floor` and `rag_similarity_min` thresholds
+   - CLI: `--brand`, `--days`, `--dry-run`, `--verbose`, `--list-brands`
+
+3. **Configuration**
+   - Added `supabase>=2.0.0` to BDE requirements
+   - Added `SUPABASE_URL` and `SUPABASE_KEY` to BDE .env
+
+#### Data Flow
+```
+HUD Frontend ──► Supabase (hitl_decisions) ──► HITLStore ──► RL Trainer
+     │           (writes decisions)            (reads)       (calibrates)
+     │                                                            │
+     └── User approves/rejects artifacts ─────────────────────────┘
+                                              brand_profiles.json updated
+```
+
+#### Usage
+```bash
+# In BDE directory
+python tools/rl_trainer.py --brand jenni_kayne --dry-run -v  # Preview
+python tools/rl_trainer.py --brand jenni_kayne               # Apply
+```
+
+#### What Phase 6 Does
+- ✅ Reads HITL decisions from HUD's Supabase
+- ✅ Calculates human approval ratios
+- ✅ Adjusts pass/fail thresholds to match human judgment
+
+#### What Phase 6 Does NOT Do (Future - Phase 6.5)
+- ❌ Feed rejection reasons back to Temp-gen
+- ❌ Adjust generation prompts/parameters
+- ❌ Per-model weight adjustment
 
 ---
 
@@ -139,17 +189,22 @@ cd ~/Hud && npm run dev
 
 ---
 
-## Next Steps (Phase 6)
+## Next Steps (Phase 6.5+)
+
+### Generation Feedback Loop (Phase 6.5)
+1. **Add structured rejection categories** to HITLReviewPanel (too_dark, wrong_colors, off_brand, etc.)
+2. **Feed rejection patterns back to Temp-gen** for prompt refinement
+3. **Per-model weight adjustment** based on disagreement patterns
 
 ### Brand_linter / BDE
 1. **Calibrate z-score thresholds** - Current thresholds may need tuning
-2. **Wire up HITL/RL loop** - Integrate feedback into scoring
+2. ~~Wire up HITL/RL loop~~ ✅ **DONE (Phase 6)**
 3. **Production deployment** - Move from dev to production
 
 ### HUD Phase 3+ Features (Not Yet Implemented)
 - Platform-specific export (Instagram, Amazon, etc.)
 - Overnight batch scheduling
-- RL threshold optimization from HITL feedback
+- ~~RL threshold optimization from HITL feedback~~ ✅ **DONE (Phase 6)**
 - Multi-user auth / role-based access
 - Docker deployment
 - File upload UI for brand assets
