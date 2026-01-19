@@ -44,7 +44,9 @@ import {
   type Artifact,
   type HITLDecisionType,
 } from "./api";
-import { CampaignModal, HITLReviewPanel, ArtifactGallery } from "./components";
+import { CampaignModal, CampaignSetupModal, HITLReviewPanel, ArtifactGallery } from "./components";
+import type { CampaignSetupData } from "./components/CampaignSetupModal";
+import { createCampaignV2, launchCampaignV2 } from "./api";
 
 type Orientation = "horizontal" | "vertical";
 
@@ -292,11 +294,13 @@ export default function App() {
 
   // Campaign & Artifact state
   const [showCampaignModal, setShowCampaignModal] = useState(false);
+  const [showCampaignSetupModal, setShowCampaignSetupModal] = useState(false);
   const [showArtifactGallery, setShowArtifactGallery] = useState(false);
   const [showHITLReview, setShowHITLReview] = useState(false);
   const [clientArtifacts, setClientArtifacts] = useState<Artifact[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [artifactDecisions, setArtifactDecisions] = useState<Awaited<ReturnType<typeof getArtifactDecisions>>>([]);
+  const [showAddMenu, setShowAddMenu] = useState(false);
 
   // Fetch clients from Supabase on mount
   useEffect(() => {
@@ -631,6 +635,75 @@ export default function App() {
     }
   }, [activeClient]);
 
+  // Campaign V2 handler
+  const handleCreateCampaignV2 = useCallback(async (data: CampaignSetupData) => {
+    if (!activeClient) return;
+
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [...prev, { time: now, msg: "CAMPAIGN_V2_CREATING", status: "BUSY" }]);
+
+    // Create the campaign with deliverables
+    const newCampaign = await createCampaignV2(activeClient, {
+      name: data.name,
+      prompt: data.prompt,
+      mode: data.mode,
+      maxRetries: data.maxRetries,
+      referenceImages: data.referenceImages,
+      guardrails: data.guardrails,
+      deliverables: data.deliverables.map((d) => ({
+        description: d.description,
+        aiModel: d.aiModel,
+        prompt: d.prompt,
+      })),
+      platforms: ["web"],
+    });
+
+    setLogs((prev) => [...prev, { time: now, msg: `CAMPAIGN_V2_CREATED: ${data.deliverables.length} deliverables`, status: "OK" }]);
+
+    // Launch the campaign
+    setLogs((prev) => [...prev, { time: now, msg: "CAMPAIGN_V2_LAUNCHING", status: "BUSY" }]);
+    const run = await launchCampaignV2(newCampaign.id);
+    setCurrentRun(run);
+    setIsRunning(true);
+
+    // Subscribe to logs
+    const unsubscribe = subscribeToLogs(
+      run.runId,
+      (log: RunLog) => {
+        if (log.stage && log.stage !== "system") {
+          setCurrentStage(log.stage);
+        }
+        setLogs((prev) => {
+          const entry: LogEntry = {
+            time: new Date(log.timestamp).toLocaleTimeString("en-US", { hour12: false }),
+            msg: log.message,
+            status: log.level === "error" ? "WAIT" : log.level === "warn" ? "BUSY" : "OK",
+            stage: log.stage,
+          };
+          const next = [...prev, entry];
+          if (next.length > 50) next.shift();
+          return next;
+        });
+      },
+      (result) => {
+        setIsRunning(false);
+        setCurrentRun((prev) => prev ? { ...prev, status: result.status } : null);
+        const endTime = new Date().toLocaleTimeString("en-US", { hour12: false });
+        setLogs((prev) => [
+          ...prev,
+          { time: endTime, msg: `CAMPAIGN_V2_${result.status.toUpperCase()}`, status: result.status === "completed" ? "OK" : "WAIT" },
+        ]);
+      },
+      (error) => {
+        setIsRunning(false);
+        setRunError(error.message);
+      }
+    );
+
+    unsubscribeRef.current = unsubscribe;
+    setShowCampaignSetupModal(false);
+  }, [activeClient]);
+
   // HITL Review handlers
   const handleSelectArtifactForReview = useCallback(async (artifact: Artifact) => {
     setSelectedArtifact(artifact);
@@ -753,12 +826,47 @@ export default function App() {
                 </button>
               ))}
               <div className="h-px w-8 bg-white/10 my-2" />
-              <button
-                onClick={() => setShowIntake(true)}
-                className="p-2 rounded-lg hover:bg-cyan-500/10 transition-colors"
-              >
-                <PlusCircle size={18} className="text-cyan-400/50 hover:text-cyan-400" />
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setShowAddMenu(!showAddMenu)}
+                  className="p-2 rounded-lg hover:bg-cyan-500/10 transition-colors"
+                >
+                  <PlusCircle size={18} className="text-cyan-400/50 hover:text-cyan-400" />
+                </button>
+                {/* Add Menu Dropdown */}
+                {showAddMenu && (
+                  <div className="absolute left-12 top-0 bg-black/90 border border-cyan-500/30 rounded-xl overflow-hidden shadow-2xl z-50 backdrop-blur-xl w-48">
+                    <button
+                      onClick={() => {
+                        setShowCampaignSetupModal(true);
+                        setShowAddMenu(false);
+                      }}
+                      className="w-full px-4 py-3 text-left text-xs font-mono hover:bg-cyan-500/20 transition-colors flex items-center border-b border-white/5"
+                    >
+                      <span className="text-cyan-400 mr-2">V2</span>
+                      <span className="text-white">Campaign Setup</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowCampaignModal(true);
+                        setShowAddMenu(false);
+                      }}
+                      className="w-full px-4 py-3 text-left text-xs font-mono hover:bg-cyan-500/20 transition-colors flex items-center border-b border-white/5"
+                    >
+                      <span className="text-white">Quick Campaign</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowIntake(true);
+                        setShowAddMenu(false);
+                      }}
+                      className="w-full px-4 py-3 text-left text-xs font-mono hover:bg-cyan-500/20 transition-colors flex items-center"
+                    >
+                      <span className="text-white">New Client</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1146,6 +1254,15 @@ export default function App() {
           clientName={currentClient.name}
           onClose={() => setShowCampaignModal(false)}
           onSubmit={handleCreateCampaign}
+        />
+      )}
+
+      {/* Campaign Setup V2 Modal */}
+      {showCampaignSetupModal && currentClient && (
+        <CampaignSetupModal
+          clientName={currentClient.name}
+          onClose={() => setShowCampaignSetupModal(false)}
+          onSubmit={handleCreateCampaignV2}
         />
       )}
 

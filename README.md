@@ -90,6 +90,41 @@ The HUD organizes brand operations into four pillars:
 | `drift` | drift | Run drift check only |
 | `export` | export | Package artifacts |
 
+## Campaign V2 (Phase 6.5)
+
+The new Campaign Setup V2 adds an automated retry loop with prompt modification:
+
+| Component | Description |
+|-----------|-------------|
+| **CampaignSetupModal** | Multi-step wizard: setup → deliverables → guardrails |
+| **DeliverableBuilder** | Build batches: models × outfits × poses |
+| **Rejection Categories** | 10 categories that map to negative prompts |
+
+### Feedback Loop Architecture
+
+```
+Campaign Setup → Generate Batch → Score (Gate 1)
+                      ↑                ↓
+                      │         Pass → HITL Queue
+                      │                ↓
+              Modify Prompts    Human Review
+                      ↑                ↓
+                      │         Reject → Short-term Memory
+                      └────────────────┘
+                                       ↓
+                               Approve → Long-term DNA
+```
+
+### Python Workers (`worker/workers/`)
+
+| Worker | Purpose |
+|--------|---------|
+| `orchestrator.py` | Campaign loop with short-term memory |
+| `generation_worker.py` | Temp-gen interface (Nano/Veo/Sora) |
+| `scoring_worker.py` | BDE/Brand Linter triple fusion scoring |
+| `prompt_modifier.py` | Rejection → negative prompt mapping |
+| `dna_updater.py` | Pinecone ingestion on approval |
+
 ## Demo Mode
 
 If external tools (Temp-gen, Brand_linter) aren't available or fail, the runner falls back to demo mode with simulated logs. Look for `[DEMO]` prefix in the Run Feed.

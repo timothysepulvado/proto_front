@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.0] - 2026-01-18 — Phase 6.5: Generation Feedback Loop
+
+### Added
+- **Campaign Setup V2** (`CampaignSetupModal.tsx`) - Multi-step wizard with mode selection (Campaign vs Creative), configurable max retries, reference images, and guardrails (season, color palette, style notes)
+- **Deliverable Builder** (`DeliverableBuilder.tsx`) - Build deliverable batches with model refs, outfit refs, pose selection, and AI model choice (Nano/Veo/Sora)
+- **Rejection Categories** - Updated `HITLReviewPanel.tsx` with 10 rejection categories that map to negative prompts:
+  - too_dark, too_bright, wrong_colors, off_brand, wrong_composition, cluttered, wrong_model, wrong_outfit, quality_issue, other
+- **Python Workers** in `worker/workers/`:
+  - `orchestrator.py` - Main campaign loop: generate → score → route → retry with short-term memory
+  - `prompt_modifier.py` - Maps rejection categories to negative/positive prompt terms per AI model
+  - `scoring_worker.py` - Calls BDE/Brand Linter, analyzes failure reasons from score breakdown
+  - `generation_worker.py` - Interfaces with Temp-gen for Nano/Veo/Sora generation
+  - `dna_updater.py` - Updates Pinecone indexes and brand profiles on final approval
+- **Database Migration** (`003_campaigns_v2.sql`):
+  - New enums: `deliverable_status`, `campaign_mode`, `rejection_category`
+  - New tables: `campaign_deliverables`, `campaign_memory`, `rejection_categories`
+  - Helper functions: `get_retry_batch()`, `get_campaign_progress()`, `mark_for_retry()`
+  - Added `mode` and `max_retries` columns to `campaigns` table
+
+### API Additions
+- Campaign V2: `createCampaignV2`, `getCampaignV2`, `launchCampaignV2`
+- Deliverables: `getCampaignDeliverables`, `updateDeliverableStatus`, `markDeliverableForRetry`
+- Progress: `getCampaignProgress`, `getRetryBatch`, `getCampaignMemory`
+- HITL V2: `createHITLDecisionV2` with rejection categories
+- Real-time: `subscribeToDeliverables`
+
+### UI Integration
+- "+" button dropdown in sidebar with Campaign Setup V2, Quick Campaign, and New Client options
+- CampaignSetupModal renders with full state management and log streaming
+
+### Architecture
+- **Short-term memory**: Per-campaign rejection tracking (in-memory during run)
+- **Long-term memory**: Brand DNA updates via Pinecone on final approval
+- **Retry loop**: Failed items get modified prompts based on rejection reasons, up to max_retries
+- **Model-specific prompts**: Nano embeds negatives inline, Veo uses separate negative_prompt parameter
+
+---
+
 ## [0.3.1] - 2026-01-18 — Phase 6: HITL/RL Integration with BDE
 
 ### Added (in BDE repo)

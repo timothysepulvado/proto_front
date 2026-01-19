@@ -7,6 +7,19 @@ export type ClientStatus = "active" | "inactive" | "archived";
 export type CampaignStatus = "draft" | "pending" | "running" | "needs_review" | "completed" | "failed";
 export type HITLDecisionType = "approve" | "reject" | "changes";
 export type StorageType = "cloudinary" | "s3" | "supabase";
+export type CampaignModeType = "campaign" | "creative";
+export type DeliverableStatus = "pending" | "generating" | "scoring" | "hitl" | "approved" | "failed" | "retry_queued";
+export type RejectionCategoryType =
+  | "too_dark"
+  | "too_bright"
+  | "wrong_colors"
+  | "off_brand"
+  | "wrong_composition"
+  | "cluttered"
+  | "wrong_model"
+  | "wrong_outfit"
+  | "quality_issue"
+  | "other";
 
 export interface RunStage {
   id: string;
@@ -88,6 +101,66 @@ export interface Campaign {
   updatedAt: string;
 }
 
+// Campaign V2 types for Generation Feedback Loop
+export interface CampaignGuardrails {
+  season?: string;
+  colorPalette?: string[];
+  styleNotes?: string;
+}
+
+export interface CampaignV2 extends Campaign {
+  mode: CampaignModeType;
+  maxRetries: number;
+  referenceImages: string[];
+  guardrails: CampaignGuardrails;
+  totalDeliverables: number;
+  approvedCount: number;
+  failedCount: number;
+}
+
+export interface CampaignDeliverable {
+  id: string;
+  campaignId: string;
+  description: string;
+  aiModel: "nano" | "veo" | "sora";
+  status: DeliverableStatus;
+  retryCount: number;
+  currentPrompt: string;
+  originalPrompt: string;
+  negativePrompts: string[];
+  rejectionReasons: RejectionCategoryType[];
+  customRejectionNote?: string;
+  artifactId?: string;
+  score?: ArtifactGrade;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CampaignMemory {
+  id: string;
+  campaignId: string;
+  deliverableId: string;
+  retryAttempt: number;
+  rejectionReasons: RejectionCategoryType[];
+  customNotes?: string;
+  negativePrompts: string[];
+  promptBefore: string;
+  promptAfter: string;
+  scoreBefore?: ArtifactGrade;
+  createdAt: string;
+}
+
+export interface CampaignProgress {
+  total: number;
+  pending: number;
+  generating: number;
+  scoring: number;
+  hitl: number;
+  approved: number;
+  failed: number;
+  retryQueued: number;
+}
+
 export interface HITLDecision {
   id: string;
   artifactId: string;
@@ -96,6 +169,8 @@ export interface HITLDecision {
   decision: HITLDecisionType;
   notes?: string;
   gradeScores?: ArtifactGrade;
+  rejectionCategories?: RejectionCategoryType[];
+  customRejectionNote?: string;
   createdAt: string;
 }
 
@@ -170,6 +245,50 @@ interface DbHITLDecision {
   decision: HITLDecisionType;
   notes: string | null;
   grade_scores: ArtifactGrade | null;
+  rejection_categories: RejectionCategoryType[] | null;
+  custom_rejection_note: string | null;
+  created_at: string;
+}
+
+interface DbCampaignV2 extends DbCampaign {
+  mode: CampaignModeType;
+  max_retries: number;
+  reference_images: string[];
+  guardrails: CampaignGuardrails;
+  total_deliverables: number;
+  approved_count: number;
+  failed_count: number;
+}
+
+interface DbCampaignDeliverable {
+  id: string;
+  campaign_id: string;
+  description: string;
+  ai_model: "nano" | "veo" | "sora";
+  status: DeliverableStatus;
+  retry_count: number;
+  current_prompt: string;
+  original_prompt: string;
+  negative_prompts: string[];
+  rejection_reasons: RejectionCategoryType[];
+  custom_rejection_note: string | null;
+  artifact_id: string | null;
+  score: ArtifactGrade | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbCampaignMemory {
+  id: string;
+  campaign_id: string;
+  deliverable_id: string;
+  retry_attempt: number;
+  rejection_reasons: RejectionCategoryType[];
+  custom_notes: string | null;
+  negative_prompts: string[];
+  prompt_before: string;
+  prompt_after: string;
+  score_before: ArtifactGrade | null;
   created_at: string;
 }
 
@@ -253,7 +372,67 @@ function mapDbHITLDecisionToHITLDecision(dbDecision: DbHITLDecision): HITLDecisi
     decision: dbDecision.decision,
     notes: dbDecision.notes ?? undefined,
     gradeScores: dbDecision.grade_scores ?? undefined,
+    rejectionCategories: dbDecision.rejection_categories ?? undefined,
+    customRejectionNote: dbDecision.custom_rejection_note ?? undefined,
     createdAt: dbDecision.created_at,
+  };
+}
+
+function mapDbCampaignV2ToCampaignV2(dbCampaign: DbCampaignV2): CampaignV2 {
+  return {
+    id: dbCampaign.id,
+    clientId: dbCampaign.client_id,
+    name: dbCampaign.name,
+    prompt: dbCampaign.prompt,
+    deliverables: dbCampaign.deliverables,
+    platforms: dbCampaign.platforms,
+    status: dbCampaign.status,
+    scheduledAt: dbCampaign.scheduled_at ?? undefined,
+    createdAt: dbCampaign.created_at,
+    updatedAt: dbCampaign.updated_at,
+    mode: dbCampaign.mode ?? "campaign",
+    maxRetries: dbCampaign.max_retries ?? 3,
+    referenceImages: dbCampaign.reference_images ?? [],
+    guardrails: dbCampaign.guardrails ?? {},
+    totalDeliverables: dbCampaign.total_deliverables ?? 0,
+    approvedCount: dbCampaign.approved_count ?? 0,
+    failedCount: dbCampaign.failed_count ?? 0,
+  };
+}
+
+function mapDbDeliverableToDeliverable(dbDel: DbCampaignDeliverable): CampaignDeliverable {
+  return {
+    id: dbDel.id,
+    campaignId: dbDel.campaign_id,
+    description: dbDel.description,
+    aiModel: dbDel.ai_model,
+    status: dbDel.status,
+    retryCount: dbDel.retry_count,
+    currentPrompt: dbDel.current_prompt,
+    originalPrompt: dbDel.original_prompt,
+    negativePrompts: dbDel.negative_prompts ?? [],
+    rejectionReasons: dbDel.rejection_reasons ?? [],
+    customRejectionNote: dbDel.custom_rejection_note ?? undefined,
+    artifactId: dbDel.artifact_id ?? undefined,
+    score: dbDel.score ?? undefined,
+    createdAt: dbDel.created_at,
+    updatedAt: dbDel.updated_at,
+  };
+}
+
+function mapDbMemoryToMemory(dbMem: DbCampaignMemory): CampaignMemory {
+  return {
+    id: dbMem.id,
+    campaignId: dbMem.campaign_id,
+    deliverableId: dbMem.deliverable_id,
+    retryAttempt: dbMem.retry_attempt,
+    rejectionReasons: dbMem.rejection_reasons ?? [],
+    customNotes: dbMem.custom_notes ?? undefined,
+    negativePrompts: dbMem.negative_prompts ?? [],
+    promptBefore: dbMem.prompt_before,
+    promptAfter: dbMem.prompt_after,
+    scoreBefore: dbMem.score_before ?? undefined,
+    createdAt: dbMem.created_at,
   };
 }
 
@@ -964,4 +1143,379 @@ export function subscribeToArtifacts(
   return () => {
     supabase.removeChannel(channel);
   };
+}
+
+// ============================================
+// Campaign V2 Functions (Generation Feedback Loop)
+// ============================================
+
+// Create a Campaign V2 with deliverables
+export async function createCampaignV2(
+  clientId: string,
+  campaign: {
+    name: string;
+    prompt: string;
+    mode?: CampaignModeType;
+    maxRetries?: number;
+    referenceImages?: string[];
+    guardrails?: CampaignGuardrails;
+    deliverables?: Array<{
+      description: string;
+      aiModel: "nano" | "veo" | "sora";
+      prompt: string;
+    }>;
+    platforms?: string[];
+    scheduledAt?: string;
+  }
+): Promise<CampaignV2> {
+  // Create the campaign
+  const { data: campaignData, error: campaignError } = await supabase
+    .from("campaigns")
+    .insert({
+      client_id: clientId,
+      name: campaign.name,
+      prompt: campaign.prompt,
+      mode: campaign.mode ?? "campaign",
+      max_retries: campaign.maxRetries ?? 3,
+      reference_images: campaign.referenceImages ?? [],
+      guardrails: campaign.guardrails ?? {},
+      deliverables: { custom: campaign.deliverables?.length ?? 0 },
+      platforms: campaign.platforms ?? ["web"],
+      status: "draft" as CampaignStatus,
+      scheduled_at: campaign.scheduledAt ?? null,
+      total_deliverables: campaign.deliverables?.length ?? 0,
+      approved_count: 0,
+      failed_count: 0,
+    })
+    .select()
+    .single();
+
+  if (campaignError) {
+    throw new Error(`Failed to create campaign: ${campaignError.message}`);
+  }
+
+  const campaignId = campaignData.id;
+
+  // Create deliverables
+  if (campaign.deliverables && campaign.deliverables.length > 0) {
+    const deliverablesData = campaign.deliverables.map((del) => ({
+      campaign_id: campaignId,
+      description: del.description,
+      ai_model: del.aiModel,
+      current_prompt: del.prompt,
+      original_prompt: del.prompt,
+      status: "pending" as DeliverableStatus,
+      retry_count: 0,
+      negative_prompts: [],
+      rejection_reasons: [],
+    }));
+
+    const { error: delError } = await supabase
+      .from("campaign_deliverables")
+      .insert(deliverablesData);
+
+    if (delError) {
+      throw new Error(`Failed to create deliverables: ${delError.message}`);
+    }
+  }
+
+  return mapDbCampaignV2ToCampaignV2(campaignData as DbCampaignV2);
+}
+
+// Get Campaign V2 with progress
+export async function getCampaignV2(campaignId: string): Promise<CampaignV2> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to get campaign: ${error.message}`);
+  }
+
+  return mapDbCampaignV2ToCampaignV2(data as DbCampaignV2);
+}
+
+// Get deliverables for a campaign
+export async function getCampaignDeliverables(
+  campaignId: string
+): Promise<CampaignDeliverable[]> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("created_at");
+
+  if (error) {
+    throw new Error(`Failed to get deliverables: ${error.message}`);
+  }
+
+  return (data as DbCampaignDeliverable[]).map(mapDbDeliverableToDeliverable);
+}
+
+// Update deliverable status
+export async function updateDeliverableStatus(
+  deliverableId: string,
+  status: DeliverableStatus,
+  updates?: {
+    artifactId?: string;
+    score?: ArtifactGrade;
+    currentPrompt?: string;
+  }
+): Promise<CampaignDeliverable> {
+  const updateData: Record<string, unknown> = { status };
+
+  if (updates?.artifactId) updateData.artifact_id = updates.artifactId;
+  if (updates?.score) updateData.score = updates.score;
+  if (updates?.currentPrompt) updateData.current_prompt = updates.currentPrompt;
+
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .update(updateData)
+    .eq("id", deliverableId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update deliverable: ${error.message}`);
+  }
+
+  return mapDbDeliverableToDeliverable(data as DbCampaignDeliverable);
+}
+
+// Mark deliverable for retry with rejection reasons
+export async function markDeliverableForRetry(
+  deliverableId: string,
+  rejectionReasons: RejectionCategoryType[],
+  customNote?: string
+): Promise<{ success: boolean; deliverable?: CampaignDeliverable }> {
+  // Use the database function
+  const { data, error } = await supabase.rpc("mark_for_retry", {
+    p_deliverable_id: deliverableId,
+    p_rejection_reasons: rejectionReasons,
+    p_custom_note: customNote ?? null,
+  });
+
+  if (error) {
+    throw new Error(`Failed to mark for retry: ${error.message}`);
+  }
+
+  // Get updated deliverable
+  const { data: delData, error: delError } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("id", deliverableId)
+    .single();
+
+  if (delError) {
+    return { success: data as boolean };
+  }
+
+  return {
+    success: data as boolean,
+    deliverable: mapDbDeliverableToDeliverable(delData as DbCampaignDeliverable),
+  };
+}
+
+// Get campaign progress
+export async function getCampaignProgress(
+  campaignId: string
+): Promise<CampaignProgress> {
+  const { data, error } = await supabase.rpc("get_campaign_progress", {
+    p_campaign_id: campaignId,
+  });
+
+  if (error) {
+    throw new Error(`Failed to get campaign progress: ${error.message}`);
+  }
+
+  const row = data?.[0] ?? {};
+  return {
+    total: row.total ?? 0,
+    pending: row.pending ?? 0,
+    generating: row.generating ?? 0,
+    scoring: row.scoring ?? 0,
+    hitl: row.hitl ?? 0,
+    approved: row.approved ?? 0,
+    failed: row.failed ?? 0,
+    retryQueued: row.retry_queued ?? 0,
+  };
+}
+
+// Get retry batch for a campaign
+export async function getRetryBatch(
+  campaignId: string,
+  maxRetries: number
+): Promise<CampaignDeliverable[]> {
+  const { data, error } = await supabase.rpc("get_retry_batch", {
+    p_campaign_id: campaignId,
+    p_max_retries: maxRetries,
+  });
+
+  if (error) {
+    throw new Error(`Failed to get retry batch: ${error.message}`);
+  }
+
+  // The RPC returns simplified data, fetch full deliverables
+  const ids = (data || []).map((r: { deliverable_id: string }) => r.deliverable_id);
+  if (ids.length === 0) return [];
+
+  const { data: delData, error: delError } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .in("id", ids);
+
+  if (delError) {
+    throw new Error(`Failed to get retry deliverables: ${delError.message}`);
+  }
+
+  return (delData as DbCampaignDeliverable[]).map(mapDbDeliverableToDeliverable);
+}
+
+// Get campaign memory (retry history)
+export async function getCampaignMemory(
+  campaignId: string
+): Promise<CampaignMemory[]> {
+  const { data, error } = await supabase
+    .from("campaign_memory")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to get campaign memory: ${error.message}`);
+  }
+
+  return (data as DbCampaignMemory[]).map(mapDbMemoryToMemory);
+}
+
+// Launch Campaign V2 (creates run and starts orchestration)
+export async function launchCampaignV2(campaignId: string): Promise<Run> {
+  // Get campaign details
+  const campaign = await getCampaignV2(campaignId);
+
+  // Update campaign status to pending
+  await supabase
+    .from("campaigns")
+    .update({ status: "pending" })
+    .eq("id", campaignId);
+
+  // Create a run from the campaign
+  const { data, error } = await supabase
+    .from("runs")
+    .insert({
+      client_id: campaign.clientId,
+      mode: "campaign" as RunMode,
+      status: "pending" as RunStatus,
+      stages: [],
+      campaign_id: campaignId,
+      prompt: campaign.prompt,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to launch campaign: ${error.message}`);
+  }
+
+  // Update client's last_run info
+  await supabase
+    .from("clients")
+    .update({
+      last_run_id: data.id,
+      last_run_at: data.created_at,
+      last_run_status: data.status,
+    })
+    .eq("id", campaign.clientId);
+
+  return mapDbRunToRun(data as DbRun);
+}
+
+// Approve deliverable (update status and campaign counts)
+export async function approveDeliverable(
+  deliverableId: string,
+  campaignId: string
+): Promise<void> {
+  // Update deliverable status
+  await supabase
+    .from("campaign_deliverables")
+    .update({ status: "approved" })
+    .eq("id", deliverableId);
+
+  // Increment approved count
+  await supabase.rpc("increment_campaign_approved", {
+    p_campaign_id: campaignId,
+  });
+}
+
+// Subscribe to deliverables (real-time updates)
+export function subscribeToDeliverables(
+  campaignId: string,
+  onUpdate: (deliverable: CampaignDeliverable) => void
+): () => void {
+  const channel = supabase
+    .channel(`deliverables:${campaignId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "campaign_deliverables",
+        filter: `campaign_id=eq.${campaignId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(mapDbDeliverableToDeliverable(payload.new as DbCampaignDeliverable));
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+// Create HITL decision with rejection categories
+export async function createHITLDecisionV2(
+  artifactId: string,
+  runId: string,
+  decision: HITLDecisionType,
+  options?: {
+    notes?: string;
+    gradeScores?: ArtifactGrade;
+    rejectionCategories?: RejectionCategoryType[];
+    customRejectionNote?: string;
+  }
+): Promise<HITLDecision> {
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .insert({
+      artifact_id: artifactId,
+      run_id: runId,
+      decision,
+      notes: options?.notes ?? null,
+      grade_scores: options?.gradeScores ?? null,
+      rejection_categories: options?.rejectionCategories ?? null,
+      custom_rejection_note: options?.customRejectionNote ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create HITL decision: ${error.message}`);
+  }
+
+  // If approved, update the artifact's grade to reflect approval
+  if (decision === "approve") {
+    await supabase
+      .from("artifacts")
+      .update({
+        grade: options?.gradeScores ?? null,
+      })
+      .eq("id", artifactId);
+  }
+
+  return mapDbHITLDecisionToHITLDecision(data as DbHITLDecision);
 }

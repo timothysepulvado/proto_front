@@ -11,14 +11,41 @@ import {
   Image as ImageIcon,
   Video,
   FileText,
+  AlertCircle,
+  Check,
 } from "lucide-react";
 import type { Artifact, HITLDecision, HITLDecisionType } from "../api";
+
+// Rejection categories with their negative prompts
+export const REJECTION_CATEGORIES = [
+  { id: "too_dark", label: "Too Dark", negativePrompt: "dark lighting, shadows, underexposed" },
+  { id: "too_bright", label: "Too Bright", negativePrompt: "overexposed, washed out, harsh light" },
+  { id: "wrong_colors", label: "Wrong Colors", negativePrompt: "neon colors, saturated colors" },
+  { id: "off_brand", label: "Off Brand", negativePrompt: "off-brand aesthetic" },
+  { id: "wrong_composition", label: "Wrong Composition", negativePrompt: "poor framing, bad crop" },
+  { id: "cluttered", label: "Too Cluttered", negativePrompt: "busy background, clutter" },
+  { id: "wrong_model", label: "Wrong Model/Person", negativePrompt: "different person" },
+  { id: "wrong_outfit", label: "Wrong Outfit", negativePrompt: "wrong clothing" },
+  { id: "quality_issue", label: "Quality Issue", negativePrompt: "artifacts, blur, distortion" },
+  { id: "other", label: "Other", negativePrompt: "" },
+] as const;
+
+export type RejectionCategory = (typeof REJECTION_CATEGORIES)[number]["id"];
 
 interface HITLReviewPanelProps {
   artifact: Artifact;
   previousDecisions?: HITLDecision[];
-  onDecision: (decision: HITLDecisionType, notes?: string) => Promise<void>;
+  onDecision: (
+    decision: HITLDecisionType,
+    notes?: string,
+    rejectionCategories?: RejectionCategory[]
+  ) => Promise<void>;
   onClose: () => void;
+  deliverableInfo?: {
+    retryCount: number;
+    maxRetries: number;
+    description?: string;
+  };
 }
 
 const GRADE_THRESHOLDS = {
@@ -70,21 +97,37 @@ export function HITLReviewPanel({
   previousDecisions = [],
   onDecision,
   onClose,
+  deliverableInfo,
 }: HITLReviewPanelProps) {
   const [notes, setNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeDecision, setActiveDecision] = useState<HITLDecisionType | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [selectedRejections, setSelectedRejections] = useState<RejectionCategory[]>([]);
+  const [customRejectionNote, setCustomRejectionNote] = useState("");
 
   const grade = artifact.grade;
   const gradeDecision = grade?.decision ?? "HITL_REVIEW";
   const gradeInfo = GRADE_THRESHOLDS[gradeDecision];
 
+  const toggleRejection = (categoryId: RejectionCategory) => {
+    if (selectedRejections.includes(categoryId)) {
+      setSelectedRejections(selectedRejections.filter((id) => id !== categoryId));
+    } else {
+      setSelectedRejections([...selectedRejections, categoryId]);
+    }
+  };
+
   const handleDecision = async (decision: HITLDecisionType) => {
     setActiveDecision(decision);
     setIsSubmitting(true);
     try {
-      await onDecision(decision, notes.trim() || undefined);
+      const finalNotes =
+        decision === "reject" && selectedRejections.includes("other") && customRejectionNote
+          ? `${notes}\n[Custom: ${customRejectionNote}]`
+          : notes;
+      const rejections = decision === "reject" ? selectedRejections : undefined;
+      await onDecision(decision, finalNotes.trim() || undefined, rejections);
       onClose();
     } catch {
       setActiveDecision(null);
@@ -106,9 +149,16 @@ export function HITLReviewPanel({
               <h2 className="text-lg font-bold tracking-wide text-white">
                 Human Review Required
               </h2>
-              <p className="text-[10px] font-mono text-white/40 uppercase">
-                {artifact.name}
-              </p>
+              <div className="flex items-center space-x-2">
+                <p className="text-[10px] font-mono text-white/40 uppercase">
+                  {artifact.name}
+                </p>
+                {deliverableInfo && (
+                  <span className="px-2 py-0.5 bg-amber-500/20 border border-amber-500/30 rounded text-[8px] font-mono text-amber-400">
+                    Retry {deliverableInfo.retryCount}/{deliverableInfo.maxRetries}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center space-x-3">
@@ -174,6 +224,18 @@ export function HITLReviewPanel({
                   </div>
                 )}
               </div>
+
+              {/* Deliverable Info */}
+              {deliverableInfo?.description && (
+                <div className="p-3 rounded-lg bg-white/5 border border-white/10">
+                  <span className="text-[9px] font-mono text-white/40 uppercase">
+                    Deliverable:
+                  </span>
+                  <p className="text-xs font-mono text-white mt-1">
+                    {deliverableInfo.description}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Scores & Decision */}
@@ -204,6 +266,59 @@ export function HITLReviewPanel({
                 ) : (
                   <p className="text-[10px] font-mono text-white/40 text-center py-4">
                     No grading scores available
+                  </p>
+                )}
+              </div>
+
+              {/* Rejection Categories - Only show when reject is likely */}
+              <div className="space-y-2">
+                <div className="flex items-center space-x-2">
+                  <AlertCircle size={14} className="text-red-400/60" />
+                  <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">
+                    Rejection Reasons (select if rejecting)
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {REJECTION_CATEGORIES.map((category) => (
+                    <button
+                      key={category.id}
+                      onClick={() => toggleRejection(category.id)}
+                      className={`p-2 rounded-lg border text-left transition-all text-[10px] font-mono flex items-center space-x-2 ${
+                        selectedRejections.includes(category.id)
+                          ? "bg-red-500/20 border-red-500/40 text-red-400"
+                          : "border-white/10 text-white/40 hover:border-white/20"
+                      }`}
+                    >
+                      <div
+                        className={`w-4 h-4 rounded border flex items-center justify-center ${
+                          selectedRejections.includes(category.id)
+                            ? "border-red-400 bg-red-500/20"
+                            : "border-white/20"
+                        }`}
+                      >
+                        {selectedRejections.includes(category.id) && (
+                          <Check size={10} className="text-red-400" />
+                        )}
+                      </div>
+                      <span>{category.label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Custom rejection note if "Other" is selected */}
+                {selectedRejections.includes("other") && (
+                  <input
+                    type="text"
+                    value={customRejectionNote}
+                    onChange={(e) => setCustomRejectionNote(e.target.value)}
+                    placeholder="Describe the issue..."
+                    className="w-full mt-2 bg-white/5 border border-white/10 p-2 rounded-lg outline-none focus:border-red-400/50 font-mono text-white text-xs placeholder:text-white/20"
+                  />
+                )}
+
+                {selectedRejections.length > 0 && (
+                  <p className="text-[8px] font-mono text-white/20 mt-1">
+                    These will be used to modify the prompt for retry.
                   </p>
                 )}
               </div>
@@ -278,7 +393,7 @@ export function HITLReviewPanel({
               ) : (
                 <>
                   <ThumbsDown size={16} />
-                  <span>Reject</span>
+                  <span>Reject{selectedRejections.length > 0 && ` (${selectedRejections.length})`}</span>
                 </>
               )}
             </button>
