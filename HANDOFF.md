@@ -15,6 +15,142 @@
 | **BDE** | `~/BDE` | `antigravity` | Phase 6 ✅ | 10/10 | HITL/RL integration complete |
 | **Temp-gen** | `~/Temp-gen` | - | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
 
+### UPDATE: Phase 6.5 Complete (2026-01-18)
+| **HUD** | `~/Hud` | `tim-dev` | Phase 6.5 ✅ | 7/10 | Backend complete, frontend needs integration (Phase 7) |
+
+---
+
+## Phase 7: Frontend Integration (NEXT)
+
+### Problem Statement
+Phase 6.5 added backend components (Python workers, database schema, API functions) but the **frontend is not properly wired up**. The new Campaign Setup V2 UI exists but doesn't match the working patterns established in other areas.
+
+### What Needs Fixing
+
+1. **CampaignSetupModal.tsx** - Multi-step wizard exists but may not integrate correctly with:
+   - Supabase real-time subscriptions
+   - Worker polling system
+   - Log streaming to Run Feed
+
+2. **DeliverableBuilder.tsx** - Component built but needs:
+   - Connection to actual deliverable creation API
+   - State management matching existing patterns
+   - Proper error handling
+
+3. **HITLReviewPanel.tsx** - Rejection categories added but:
+   - Need to verify they properly trigger `markDeliverableForRetry()`
+   - Ensure rejection reasons flow to `campaign_memory` table
+   - Test the full rejection → retry loop
+
+4. **App.tsx Integration** - New modal renders but:
+   - Log streaming may not work correctly for Campaign V2
+   - Real-time deliverable status updates not verified
+   - Progress tracking UI not implemented
+
+### Phase 7 Goals
+
+| Goal | Description | Priority |
+|------|-------------|----------|
+| Wire up Campaign V2 to worker | Ensure `launchCampaignV2` triggers orchestrator | High |
+| Real-time deliverable tracking | Show deliverable status updates in UI | High |
+| Test rejection → retry flow | Verify full loop works end-to-end | High |
+| Progress visualization | Show campaign progress (X/Y complete) | Medium |
+| Error handling | Graceful failures, retry limits | Medium |
+
+### Key Files for Phase 7
+
+| File | What Needs Work |
+|------|-----------------|
+| `src/App.tsx` | Campaign V2 integration, log streaming |
+| `src/components/CampaignSetupModal.tsx` | Verify Supabase connection |
+| `src/components/DeliverableBuilder.tsx` | Test deliverable creation |
+| `src/components/HITLReviewPanel.tsx` | Test rejection → retry flow |
+| `src/api.ts` | Verify all Campaign V2 APIs work |
+| `worker/worker.py` | Add campaign V2 mode handling |
+| `worker/workers/orchestrator.py` | Wire to main worker loop |
+
+---
+
+## Phase 6.5 Completion Summary (2026-01-18)
+
+### What Was Built
+
+#### Frontend Components (`src/components/`)
+- **CampaignSetupModal.tsx** - Multi-step wizard (setup → deliverables → guardrails)
+- **DeliverableBuilder.tsx** - Batch creation with models × outfits × poses
+- **HITLReviewPanel.tsx** - Updated with 10 rejection categories
+
+#### Python Workers (`worker/workers/`)
+| Worker | Purpose |
+|--------|---------|
+| `orchestrator.py` | Campaign loop: generate → score → route → retry |
+| `generation_worker.py` | Temp-gen interface (Nano/Veo/Sora) |
+| `scoring_worker.py` | BDE/Brand Linter triple fusion scoring |
+| `prompt_modifier.py` | Rejection → negative prompt mapping |
+| `dna_updater.py` | Pinecone ingestion on approval |
+
+#### Database (`003_campaigns_v2.sql`)
+- New enums: `deliverable_status`, `campaign_mode`, `rejection_category`
+- New tables: `campaign_deliverables`, `campaign_memory`, `rejection_categories`
+- Helper functions: `get_retry_batch()`, `get_campaign_progress()`, `mark_for_retry()`
+
+#### API (`src/api.ts`)
+- Campaign V2: `createCampaignV2`, `getCampaignV2`, `launchCampaignV2`
+- Deliverables: `getCampaignDeliverables`, `updateDeliverableStatus`, `markDeliverableForRetry`
+- Progress: `getCampaignProgress`, `getRetryBatch`, `getCampaignMemory`
+- Real-time: `subscribeToDeliverables`
+
+### Architecture (Phase 6.5)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ CAMPAIGN SETUP (HUD - "+" button → Campaign Setup V2)           │
+│ - Mode: Campaign (guardrails) vs Creative (flexible)            │
+│ - Deliverables: poses × models × outfits                        │
+│ - Max retries: configurable (default 3)                         │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ ORCHESTRATOR (Python worker/workers/orchestrator.py)            │
+│ - Short-term memory for rejection tracking                      │
+│ - Coordinates generation, scoring, routing                      │
+└─────────────────────────────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+   ┌─────────┐            ┌─────────┐            ┌─────────┐
+   │ Generate│            │  Score  │            │  Route  │
+   │ (Temp-  │───────────▶│  (BDE)  │───────────▶│ Pass/   │
+   │  gen)   │            │         │            │  Fail   │
+   └─────────┘            └─────────┘            └────┬────┘
+                                                      │
+                    ┌─────────────────────────────────┼─────────┐
+                    ▼                                 ▼         ▼
+              ┌──────────┐                     ┌──────────┐ ┌───────┐
+              │   HITL   │                     │  Retry   │ │ Flag  │
+              │  Queue   │                     │  Batch   │ │Manual │
+              └────┬─────┘                     └────┬─────┘ └───────┘
+                   │                                │
+                   ▼                                │
+              ┌──────────┐                          │
+              │  Human   │──── Reject ─────────────►│
+              │  Review  │                          │
+              └────┬─────┘                          │
+                   │ Approve                        │
+                   ▼                                │
+              ┌──────────┐                          │
+              │ Long-term│◄── Modified prompts ─────┘
+              │   DNA    │
+              └──────────┘
+```
+
+### Session Commits (Phase 6.5)
+
+| Repo | Branch | Commit | Description |
+|------|--------|--------|-------------|
+| HUD | `tim-dev` | `b3d09e8` | feat(phase-6.5): Add generation feedback loop with retry system |
+
 ---
 
 ## Phase 6 Completion Summary (2026-01-18)
@@ -255,3 +391,63 @@ supabase/migrations/002_*.sql - Phase 2 schema
 |-------|-----------|---------|--------|
 | `cylndr-brand-dna-clip768` | 768D | 511 | ✅ Working |
 | `cylndr-e5-inference` | 1024D | 50 | ✅ Working |
+
+---
+
+## Key Files Modified in Phase 6.5
+
+```
+src/api.ts                             - Campaign V2 APIs, deliverable tracking
+src/App.tsx                            - Campaign Setup V2 modal integration
+src/components/CampaignSetupModal.tsx  - NEW: Multi-step wizard
+src/components/DeliverableBuilder.tsx  - NEW: Batch builder
+src/components/HITLReviewPanel.tsx     - Added rejection categories
+worker/workers/orchestrator.py         - NEW: Campaign loop
+worker/workers/generation_worker.py    - NEW: Temp-gen interface
+worker/workers/scoring_worker.py       - NEW: BDE scoring
+worker/workers/prompt_modifier.py      - NEW: Rejection → prompt mapping
+worker/workers/dna_updater.py          - NEW: Pinecone ingestion
+supabase/migrations/003_campaigns_v2.sql - Phase 6.5 schema
+```
+
+---
+
+## HUD Phase 6.5 Additions
+
+### New Database Tables (003_campaigns_v2.sql)
+| Table | Purpose |
+|-------|---------|
+| `campaign_deliverables` | Individual deliverable items with status tracking |
+| `campaign_memory` | Short-term rejection tracking per campaign |
+| `rejection_categories` | Rejection type definitions with negative prompts |
+
+### New Components (Phase 6.5)
+| Component | Location | Status |
+|-----------|----------|--------|
+| Campaign Setup V2 | `src/components/CampaignSetupModal.tsx` | Built, needs integration |
+| Deliverable Builder | `src/components/DeliverableBuilder.tsx` | Built, needs integration |
+| Orchestrator | `worker/workers/orchestrator.py` | Built, needs wiring |
+
+---
+
+## Quick Reference (Phase 6.5)
+
+### Rejection Categories
+```
+too_dark, too_bright, wrong_colors, off_brand, wrong_composition,
+cluttered, wrong_model, wrong_outfit, quality_issue, other
+```
+
+### AI Models
+| Model | Type | Timeout |
+|-------|------|---------|
+| Nano | Image (fast) | 120s |
+| Veo | Video | 300s |
+| Sora | Image (premium) | 180s |
+
+### Scoring Thresholds
+| Decision | Fused Score |
+|----------|-------------|
+| AUTO_PASS | ≥ 0.92 |
+| HITL_REVIEW | ≥ 0.50 |
+| AUTO_FAIL | < 0.50 |
