@@ -11,12 +11,17 @@ Usage:
 Environment variables:
     SUPABASE_URL - Supabase project URL
     SUPABASE_KEY - Supabase service/publishable key
+
+Campaign V2:
+    Uses the CampaignOrchestrator for campaigns with deliverables defined
+    in the campaign_deliverables table (Phase 6.5+ architecture).
 """
 
 import os
 import sys
 import time
 import signal
+import asyncio
 import traceback
 from datetime import datetime
 from typing import Optional
@@ -34,6 +39,13 @@ from config import (
     POLL_INTERVAL_SECONDS,
 )
 from executors import IngestExecutor, CreativeExecutor, GradingExecutor, RAGGeneratorExecutor
+
+# Import Campaign V2 orchestrator
+try:
+    from workers.orchestrator import CampaignOrchestrator
+    ORCHESTRATOR_AVAILABLE = True
+except ImportError:
+    ORCHESTRATOR_AVAILABLE = False
 
 
 class Worker:
@@ -167,6 +179,103 @@ class Worker:
             self._add_log(run_id, stage, level, message)
         return log_callback
 
+    def _is_campaign_v2(self, campaign_id: Optional[str]) -> bool:
+        """
+        Check if a campaign uses the V2 architecture (orchestrator).
+
+        Campaign V2 campaigns have:
+        - Entries in campaign_deliverables table
+        - or a 'use_orchestrator' flag set to True
+
+        Args:
+            campaign_id: UUID of the campaign
+
+        Returns:
+            True if campaign should use V2 orchestrator
+        """
+        if not ORCHESTRATOR_AVAILABLE:
+            return False
+
+        if not campaign_id:
+            return False
+
+        try:
+            # Check for campaign_deliverables entries
+            del_result = self.supabase.table("campaign_deliverables").select(
+                "id"
+            ).eq("campaign_id", campaign_id).limit(1).execute()
+
+            if del_result.data:
+                return True
+
+            # Check for use_orchestrator flag on campaign
+            campaign_result = self.supabase.table("campaigns").select(
+                "use_orchestrator"
+            ).eq("id", campaign_id).single().execute()
+
+            if campaign_result.data and campaign_result.data.get("use_orchestrator"):
+                return True
+
+        except Exception as e:
+            print(f"[Worker] Could not check campaign version: {e}")
+
+        return False
+
+    async def _run_campaign_v2(self, run: dict, log_cb) -> dict:
+        """
+        Run a campaign using the V2 orchestrator.
+
+        Args:
+            run: Run data dict
+            log_cb: Log callback function
+
+        Returns:
+            Result dict with status and artifacts
+        """
+        campaign_id = run.get("campaign_id")
+        if not campaign_id:
+            return {"status": "failed", "error": "No campaign_id for V2 orchestration"}
+
+        log_cb("system", "info", "Using Campaign V2 orchestrator")
+
+        try:
+            orchestrator = CampaignOrchestrator(
+                supabase=self.supabase,
+                campaign_id=campaign_id,
+                log_callback=log_cb
+            )
+
+            # Run the campaign orchestration
+            result = await orchestrator.run_campaign()
+
+            # Map orchestrator status to run status
+            status = result.get("status", "completed")
+            if status == "needs_review":
+                return {
+                    "status": "needs_review",
+                    "hitl_required": True,
+                    "artifacts": [],
+                    "campaign_result": result
+                }
+            elif status == "failed":
+                return {
+                    "status": "failed",
+                    "error": "Campaign orchestration failed",
+                    "artifacts": [],
+                    "campaign_result": result
+                }
+            else:
+                return {
+                    "status": "completed",
+                    "hitl_required": False,
+                    "artifacts": [],
+                    "campaign_result": result
+                }
+
+        except Exception as e:
+            log_cb("orchestrator", "error", f"Orchestration error: {str(e)}")
+            return {"status": "failed", "error": str(e)}
+
     def _execute_run(self, run: dict):
         """Execute a single run based on its mode."""
         run_id = run["id"]
@@ -249,62 +358,70 @@ class Worker:
                 result = {"status": "completed", "artifacts": []}
 
             elif mode == "campaign":
-                # Campaign mode: RAG-augmented generation based on campaign prompt
+                # Campaign mode: Check for V2 orchestrator or legacy RAG-augmented generation
                 prompt = run.get("prompt", "A beautiful brand lifestyle image")
                 campaign_id = run.get("campaign_id")
 
                 log_cb("system", "info", f"Running campaign: {campaign_id or 'direct'}")
-                log_cb("system", "info", f"Prompt: {prompt[:100]}...")
 
-                # Get campaign details for deliverables if available
-                deliverables = {"images": 1}  # Default
-                if campaign_id:
-                    try:
-                        campaign_result = self.supabase.table("campaigns").select("deliverables").eq("id", campaign_id).single().execute()
-                        if campaign_result.data:
-                            deliverables = campaign_result.data.get("deliverables", {"images": 1})
-                            log_cb("system", "info", f"Deliverables: {deliverables}")
-                    except Exception as e:
-                        log_cb("system", "warn", f"Could not fetch campaign details: {e}")
+                # Check if this campaign uses V2 orchestrator
+                if self._is_campaign_v2(campaign_id):
+                    log_cb("system", "info", "Detected Campaign V2 - using orchestrator")
+                    result = asyncio.run(self._run_campaign_v2(run, log_cb))
+                else:
+                    # Legacy campaign mode: RAG-augmented generation
+                    log_cb("system", "info", "Using legacy campaign mode")
+                    log_cb("system", "info", f"Prompt: {prompt[:100]}...")
 
-                # Execute RAG generation for each deliverable
-                rag_exec = RAGGeneratorExecutor(log_cb)
-                all_artifacts = []
-                needs_review = False
+                    # Get campaign details for deliverables if available
+                    deliverables = {"images": 1}  # Default
+                    if campaign_id:
+                        try:
+                            campaign_result = self.supabase.table("campaigns").select("deliverables").eq("id", campaign_id).single().execute()
+                            if campaign_result.data:
+                                deliverables = campaign_result.data.get("deliverables", {"images": 1})
+                                log_cb("system", "info", f"Deliverables: {deliverables}")
+                        except Exception as e:
+                            log_cb("system", "warn", f"Could not fetch campaign details: {e}")
 
-                # Generate images
-                num_images = deliverables.get("images", 0) + deliverables.get("heroImages", 0) + deliverables.get("lifestyleImages", 0) + deliverables.get("productShots", 0)
-                for i in range(num_images):
-                    log_cb("system", "info", f"Generating image {i + 1}/{num_images}...")
-                    img_result = rag_exec.execute(run_id, client_id, prompt)
-                    if img_result.get("artifacts"):
-                        all_artifacts.extend(img_result["artifacts"])
-                    if img_result.get("hitl_required"):
-                        needs_review = True
+                    # Execute RAG generation for each deliverable
+                    rag_exec = RAGGeneratorExecutor(log_cb)
+                    all_artifacts = []
+                    needs_review = False
 
-                # Generate videos (if any)
-                num_videos = deliverables.get("videos", 0)
-                if num_videos > 0:
-                    creative_exec = CreativeExecutor(log_cb)
-                    for i in range(num_videos):
-                        log_cb("system", "info", f"Generating video {i + 1}/{num_videos}...")
-                        vid_result = creative_exec.execute(run_id, client_id, "video", {"prompt": prompt})
-                        if vid_result.get("artifacts"):
-                            all_artifacts.extend(vid_result["artifacts"])
+                    # Generate images
+                    num_images = deliverables.get("images", 0) + deliverables.get("heroImages", 0) + deliverables.get("lifestyleImages", 0) + deliverables.get("productShots", 0)
+                    for i in range(num_images):
+                        log_cb("system", "info", f"Generating image {i + 1}/{num_images}...")
+                        img_result = rag_exec.execute(run_id, client_id, prompt)
+                        if img_result.get("artifacts"):
+                            all_artifacts.extend(img_result["artifacts"])
+                        if img_result.get("hitl_required"):
+                            needs_review = True
 
-                # Update campaign status if we have a campaign_id
-                if campaign_id:
-                    try:
-                        final_status = "needs_review" if needs_review else "completed"
-                        self.supabase.table("campaigns").update({"status": final_status}).eq("id", campaign_id).execute()
-                    except Exception as e:
-                        log_cb("system", "warn", f"Could not update campaign status: {e}")
+                    # Generate videos (if any)
+                    num_videos = deliverables.get("videos", 0)
+                    if num_videos > 0:
+                        creative_exec = CreativeExecutor(log_cb)
+                        for i in range(num_videos):
+                            log_cb("system", "info", f"Generating video {i + 1}/{num_videos}...")
+                            vid_result = creative_exec.execute(run_id, client_id, "video", {"prompt": prompt})
+                            if vid_result.get("artifacts"):
+                                all_artifacts.extend(vid_result["artifacts"])
 
-                result = {
-                    "status": "needs_review" if needs_review else "completed",
-                    "hitl_required": needs_review,
-                    "artifacts": all_artifacts,
-                }
+                    # Update campaign status if we have a campaign_id
+                    if campaign_id:
+                        try:
+                            final_status = "needs_review" if needs_review else "completed"
+                            self.supabase.table("campaigns").update({"status": final_status}).eq("id", campaign_id).execute()
+                        except Exception as e:
+                            log_cb("system", "warn", f"Could not update campaign status: {e}")
+
+                    result = {
+                        "status": "needs_review" if needs_review else "completed",
+                        "hitl_required": needs_review,
+                        "artifacts": all_artifacts,
+                    }
 
             else:
                 log_cb("system", "error", f"Unknown mode: {mode}")

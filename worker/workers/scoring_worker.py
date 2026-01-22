@@ -3,6 +3,11 @@ Scoring Worker
 
 Calls BDE/Brand Linter for scoring artifacts against brand DNA.
 Implements triple fusion scoring: CLIP + E5 + Cohere.
+
+NAMING CONTRACT:
+- Score variables use _raw (0.0-1.0) or _z (unbounded) suffixes
+- Grading reads from Core/legacy indexes only (never Campaign)
+- See index_guard.py for full naming rules
 """
 
 import os
@@ -12,6 +17,15 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Any
 
 from supabase import Client
+
+# Import index_guard for naming contract enforcement
+from index_guard import (
+    get_brand_slug,
+    get_grading_indexes,
+    get_legacy_index,
+    assert_grading_index,
+    brand_id_from_client_id,
+)
 
 
 # Scoring thresholds
@@ -24,13 +38,21 @@ THRESHOLDS = {
 
 @dataclass
 class ScoreResult:
-    """Result of scoring an artifact."""
+    """
+    Result of scoring an artifact.
+
+    Score naming convention:
+    - *_raw: Raw cosine similarity scores (0.0 - 1.0 scale)
+    - *_z: Z-normalized scores (unbounded, for comparisons)
+
+    This class stores raw scores from Pinecone queries.
+    """
     passed_gate1: bool
-    fused_score: float
-    clip_score: float
-    e5_score: float
-    cohere_score: float
-    decision: str  # AUTO_PASS, HITL_REVIEW, AUTO_FAIL
+    fused_raw: float  # Weighted combination of raw scores
+    clip_raw: float   # CLIP visual similarity (0.0 - 1.0)
+    e5_raw: float     # E5 semantic similarity (0.0 - 1.0)
+    cohere_raw: float # Cohere multimodal similarity (0.0 - 1.0)
+    decision: str     # AUTO_PASS, HITL_REVIEW, AUTO_FAIL
     failure_reasons: List[str]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,10 +60,10 @@ class ScoreResult:
         return {
             "passed_gate1": self.passed_gate1,
             "scores": {
-                "clip": self.clip_score,
-                "e5": self.e5_score,
-                "cohere": self.cohere_score,
-                "fused": self.fused_score,
+                "clip_raw": self.clip_raw,
+                "e5_raw": self.e5_raw,
+                "cohere_raw": self.cohere_raw,
+                "fused_raw": self.fused_raw,
                 "decision": self.decision
             },
             "failure_reasons": self.failure_reasons
@@ -111,10 +133,10 @@ class ScoringWorker:
             self.log("scoring", "error", "No image path available")
             return ScoreResult(
                 passed_gate1=False,
-                fused_score=0.0,
-                clip_score=0.0,
-                e5_score=0.0,
-                cohere_score=0.0,
+                fused_raw=0.0,
+                clip_raw=0.0,
+                e5_raw=0.0,
+                cohere_raw=0.0,
                 decision="AUTO_FAIL",
                 failure_reasons=["no_image"]
             ).to_dict()
@@ -133,7 +155,7 @@ class ScoringWorker:
                 }).eq("id", artifact_id).execute()
 
             self.log("scoring", "info",
-                    f"Score: fused={result.fused_score:.3f}, decision={result.decision}")
+                    f"Score: fused_raw={result.fused_raw:.3f}, decision={result.decision}")
 
             return result.to_dict()
 
@@ -141,10 +163,10 @@ class ScoringWorker:
             self.log("scoring", "error", f"Scoring error: {str(e)}")
             return ScoreResult(
                 passed_gate1=False,
-                fused_score=0.0,
-                clip_score=0.0,
-                e5_score=0.0,
-                cohere_score=0.0,
+                fused_raw=0.0,
+                clip_raw=0.0,
+                e5_raw=0.0,
+                cohere_raw=0.0,
                 decision="AUTO_FAIL",
                 failure_reasons=["scoring_error"]
             ).to_dict()
@@ -157,29 +179,37 @@ class ScoringWorker:
         """
         Call the multimodal_retriever.py script for scoring.
 
+        SAFETY: Only reads from Core/legacy indexes (never Campaign).
+        Uses index_guard to enforce naming contract.
+
         Args:
             image_path: Path to the image to score
             brand_id: Brand ID for context
 
         Returns:
-            Dict with clip, e5, cohere, and fused scores
+            Dict with clip_raw, e5_raw, cohere_raw, and fused_raw scores
         """
         script_path = os.path.join(self.brand_linter_path, "multimodal_retriever.py")
 
-        # Get Pinecone namespace for the brand
-        client_result = self.supabase.table("clients").select("pinecone_namespace").eq(
-            "id", brand_id
-        ).single().execute()
+        # Extract brand_id from client_id format if necessary
+        actual_brand_id = brand_id_from_client_id(brand_id)
 
-        namespace = "default"
-        if client_result.data:
-            namespace = client_result.data.get("pinecone_namespace", "default")
+        # Get grading indexes using index_guard (enforces Core/legacy only)
+        grading_indexes = get_grading_indexes(actual_brand_id)
 
-        # Build command
+        # Assert all indexes are valid for grading (safety check)
+        for model, index_name in grading_indexes.items():
+            assert_grading_index(index_name)
+            self.log("scoring", "debug", f"Using grading index: {index_name}")
+
+        # Get brand_slug for namespace (Pinecone uses slug format)
+        brand_slug = get_brand_slug(actual_brand_id)
+
+        # Build command with proper namespace
         cmd = [
             "python3", script_path,
             "--query-image", image_path,
-            "--namespace", namespace,
+            "--namespace", brand_slug,
             "--output-format", "json"
         ]
 
@@ -195,11 +225,12 @@ class ScoringWorker:
             if result.returncode == 0 and result.stdout:
                 try:
                     output = json.loads(result.stdout)
+                    # Return scores with _raw suffix (0.0 - 1.0 scale)
                     return {
-                        "clip": output.get("clip_score", 0.0),
-                        "e5": output.get("e5_score", 0.0),
-                        "cohere": output.get("cohere_score", 0.0),
-                        "fused": output.get("fused_score", 0.0)
+                        "clip_raw": output.get("clip_score", 0.0),
+                        "e5_raw": output.get("e5_score", 0.0),
+                        "cohere_raw": output.get("cohere_score", 0.0),
+                        "fused_raw": output.get("fused_score", 0.0)
                     }
                 except json.JSONDecodeError:
                     self.log("scoring", "warn", "Could not parse retriever output")
@@ -214,12 +245,12 @@ class ScoringWorker:
         except Exception as e:
             self.log("scoring", "error", f"Retriever error: {str(e)}")
 
-        # Return default scores on failure
+        # Return default scores on failure (with _raw suffix)
         return {
-            "clip": 0.5,
-            "e5": 0.5,
-            "cohere": 0.5,
-            "fused": 0.5
+            "clip_raw": 0.5,
+            "e5_raw": 0.5,
+            "cohere_raw": 0.5,
+            "fused_raw": 0.5
         }
 
     def _analyze_scores(self, scores: Dict[str, float]) -> ScoreResult:
@@ -227,21 +258,21 @@ class ScoringWorker:
         Analyze scores and determine decision.
 
         Args:
-            scores: Dict with clip, e5, cohere, fused scores
+            scores: Dict with clip_raw, e5_raw, cohere_raw, fused_raw scores
 
         Returns:
             ScoreResult with analysis
         """
-        fused = scores.get("fused", 0.0)
-        clip = scores.get("clip", 0.0)
-        e5 = scores.get("e5", 0.0)
-        cohere = scores.get("cohere", 0.0)
+        fused_raw = scores.get("fused_raw", 0.0)
+        clip_raw = scores.get("clip_raw", 0.0)
+        e5_raw = scores.get("e5_raw", 0.0)
+        cohere_raw = scores.get("cohere_raw", 0.0)
 
         # Determine decision based on fused score
-        if fused >= THRESHOLDS["AUTO_PASS"]:
+        if fused_raw >= THRESHOLDS["AUTO_PASS"]:
             decision = "AUTO_PASS"
             passed = True
-        elif fused >= THRESHOLDS["HITL_REVIEW"]:
+        elif fused_raw >= THRESHOLDS["HITL_REVIEW"]:
             decision = "HITL_REVIEW"
             passed = True  # Still passes Gate 1, goes to HITL
         else:
@@ -253,10 +284,10 @@ class ScoringWorker:
 
         return ScoreResult(
             passed_gate1=passed,
-            fused_score=fused,
-            clip_score=clip,
-            e5_score=e5,
-            cohere_score=cohere,
+            fused_raw=fused_raw,
+            clip_raw=clip_raw,
+            e5_raw=e5_raw,
+            cohere_raw=cohere_raw,
             decision=decision,
             failure_reasons=failure_reasons
         )
@@ -266,31 +297,31 @@ class ScoringWorker:
         Determine failure reasons based on score breakdown.
 
         Args:
-            scores: Dict with individual scores
+            scores: Dict with individual scores (using _raw suffix)
 
         Returns:
             List of failure reason category IDs
         """
         reasons = []
 
-        clip = scores.get("clip", 0.0)
-        e5 = scores.get("e5", 0.0)
-        cohere = scores.get("cohere", 0.0)
+        clip_raw = scores.get("clip_raw", 0.0)
+        e5_raw = scores.get("e5_raw", 0.0)
+        cohere_raw = scores.get("cohere_raw", 0.0)
 
         # Low CLIP score suggests visual mismatch
-        if clip < 0.70:
+        if clip_raw < 0.70:
             reasons.append("off_brand")
 
         # Low E5 score suggests semantic/conceptual issues
-        if e5 < 0.60:
+        if e5_raw < 0.60:
             reasons.append("wrong_composition")
 
         # Low Cohere score suggests multimodal misalignment
-        if cohere < 0.65:
+        if cohere_raw < 0.65:
             reasons.append("quality_issue")
 
         # If all scores are mediocre, it's likely a general brand issue
-        if all(s < 0.75 for s in [clip, e5, cohere]) and not reasons:
+        if all(s < 0.75 for s in [clip_raw, e5_raw, cohere_raw]) and not reasons:
             reasons.append("off_brand")
 
         return reasons
@@ -312,13 +343,14 @@ class ScoringWorker:
         """
         results = []
         for artifact in artifacts:
+            artifact_id = artifact.get("id", "")
             result = await self.score_item(
-                artifact_id=artifact.get("id"),
+                artifact_id=artifact_id,
                 brand_id=brand_id,
                 image_path=artifact.get("path")
             )
             results.append({
-                "artifact_id": artifact.get("id"),
+                "artifact_id": artifact_id,
                 **result
             })
         return results
