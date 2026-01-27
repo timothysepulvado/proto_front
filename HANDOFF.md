@@ -13,7 +13,7 @@
 | **HUD** | `~/Hud` | `tim-dev` | Phase 2 ✅ | 9/10 | HITL → Supabase → BDE connected |
 | **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 5 ✅ | 10/10 | Triple fusion fully operational |
 | **BDE** | `~/BDE` | `antigravity` | Phase 6 ✅ | 10/10 | HITL/RL integration complete |
-| **Temp-gen** | `~/Temp-gen` | - | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
+| **Temp-gen** | `~/Temp-gen` | `main` | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
 
 ### UPDATE: Phase 6.5 Complete (2026-01-18)
 | **HUD** | `~/Hud` | `tim-dev` | Phase 6.5 ✅ | 7/10 | Backend complete, frontend needs integration (Phase 7) |

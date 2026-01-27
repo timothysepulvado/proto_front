@@ -13,6 +13,15 @@ BrandStudios is a multi-component system for brand-consistent AI image generatio
 | **BDE** | `~/BDE` | Brand DNA Engine, RL threshold tuning |
 | **Temp-gen** | `~/Temp-gen` | Image generation (Veo/Nano/Sora) |
 
+## Active Branches
+
+| Repository | Branch | Purpose |
+|-----------|--------|---------|
+| HUD | `tim-dev` | Main development (Phase 7) |
+| Brand_linter | `phase-3` | Triple fusion scoring |
+| BDE | `antigravity` | RL threshold tuning |
+| Temp-gen | `main` | Image generation |
+
 ## Critical Naming Contract
 
 **MUST READ: `worker/index_guard.py`** - All index/naming logic is centralized here.

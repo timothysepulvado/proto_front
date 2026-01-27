@@ -366,4 +366,22 @@ supabase db push
 
 ---
 
+## Repository Branches
+
+### Active Development Branches
+
+| Repo | Branch | Purpose | Sync Status |
+|------|--------|---------|-------------|
+| HUD | `tim-dev` | Frontend + worker development | Active |
+| Brand_linter | `phase-3` | Scoring engine | Stable |
+| BDE | `antigravity` | RL tuning | Stable |
+| Temp-gen | `main` | Generation models | Stable |
+
+### Branch Naming Convention
+- `tim-dev` - Tim's development branch
+- `phase-N` - Phase-specific feature branches
+- `main` - Stable/production code
+
+---
+
 *This document is the single source of truth. When in doubt, refer here.*
