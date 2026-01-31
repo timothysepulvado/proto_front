@@ -20,7 +20,20 @@
 
 ---
 
-## Phase 7: Frontend Integration (NEXT)
+## Phase 7: Integration Gap Fixes (2026-01-30)
+
+### ✅ Completed (Phase 7.1)
+- [x] Fixed `rag_generator.py` CLI to match multimodal_retriever interface
+- [x] Fixed output parsing (fusion.combined_z, e5.score, cohere.score)
+- [x] Added `MIGRATION_COMPLETE_BRANDS` to index_guard.py
+- [x] `get_grading_indexes()` returns Core indexes for migrated brands
+
+### 🔲 Remaining (Phase 7.2 - Frontend Integration)
+- [ ] Wire CampaignSetupModal to new orchestrator
+- [ ] Connect DeliverableBuilder to generation_worker
+- [ ] Wire HITLReviewPanel to scoring results
+- [ ] Real-time deliverable tracking in UI
+- [ ] Test rejection → retry flow end-to-end
 
 ### Problem Statement
 Phase 6.5 added backend components (Python workers, database schema, API functions) but the **frontend is not properly wired up**. The new Campaign Setup V2 UI exists but doesn't match the working patterns established in other areas.
@@ -47,7 +60,7 @@ Phase 6.5 added backend components (Python workers, database schema, API functio
    - Real-time deliverable status updates not verified
    - Progress tracking UI not implemented
 
-### Phase 7 Goals
+### Phase 7.2 Goals
 
 | Goal | Description | Priority |
 |------|-------------|----------|

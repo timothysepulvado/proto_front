@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.1] - 2026-01-30 — Phase 7.1: Integration Gap Fixes
+
+### Fixed
+- **`rag_generator.py`**: Aligned CLI with multimodal_retriever (positional args, removed --namespace)
+- **`rag_generator.py`**: Fixed output parsing to match retriever JSON structure
+- **`rag_generator.py`**: Renamed score keys to use `_raw`/`_z` suffixes
+- **`index_guard.py`**: Added `MIGRATION_COMPLETE_BRANDS` config flag
+- **`index_guard.py`**: `is_migration_complete()` now returns True for jenni_kayne, cylndr
+- **`get_grading_indexes()`**: Now returns Core indexes for migrated brands
+
+---
+
 ## [0.4.0] - 2026-01-18 — Phase 6.5: Generation Feedback Loop
 
 ### Added

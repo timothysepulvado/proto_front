@@ -67,6 +67,26 @@ assert_ai_write_index(index_name)  # Raises on core/legacy indexes
 
 **Always use suffixes** - bare `clip`, `e5`, etc. are ambiguous.
 
+### Multimodal Retriever Output Structure
+
+When calling `multimodal_retriever.py --json`, expect this structure:
+
+```python
+{
+  "clip": {"score": 0.72, "z_score": 1.2, "results": [...]},
+  "e5": {"score": 0.94, "z_score": 0.8, "results": [...]},
+  "cohere": {"score": 0.78, "z_score": 1.1, "results": [...]},
+  "fusion": {
+    "combined_z": 1.05,
+    "gate_decision": "AUTO_PASS",
+    "clip_raw_score": 0.72,
+    "results": [...]
+  }
+}
+```
+
+**Key**: Individual modality scores at top level, fusion decision in `fusion` dict.
+
 ## Directory Structure
 
 ```
