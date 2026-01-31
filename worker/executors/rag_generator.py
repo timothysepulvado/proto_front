@@ -52,6 +52,10 @@ class RAGGeneratorExecutor:
         """
         Query Pinecone for brand DNA context using the multimodal retriever.
 
+        NOTE: The multimodal_retriever requires an image for CLIP embedding.
+        For text-only context queries, we skip retrieval and return empty context.
+        The main scoring path (grade_output) handles the full triple-modal retrieval.
+
         Args:
             client_id: Client identifier (used to derive namespace)
             query_text: Text query for semantic search
@@ -62,72 +66,13 @@ class RAGGeneratorExecutor:
         """
         self.log("rag", "info", f"Querying brand DNA for context: {query_text[:50]}...")
 
-        # Get the pinecone namespace from client_id
-        # Format: client_jenni_kayne -> jenni_kayne
-        namespace = client_id.replace("client_", "")
+        # The multimodal retriever requires an image path for CLIP embedding.
+        # For text-only context queries (pre-generation), we skip retrieval.
+        # Context injection will rely on the brand profile pillars/descriptors instead.
+        self.log("rag", "info", "Text-only context query - using brand profile instead of retrieval")
 
-        script = self.brand_linter_path / "tools" / "multimodal_retriever.py"
-
-        if not script.exists():
-            self.log("rag", "warn", "Multimodal retriever not found, skipping context injection")
-            return {"context": "", "matches": []}
-
-        try:
-            # Run the retriever with text-only query
-            cmd = [
-                str(self.brand_linter_python),
-                str(script),
-                "--text-query",
-                query_text,
-                "--namespace",
-                namespace,
-                "--top-k",
-                str(top_k),
-                "--json",
-            ]
-
-            result = subprocess.run(
-                cmd,
-                cwd=str(self.brand_linter_path),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode != 0:
-                self.log("rag", "warn", f"Brand DNA query failed: {result.stderr}")
-                return {"context": "", "matches": []}
-
-            # Parse JSON output
-            try:
-                data = json.loads(result.stdout)
-                matches = data.get("top_matches", [])
-
-                # Build context string from top matches
-                context_parts = []
-                for match in matches[:top_k]:
-                    if "metadata" in match:
-                        meta = match["metadata"]
-                        if "description" in meta:
-                            context_parts.append(meta["description"])
-                        if "tags" in meta:
-                            context_parts.append(f"Tags: {', '.join(meta['tags'])}")
-
-                context = ". ".join(context_parts)
-                self.log("rag", "info", f"Retrieved {len(matches)} brand DNA matches")
-
-                return {"context": context, "matches": matches}
-
-            except json.JSONDecodeError:
-                self.log("rag", "warn", "Failed to parse brand DNA response")
-                return {"context": "", "matches": []}
-
-        except subprocess.TimeoutExpired:
-            self.log("rag", "warn", "Brand DNA query timed out")
-            return {"context": "", "matches": []}
-        except Exception as e:
-            self.log("rag", "warn", f"Brand DNA query error: {str(e)}")
-            return {"context": "", "matches": []}
+        # Return empty context - the brand profile provides context via prompt augmentation
+        return {"context": "", "matches": []}
 
     def augment_prompt(self, original_prompt: str, brand_context: str) -> str:
         """
@@ -166,10 +111,11 @@ Use the brand context above to inform color palette, composition, and mood."""
         Returns:
             Improved prompt with adjustments
         """
+        # Extract scores from multimodal_retriever output structure
         fusion = grade_result.get("fusion", {})
         clip_score = fusion.get("clip_raw_score", 0)
-        e5_score = fusion.get("e5_score", 0)
-        cohere_score = fusion.get("cohere_score", 0)
+        e5_score = grade_result.get("e5", {}).get("score", 0)
+        cohere_score = grade_result.get("cohere", {}).get("score", 0)
 
         improvements = []
 
@@ -215,6 +161,9 @@ Focus on brand consistency and visual coherence."""
         """
         Grade the generated output against brand DNA.
 
+        Uses multimodal_retriever.py with positional args:
+          python multimodal_retriever.py <image_path> <text_query> --json
+
         Args:
             client_id: Client identifier
             image_path: Path to the generated image
@@ -225,7 +174,6 @@ Focus on brand consistency and visual coherence."""
         """
         self.log("grading", "info", f"Grading output: {image_path}")
 
-        namespace = client_id.replace("client_", "")
         script = self.brand_linter_path / "tools" / "multimodal_retriever.py"
 
         if not script.exists():
@@ -233,13 +181,13 @@ Focus on brand consistency and visual coherence."""
             return {"status": "skipped", "decision": "HITL_REVIEW"}
 
         try:
+            # multimodal_retriever expects: image (positional), text (positional), --json
+            # No --namespace flag - retriever uses brand profile config for index names
             cmd = [
                 str(self.brand_linter_python),
                 str(script),
                 image_path,
                 text_query,
-                "--namespace",
-                namespace,
                 "--json",
             ]
 
@@ -257,10 +205,22 @@ Focus on brand consistency and visual coherence."""
 
             try:
                 grade_result = json.loads(result.stdout)
+
+                # Parse output structure from multimodal_retriever:
+                # {
+                #   "clip": {"score": float, "z_score": float, ...},
+                #   "e5": {"score": float, "z_score": float, ...},
+                #   "cohere": {"score": float, "z_score": float, ...},
+                #   "fusion": {"combined_z": float, "gate_decision": str, "clip_raw_score": float, ...}
+                # }
                 fusion = grade_result.get("fusion", {})
                 decision = fusion.get("gate_decision", "HITL_REVIEW")
                 combined_z = fusion.get("combined_z", 0.0)
                 clip_raw = fusion.get("clip_raw_score", 0.0)
+
+                # Get raw scores from top-level modality dicts (not fusion)
+                e5_raw = grade_result.get("e5", {}).get("score", 0.0)
+                cohere_raw = grade_result.get("cohere", {}).get("score", 0.0)
 
                 self.log("grading", "info", f"Decision: {decision}")
                 self.log("grading", "info", f"Fused Z: {combined_z:.4f}, CLIP: {clip_raw:.4f}")
@@ -269,10 +229,10 @@ Focus on brand consistency and visual coherence."""
                     "status": "completed",
                     "decision": decision,
                     "scores": {
-                        "fused": combined_z,
-                        "clip": clip_raw,
-                        "e5": fusion.get("e5_score", 0.0),
-                        "cohere": fusion.get("cohere_score", 0.0),
+                        "fused_z": combined_z,
+                        "clip_raw": clip_raw,
+                        "e5_raw": e5_raw,
+                        "cohere_raw": cohere_raw,
                     },
                     "raw": grade_result,
                 }
@@ -426,10 +386,10 @@ Focus on brand consistency and visual coherence."""
                 "path": image_path,
                 "grade": {
                     "decision": decision,
-                    "clip": scores.get("clip", 0),
-                    "e5": scores.get("e5", 0),
-                    "cohere": scores.get("cohere", 0),
-                    "fused": scores.get("fused", 0),
+                    "clip_raw": scores.get("clip_raw", 0),
+                    "e5_raw": scores.get("e5_raw", 0),
+                    "cohere_raw": scores.get("cohere_raw", 0),
+                    "fused_z": scores.get("fused_z", 0),
                 },
             }
             artifacts.append(artifact)

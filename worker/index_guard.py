@@ -43,6 +43,13 @@ LEGACY_INDEX_PATTERNS = [
     r"^[a-z]+-brand-dna-cohere$",
 ]
 
+# Brands that have completed migration to Core/Campaign indexes
+# Add brand_id here when Core indexes are populated and verified
+MIGRATION_COMPLETE_BRANDS = frozenset({
+    "jenni_kayne",
+    "cylndr",
+})
+
 # Index name validation regex
 INDEX_NAME_PATTERN = re.compile(
     r"^[a-z]+-(core|campaign|brand-dna)-(clip768|e5-1024|e5|cohere1536|cohere)$"
@@ -470,17 +477,19 @@ def is_migration_complete(brand_id: str, check_func=None) -> bool:
 
     Args:
         brand_id: Brand to check
-        check_func: Optional function to check if index exists
+        check_func: Optional function to check if index exists (Pinecone API)
 
     Returns:
         True if Core indexes exist for this brand
     """
-    # Default implementation assumes migration is not complete
-    # In production, this would check Pinecone for index existence
+    # If a check function is provided, use it for live verification
     if check_func:
         core_index = get_core_index(brand_id, "clip")
         return check_func(core_index)
-    return False
+
+    # Use config flag for known-migrated brands
+    # This avoids Pinecone API calls during normal operation
+    return brand_id in MIGRATION_COMPLETE_BRANDS
 
 
 def get_grading_indexes(brand_id: str, prefer_core: bool = True) -> Dict[str, str]:
