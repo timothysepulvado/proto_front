@@ -1,8 +1,8 @@
 # BrandStudios OS - Session Handoff
 
-**Last Updated:** 2026-01-18
+**Last Updated:** 2026-01-31
 **Branch:** `tim-dev`
-**Status:** Phase 6 Complete (HITL/RL Integration) | HUD Phase 2 Complete
+**Status:** Phase 7.2 Complete (Blocking Integration Fixes)
 
 ---
 
@@ -10,30 +10,51 @@
 
 | Component | Location | Branch | Phase | Health | Notes |
 |-----------|----------|--------|-------|--------|-------|
-| **HUD** | `~/Hud` | `tim-dev` | Phase 2 ✅ | 9/10 | HITL → Supabase → BDE connected |
-| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 5 ✅ | 10/10 | Triple fusion fully operational |
-| **BDE** | `~/BDE` | `antigravity` | Phase 6 ✅ | 10/10 | HITL/RL integration complete |
+| **HUD** | `~/Hud` | `tim-dev` | Phase 7.2 ✅ | 9/10 | Workers aligned with Brand_linter |
+| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 7.2 ✅ | 10/10 | Per-brand profiles, triple-modal ingestion |
+| **BDE** | `~/BDE` | `antigravity` | Phase 7.2 ✅ | 10/10 | Separate index architecture |
 | **Temp-gen** | `~/Temp-gen` | `main` | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
-
-### UPDATE: Phase 6.5 Complete (2026-01-18)
-| **HUD** | `~/Hud` | `tim-dev` | Phase 6.5 ✅ | 7/10 | Backend complete, frontend needs integration (Phase 7) |
 
 ---
 
-## Phase 7: Integration Gap Fixes (2026-01-30)
+## Phase 7.2: Blocking Integration Fixes (2026-01-31) ✅ COMPLETE
 
-### ✅ Completed (Phase 7.1)
-- [x] Fixed `rag_generator.py` CLI to match multimodal_retriever interface
-- [x] Fixed output parsing (fusion.combined_z, e5.score, cohere.score)
-- [x] Added `MIGRATION_COMPLETE_BRANDS` to index_guard.py
-- [x] `get_grading_indexes()` returns Core indexes for migrated brands
+### What Was Fixed
 
-### 🔲 Remaining (Phase 7.2 - Frontend Integration)
+| Issue | Repo | Fix |
+|-------|------|-----|
+| Wrong paths to Brand_linter scripts | HUD | Changed to `~/Desktop/Brand_linter/local_quick_setup/tools/` |
+| Missing `--brand` flag | All | Added to multimodal_retriever, ingest_to_pinecone, rag_generator |
+| Wrong output parsing | HUD | Parse nested structure (`result["clip"]["score"]`) |
+| fused_raw vs fused_z | HUD | Switched to z-score thresholds (unbounded) |
+| Per-brand profiles | Brand_linter | `data/brand_profiles/<brand_id>.json` |
+| Merge-update stats | HUD | Preserve pillars/tone when updating stats |
+| Shared index confusion | BDE | Separate indexes for E5/Cohere |
+| Namespace misalignment | Brand_linter | Empty namespace for separate indexes |
+| Triple-modal ingestion | Brand_linter | CLIP + E5 + Cohere in one call |
+
+### Key Architectural Decisions
+
+1. **Per-brand profile files**: `data/brand_profiles/jenni_kayne.json` (not keyed dict)
+2. **Z-score thresholds**: `fused_z` is unbounded, thresholds at 1.0/0.5/0.0
+3. **Separate indexes**: Each modality has its own Pinecone index (dimension mismatch)
+4. **Empty namespace**: All queries use `namespace=""` for separate indexes
+
+### Unit Tests Verified
+- IndexGuard: 8/8 tests passing
+- PromptModifier: 5/5 tests passing
+
+---
+
+## Phase 7.3: Frontend Integration (Next)
+
+### 🔲 Remaining
 - [ ] Wire CampaignSetupModal to new orchestrator
 - [ ] Connect DeliverableBuilder to generation_worker
 - [ ] Wire HITLReviewPanel to scoring results
 - [ ] Real-time deliverable tracking in UI
 - [ ] Test rejection → retry flow end-to-end
+- [ ] Integration smoke test
 
 ### Problem Statement
 Phase 6.5 added backend components (Python workers, database schema, API functions) but the **frontend is not properly wired up**. The new Campaign Setup V2 UI exists but doesn't match the working patterns established in other areas.

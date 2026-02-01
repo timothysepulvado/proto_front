@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.2] - 2026-01-31 — Phase 7.2: Blocking Integration Fixes
+
+### Fixed
+- **`scoring_worker.py`**: Fixed path to `tools/multimodal_retriever.py` (was looking at repo root)
+- **`scoring_worker.py`**: Pass text query + `--brand` flag to multimodal_retriever
+- **`scoring_worker.py`**: Parse nested output structure (`result["clip"]["score"]`, etc.)
+- **`scoring_worker.py`**: Switch to `fused_z` (z-score thresholds) from `fused_raw` (0-1 scale)
+- **`dna_updater.py`**: Fixed path to `tools/ingest_to_pinecone.py`
+- **`dna_updater.py`**: Add `--brand` flag to ingestion calls
+- **`dna_updater.py`**: Write per-brand profile files (`data/brand_profiles/<brand_id>.json`)
+- **`dna_updater.py`**: Merge-update stats instead of overwriting entire profile
+- **`rag_generator.py`**: Add `--brand` flag to multimodal_retriever call
+
+### Changed
+- **Z-Score Thresholds**: Gate decisions now use z-score space (unbounded)
+  - `AUTO_PASS`: z > 1.0
+  - `HITL_REVIEW`: z > 0.5
+  - `AUTO_FAIL`: z ≤ 0.0
+- **ScoreResult dataclass**: Renamed `fused_raw` → `fused_z` everywhere
+
+### Verified
+- IndexGuard unit tests: All 8 tests passing
+- PromptModifier unit tests: All 5 tests passing
+
+---
+
 ## [0.4.1] - 2026-01-30 — Phase 7.1: Integration Gap Fixes
 
 ### Fixed

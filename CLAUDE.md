@@ -115,11 +115,33 @@ When calling `multimodal_retriever.py --json`, expect this structure:
 └── HANDOFF.md                # Detailed session handoff
 ```
 
-## Current Phase: 7 (Frontend Integration)
+## Current Phase: 7.2 Complete (Integration Fixes)
 
-- Backend workers are built (Phase 6.5)
-- Frontend needs wiring to new orchestrator
+- Phase 7.2: Blocking integration fixes complete
+- Workers now aligned with Brand_linter CLI interface
+- Frontend wiring is next (Phase 7.3)
 - See `HANDOFF.md` for detailed status
+
+### Phase 7.2 Key Changes
+
+**Per-brand profile files:**
+```
+Brand_linter/data/brand_profiles/jenni_kayne.json  # Not a keyed dict
+```
+
+**Z-score thresholds** (fused_z is unbounded):
+```python
+THRESHOLDS_Z = {
+    "AUTO_PASS": 1.0,      # z > 1.0
+    "HITL_REVIEW": 0.5,    # z > 0.5
+    "AUTO_FAIL": 0.0
+}
+```
+
+**Separate Pinecone indexes** (not shared with namespaces):
+- CLIP: `jennikayne-brand-dna-clip768` (768D)
+- E5: `jennikayne-brand-dna-e5` (1024D)
+- Cohere: `jennikayne-brand-dna-cohere` (1536D)
 
 ## Key Commands
 
