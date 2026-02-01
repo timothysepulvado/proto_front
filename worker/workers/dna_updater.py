@@ -154,7 +154,7 @@ class DNAUpdater:
             return
 
         # Pass brand_id for proper indexing
-        # Note: namespace defaults to empty string (separate indexes don't need namespaces)
+        # Note: namespace defaults to __default__ (Pinecone API 2025-04+)
         cmd = [
             "python3", script_path,
             "--image", image_path,
