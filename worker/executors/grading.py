@@ -9,6 +9,7 @@ from typing import Callable, Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import TOOL_PATHS, TOOL_VENVS, OUTPUT_BASE
+from index_guard import brand_id_from_client_id
 
 
 class GradingExecutor:
@@ -67,12 +68,16 @@ class GradingExecutor:
             return {"status": "failed", "error": "Grading script not found"}
 
         try:
-            # Run the multimodal retriever with JSON output
+            # Extract brand_id from client_id format
+            brand_id = brand_id_from_client_id(client_id)
+
+            # Run the multimodal retriever with JSON output and --brand flag
             cmd = [
                 str(self.python),
                 str(script),
                 image_path,
                 text_query,
+                "--brand", brand_id,
                 "--json",
             ]
 

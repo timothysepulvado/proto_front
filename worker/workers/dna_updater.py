@@ -153,12 +153,12 @@ class DNAUpdater:
             self.log("dna", "warn", f"Ingestion script not found: {script_path}")
             return
 
-        # Pass brand_id and brand_slug (namespace) for proper indexing
+        # Pass brand_id for proper indexing
+        # Note: namespace defaults to empty string (separate indexes don't need namespaces)
         cmd = [
             "python3", script_path,
             "--image", image_path,
             "--brand", brand_id,
-            "--namespace", brand_slug,
             "--json"
         ]
 

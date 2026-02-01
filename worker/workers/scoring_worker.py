@@ -260,8 +260,10 @@ class ScoringWorker:
                     cohere_data = output.get("cohere", {})
                     fusion_data = output.get("fusion", {})
 
+                    # Use fusion.clip_raw_score for consistency with gate decisions
+                    # (fallback to clip.score for backward compatibility)
                     return {
-                        "clip_raw": clip_data.get("score", 0.0),
+                        "clip_raw": fusion_data.get("clip_raw_score", clip_data.get("score", 0.0)),
                         "e5_raw": e5_data.get("score", 0.0),
                         "cohere_raw": cohere_data.get("score", 0.0),
                         "fused_z": fusion_data.get("combined_z", 0.0)
