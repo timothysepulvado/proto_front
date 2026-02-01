@@ -162,10 +162,10 @@ Focus on brand consistency and visual coherence."""
         Grade the generated output against brand DNA.
 
         Uses multimodal_retriever.py with positional args:
-          python multimodal_retriever.py <image_path> <text_query> --json
+          python multimodal_retriever.py <image_path> <text_query> --brand <brand_id> --json
 
         Args:
-            client_id: Client identifier
+            client_id: Client identifier (e.g., 'client_jenni_kayne' or 'jenni_kayne')
             image_path: Path to the generated image
             text_query: The original text query
 
@@ -180,14 +180,19 @@ Focus on brand consistency and visual coherence."""
             self.log("grading", "warn", "Grading script not found")
             return {"status": "skipped", "decision": "HITL_REVIEW"}
 
+        # Extract brand_id from client_id format (e.g., 'client_jenni_kayne' -> 'jenni_kayne')
+        brand_id = client_id
+        if brand_id.startswith("client_"):
+            brand_id = brand_id[7:]  # Remove 'client_' prefix
+
         try:
-            # multimodal_retriever expects: image (positional), text (positional), --json
-            # No --namespace flag - retriever uses brand profile config for index names
+            # multimodal_retriever expects: image (positional), text (positional), --brand, --json
             cmd = [
                 str(self.brand_linter_python),
                 str(script),
                 image_path,
                 text_query,
+                "--brand", brand_id,
                 "--json",
             ]
 

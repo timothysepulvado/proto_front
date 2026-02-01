@@ -28,11 +28,12 @@ from index_guard import (
 )
 
 
-# Scoring thresholds
-THRESHOLDS = {
-    "AUTO_PASS": 0.92,
-    "HITL_REVIEW": 0.5,
-    "AUTO_FAIL": 0.0
+# Scoring thresholds (z-score space, unbounded)
+# combined_z from multimodal_retriever is a weighted z-score, not a 0-1 raw score
+THRESHOLDS_Z = {
+    "AUTO_PASS": 1.0,      # z > 1.0 → AUTO_PASS (high confidence)
+    "HITL_REVIEW": 0.5,    # z > 0.5 → HITL_REVIEW (moderate confidence)
+    "AUTO_FAIL": 0.0       # z <= 0.5 → AUTO_FAIL (low confidence)
 }
 
 
@@ -45,10 +46,11 @@ class ScoreResult:
     - *_raw: Raw cosine similarity scores (0.0 - 1.0 scale)
     - *_z: Z-normalized scores (unbounded, for comparisons)
 
-    This class stores raw scores from Pinecone queries.
+    The fused score (combined_z) is a weighted z-score from multimodal_retriever,
+    which aggregates CLIP, E5, and Cohere z-scores using configurable weights.
     """
     passed_gate1: bool
-    fused_raw: float  # Weighted combination of raw scores
+    fused_z: float    # Weighted combination of z-scores (unbounded)
     clip_raw: float   # CLIP visual similarity (0.0 - 1.0)
     e5_raw: float     # E5 semantic similarity (0.0 - 1.0)
     cohere_raw: float # Cohere multimodal similarity (0.0 - 1.0)
@@ -63,7 +65,7 @@ class ScoreResult:
                 "clip_raw": self.clip_raw,
                 "e5_raw": self.e5_raw,
                 "cohere_raw": self.cohere_raw,
-                "fused_raw": self.fused_raw,
+                "fused_z": self.fused_z,
                 "decision": self.decision
             },
             "failure_reasons": self.failure_reasons
@@ -105,7 +107,8 @@ class ScoringWorker:
         self,
         artifact_id: str,
         brand_id: str,
-        image_path: Optional[str] = None
+        image_path: Optional[str] = None,
+        text_query: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Score single item through Gate 1.
@@ -114,6 +117,7 @@ class ScoringWorker:
             artifact_id: UUID of the artifact to score
             brand_id: Brand/client ID for scoring context
             image_path: Optional direct path to image (if not using artifact)
+            text_query: Optional text description for E5/Cohere scoring
 
         Returns:
             ScoreResult dict with scores and decision
@@ -121,19 +125,29 @@ class ScoringWorker:
         self.log("scoring", "info", f"Scoring artifact: {artifact_id}")
 
         # Get artifact details if needed
+        artifact_data = None
         if not image_path and artifact_id:
             result = self.supabase.table("artifacts").select("*").eq(
                 "id", artifact_id
             ).single().execute()
 
             if result.data:
-                image_path = result.data.get("path")
+                artifact_data = result.data
+                image_path = artifact_data.get("path")
+                # Extract text_query from artifact if not provided
+                if not text_query:
+                    text_query = (
+                        artifact_data.get("prompt") or
+                        artifact_data.get("caption") or
+                        artifact_data.get("description") or
+                        "brand lifestyle image"
+                    )
 
         if not image_path:
             self.log("scoring", "error", "No image path available")
             return ScoreResult(
                 passed_gate1=False,
-                fused_raw=0.0,
+                fused_z=0.0,
                 clip_raw=0.0,
                 e5_raw=0.0,
                 cohere_raw=0.0,
@@ -141,9 +155,15 @@ class ScoringWorker:
                 failure_reasons=["no_image"]
             ).to_dict()
 
+        # Default text_query if still not available
+        if not text_query:
+            text_query = "brand lifestyle image"
+
         try:
             # Call multimodal_retriever for scoring
-            scores = await self._call_multimodal_retriever(image_path, brand_id)
+            scores = await self._call_multimodal_retriever(
+                image_path, text_query, brand_id
+            )
 
             # Analyze results
             result = self._analyze_scores(scores)
@@ -155,7 +175,7 @@ class ScoringWorker:
                 }).eq("id", artifact_id).execute()
 
             self.log("scoring", "info",
-                    f"Score: fused_raw={result.fused_raw:.3f}, decision={result.decision}")
+                    f"Score: fused_z={result.fused_z:.3f}, decision={result.decision}")
 
             return result.to_dict()
 
@@ -163,7 +183,7 @@ class ScoringWorker:
             self.log("scoring", "error", f"Scoring error: {str(e)}")
             return ScoreResult(
                 passed_gate1=False,
-                fused_raw=0.0,
+                fused_z=0.0,
                 clip_raw=0.0,
                 e5_raw=0.0,
                 cohere_raw=0.0,
@@ -174,6 +194,7 @@ class ScoringWorker:
     async def _call_multimodal_retriever(
         self,
         image_path: str,
+        text_query: str,
         brand_id: str
     ) -> Dict[str, float]:
         """
@@ -184,12 +205,14 @@ class ScoringWorker:
 
         Args:
             image_path: Path to the image to score
+            text_query: Text description for E5/Cohere queries
             brand_id: Brand ID for context
 
         Returns:
-            Dict with clip_raw, e5_raw, cohere_raw, and fused_raw scores
+            Dict with clip_raw, e5_raw, cohere_raw, and fused_z scores
         """
-        script_path = os.path.join(self.brand_linter_path, "multimodal_retriever.py")
+        # Path to multimodal_retriever.py in tools subdirectory
+        script_path = os.path.join(self.brand_linter_path, "tools", "multimodal_retriever.py")
 
         # Extract brand_id from client_id format if necessary
         actual_brand_id = brand_id_from_client_id(brand_id)
@@ -202,15 +225,15 @@ class ScoringWorker:
             assert_grading_index(index_name)
             self.log("scoring", "debug", f"Using grading index: {index_name}")
 
-        # Get brand_slug for namespace (Pinecone uses slug format)
-        brand_slug = get_brand_slug(actual_brand_id)
-
-        # Build command with proper namespace
+        # Build command with positional args: image text --brand brand_id --json
+        # multimodal_retriever.py expects: <image> <text> [--brand brand_id] [--json]
         cmd = [
-            "python3", script_path,
-            "--query-image", image_path,
-            "--namespace", brand_slug,
-            "--output-format", "json"
+            "python3",
+            script_path,
+            image_path,
+            text_query,
+            "--brand", actual_brand_id,
+            "--json"
         ]
 
         try:
@@ -218,19 +241,30 @@ class ScoringWorker:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=120,
                 cwd=self.brand_linter_path
             )
 
             if result.returncode == 0 and result.stdout:
                 try:
                     output = json.loads(result.stdout)
-                    # Return scores with _raw suffix (0.0 - 1.0 scale)
+                    # Parse nested structure from multimodal_retriever output:
+                    # {
+                    #   "clip": {"score": 0.72, ...},
+                    #   "e5": {"score": 0.94, ...},
+                    #   "cohere": {"score": 0.78, ...},
+                    #   "fusion": {"combined_z": 1.05, "clip_raw_score": 0.72, ...}
+                    # }
+                    clip_data = output.get("clip", {})
+                    e5_data = output.get("e5", {})
+                    cohere_data = output.get("cohere", {})
+                    fusion_data = output.get("fusion", {})
+
                     return {
-                        "clip_raw": output.get("clip_score", 0.0),
-                        "e5_raw": output.get("e5_score", 0.0),
-                        "cohere_raw": output.get("cohere_score", 0.0),
-                        "fused_raw": output.get("fused_score", 0.0)
+                        "clip_raw": clip_data.get("score", 0.0),
+                        "e5_raw": e5_data.get("score", 0.0),
+                        "cohere_raw": cohere_data.get("score", 0.0),
+                        "fused_z": fusion_data.get("combined_z", 0.0)
                     }
                 except json.JSONDecodeError:
                     self.log("scoring", "warn", "Could not parse retriever output")
@@ -245,12 +279,12 @@ class ScoringWorker:
         except Exception as e:
             self.log("scoring", "error", f"Retriever error: {str(e)}")
 
-        # Return default scores on failure (with _raw suffix)
+        # Return default scores on failure
         return {
             "clip_raw": 0.5,
             "e5_raw": 0.5,
             "cohere_raw": 0.5,
-            "fused_raw": 0.5
+            "fused_z": 0.0  # Default z-score of 0 (neutral)
         }
 
     def _analyze_scores(self, scores: Dict[str, float]) -> ScoreResult:
@@ -258,21 +292,21 @@ class ScoringWorker:
         Analyze scores and determine decision.
 
         Args:
-            scores: Dict with clip_raw, e5_raw, cohere_raw, fused_raw scores
+            scores: Dict with clip_raw, e5_raw, cohere_raw, fused_z scores
 
         Returns:
             ScoreResult with analysis
         """
-        fused_raw = scores.get("fused_raw", 0.0)
+        fused_z = scores.get("fused_z", 0.0)
         clip_raw = scores.get("clip_raw", 0.0)
         e5_raw = scores.get("e5_raw", 0.0)
         cohere_raw = scores.get("cohere_raw", 0.0)
 
-        # Determine decision based on fused score
-        if fused_raw >= THRESHOLDS["AUTO_PASS"]:
+        # Determine decision based on fused z-score
+        if fused_z >= THRESHOLDS_Z["AUTO_PASS"]:
             decision = "AUTO_PASS"
             passed = True
-        elif fused_raw >= THRESHOLDS["HITL_REVIEW"]:
+        elif fused_z >= THRESHOLDS_Z["HITL_REVIEW"]:
             decision = "HITL_REVIEW"
             passed = True  # Still passes Gate 1, goes to HITL
         else:
@@ -284,7 +318,7 @@ class ScoringWorker:
 
         return ScoreResult(
             passed_gate1=passed,
-            fused_raw=fused_raw,
+            fused_z=fused_z,
             clip_raw=clip_raw,
             e5_raw=e5_raw,
             cohere_raw=cohere_raw,

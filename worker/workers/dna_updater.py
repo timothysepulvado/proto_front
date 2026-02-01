@@ -146,19 +146,20 @@ class DNAUpdater:
         for model, index_name in campaign_indexes.items():
             self.log("dna", "debug", f"Target {model} index: {index_name}")
 
-        # Call the ingestion script
-        script_path = os.path.join(self.brand_linter_path, "ingest_to_pinecone.py")
+        # Call the ingestion script (in tools subdirectory)
+        script_path = os.path.join(self.brand_linter_path, "tools", "ingest_to_pinecone.py")
 
         if not os.path.exists(script_path):
-            # Fallback to check_pinecone_vectors.py
-            script_path = os.path.join(self.brand_linter_path, "check_pinecone_vectors.py")
+            self.log("dna", "warn", f"Ingestion script not found: {script_path}")
+            return
 
-        # Pass the brand_slug as namespace (consistent with naming contract)
+        # Pass brand_id and brand_slug (namespace) for proper indexing
         cmd = [
             "python3", script_path,
             "--image", image_path,
+            "--brand", brand_id,
             "--namespace", brand_slug,
-            "--mode", "ingest"
+            "--json"
         ]
 
         try:
@@ -188,7 +189,7 @@ class DNAUpdater:
 
         Updates:
         - Total images count
-        - Average scores (using _raw suffix)
+        - Average scores (using _raw suffix for raw scores, _z for z-scores)
         - Last update timestamp
         - Drift monitoring baseline
         """
@@ -216,81 +217,94 @@ class DNAUpdater:
 
         artifacts = artifacts_result.data
 
-        # Calculate statistics (using _raw suffix for clarity)
+        # Calculate statistics
+        # - Raw scores (0-1 scale): clip_raw, e5_raw, cohere_raw
+        # - Z-scores (unbounded): fused_z
         total_count = len(artifacts)
         graded_artifacts = [a for a in artifacts if a.get("grade")]
 
-        avg_scores_raw = {
+        avg_scores = {
             "clip_raw": 0.0,
             "e5_raw": 0.0,
             "cohere_raw": 0.0,
-            "fused_raw": 0.0
+            "fused_z": 0.0
         }
 
         if graded_artifacts:
             for artifact in graded_artifacts:
                 grade = artifact.get("grade", {})
                 # Support both old and new key names for backward compatibility
-                avg_scores_raw["clip_raw"] += grade.get("clip_raw", grade.get("clip", 0.0))
-                avg_scores_raw["e5_raw"] += grade.get("e5_raw", grade.get("e5", 0.0))
-                avg_scores_raw["cohere_raw"] += grade.get("cohere_raw", grade.get("cohere", 0.0))
-                avg_scores_raw["fused_raw"] += grade.get("fused_raw", grade.get("fused", 0.0))
+                avg_scores["clip_raw"] += grade.get("clip_raw", grade.get("clip", 0.0))
+                avg_scores["e5_raw"] += grade.get("e5_raw", grade.get("e5", 0.0))
+                avg_scores["cohere_raw"] += grade.get("cohere_raw", grade.get("cohere", 0.0))
+                # fused_z is the canonical field; fallback to fused_raw for backward compat
+                avg_scores["fused_z"] += grade.get("fused_z", grade.get("fused_raw", grade.get("fused", 0.0)))
 
             count = len(graded_artifacts)
-            for key in avg_scores_raw:
-                avg_scores_raw[key] /= count
+            for key in avg_scores:
+                avg_scores[key] /= count
 
         # Update client with stats (stored in a metadata field if available)
         # For now, log the stats
         self.log("dna", "info",
                 f"Brand stats: {total_count} artifacts, "
-                f"avg fused_raw score: {avg_scores_raw['fused_raw']:.3f}")
+                f"avg fused_z score: {avg_scores['fused_z']:.3f}")
 
-        # Update brand_profiles.json if it exists
-        await self._update_brand_profile(brand_id, total_count, avg_scores_raw)
+        # Update per-brand profile file
+        await self._update_brand_profile(brand_id, total_count, avg_scores)
 
     async def _update_brand_profile(
         self,
         brand_id: str,
         total_count: int,
-        avg_scores_raw: Dict[str, float]
+        avg_scores: Dict[str, float]
     ):
         """
-        Update brand_profiles.json with latest stats.
+        Update per-brand profile file with latest stats.
+
+        This function performs a merge-update: it reads the existing profile,
+        updates only the stats fields, and writes back the merged result.
+        This preserves pillars, tone, weights, and other brand configuration.
 
         Args:
             brand_id: Human-readable brand identifier
             total_count: Total number of artifacts
-            avg_scores_raw: Average scores with _raw suffix
+            avg_scores: Average scores dict (clip_raw, e5_raw, cohere_raw, fused_z)
         """
-        profile_path = os.path.join(
-            self.brand_linter_path,
-            "data",
-            "brand_profiles.json"
-        )
+        import json
+
+        # Per-brand profile path (new structure)
+        profiles_dir = os.path.join(self.brand_linter_path, "data", "brand_profiles")
+        profile_path = os.path.join(profiles_dir, f"{brand_id}.json")
 
         try:
-            import json
+            # Ensure directory exists
+            os.makedirs(profiles_dir, exist_ok=True)
 
-            # Read existing profiles
-            profiles = {}
+            # Read existing profile (merge-update, don't overwrite)
+            profile = {}
             if os.path.exists(profile_path):
                 with open(profile_path, 'r') as f:
-                    profiles = json.load(f)
+                    profile = json.load(f)
 
-            # Update profile for this brand (using _raw suffix for consistency)
-            profiles[brand_id] = {
-                "total_artifacts": total_count,
-                "avg_scores_raw": avg_scores_raw,  # Using _raw suffix
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-                "drift_baseline_raw": avg_scores_raw.get("fused_raw", 0.0)  # Using _raw suffix
-            }
+            # Merge-update: only update stats fields, preserve everything else
+            # Update runtime stats
+            profile["total_artifacts"] = total_count
+            profile["avg_scores"] = avg_scores
+            profile["last_updated"] = datetime.now(timezone.utc).isoformat()
 
-            # Write back
+            # Drift baseline uses fused_z (z-score, unbounded)
+            profile["drift_baseline_z"] = avg_scores.get("fused_z", 0.0)
+
+            # Ensure brand_id is set
+            if "brand_id" not in profile:
+                profile["brand_id"] = brand_id
+
+            # Write back merged profile
             with open(profile_path, 'w') as f:
-                json.dump(profiles, f, indent=2)
+                json.dump(profile, f, indent=2)
 
-            self.log("dna", "info", f"Updated brand profile: {brand_id}")
+            self.log("dna", "info", f"Updated per-brand profile: {profile_path}")
 
         except Exception as e:
             self.log("dna", "warn", f"Could not update brand profile: {str(e)}")
@@ -298,61 +312,85 @@ class DNAUpdater:
     async def check_drift(
         self,
         brand_id: str,
-        current_scores_raw: Dict[str, float]
+        current_scores: Dict[str, float]
     ) -> Dict[str, Any]:
         """
         Check for brand drift by comparing current scores to baseline.
 
         Args:
             brand_id: Brand/client ID (or client_id format)
-            current_scores_raw: Current generation scores (with _raw suffix)
+            current_scores: Current generation scores (fused_z is the key metric)
 
         Returns:
             Dict with drift analysis
         """
+        import json
+
         # Extract brand_id from client_id format if necessary
         actual_brand_id = brand_id_from_client_id(brand_id)
 
+        # Per-brand profile path (new structure)
         profile_path = os.path.join(
             self.brand_linter_path,
             "data",
-            "brand_profiles.json"
+            "brand_profiles",
+            f"{actual_brand_id}.json"
         )
 
-        try:
-            import json
-
-            if not os.path.exists(profile_path):
+        # Fallback to legacy path if per-brand file doesn't exist
+        if not os.path.exists(profile_path):
+            legacy_path = os.path.join(
+                self.brand_linter_path,
+                "data",
+                "brand_profiles.json"
+            )
+            if os.path.exists(legacy_path):
+                profile_path = legacy_path
+            else:
                 return {"drift_detected": False, "reason": "no_baseline"}
 
+        try:
             with open(profile_path, 'r') as f:
-                profiles = json.load(f)
+                profile = json.load(f)
 
-            profile = profiles.get(actual_brand_id)
+            # Legacy format: dict keyed by brand_id
+            if actual_brand_id in profile:
+                profile = profile[actual_brand_id]
+
             if not profile:
                 return {"drift_detected": False, "reason": "no_brand_profile"}
 
             # Support both old and new key names for backward compatibility
-            baseline_raw = profile.get("drift_baseline_raw", profile.get("drift_baseline", 0.0))
-            current_raw = current_scores_raw.get("fused_raw", current_scores_raw.get("fused", 0.0))
+            # Priority: drift_baseline_z > drift_baseline_raw > drift_baseline
+            baseline_z = profile.get(
+                "drift_baseline_z",
+                profile.get("drift_baseline_raw", profile.get("drift_baseline", 0.0))
+            )
 
-            # Calculate drift (significant if more than 10% below baseline)
-            drift_threshold = 0.10
-            drift = baseline_raw - current_raw
+            # Current score: fused_z is canonical; fallback to fused_raw/fused
+            current_z = current_scores.get(
+                "fused_z",
+                current_scores.get("fused_raw", current_scores.get("fused", 0.0))
+            )
 
-            if drift > drift_threshold:
+            # Calculate drift in z-space
+            # For z-scores, 0.5 standard deviation below baseline is significant
+            drift_threshold_z = 0.5
+            drift = baseline_z - current_z
+
+            if drift > drift_threshold_z:
                 return {
                     "drift_detected": True,
-                    "baseline_raw": baseline_raw,
-                    "current_raw": current_raw,
+                    "baseline_z": baseline_z,
+                    "current_z": current_z,
                     "drift_amount": drift,
                     "reason": "score_degradation"
                 }
 
             return {
                 "drift_detected": False,
-                "baseline_raw": baseline_raw,
-                "current_raw": current_raw,
+                "baseline_z": baseline_z,
+                "current_z": current_z,
                 "drift_amount": drift
             }
 
