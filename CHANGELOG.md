@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.4] - 2026-02-02 — Cross-Repo Index Naming Alignment
+
+### Changed
+- **dna_updater.py**: Now passes Campaign index names (`--index-clip/e5/cohere`) to Brand_linter ingest script
+- **scoring_worker.py**: Now passes Core index names to multimodal_retriever for grading
+- **rag_generator.py**: Now passes Core index names to multimodal_retriever for grading
+- **grading.py**: Now passes Core index names to multimodal_retriever for grading
+
+### Architecture
+- **Write separation enforced**: AI outputs go to Campaign indexes only
+- **Read separation enforced**: Grading reads from Core/legacy indexes only
+- Uses `index_guard.py` functions: `get_all_indexes()`, `get_grading_indexes()`, `assert_grading_index()`
+
+---
+
 ## [0.4.3] - 2026-02-01 — Phase 7.2.1: Integration Testing
 
 ### Tested

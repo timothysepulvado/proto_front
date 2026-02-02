@@ -1,8 +1,8 @@
 # BrandStudios OS - Session Handoff
 
-**Last Updated:** 2026-02-01
+**Last Updated:** 2026-02-02
 **Branch:** `tim-dev`
-**Status:** Phase 7.2.1 Complete (Integration Testing)
+**Status:** Cross-Repo Index Naming Alignment Complete
 
 ---
 
@@ -10,10 +10,38 @@
 
 | Component | Location | Branch | Phase | Health | Notes |
 |-----------|----------|--------|-------|--------|-------|
-| **HUD** | `~/Hud` | `tim-dev` | Phase 7.2.1 ✅ | 9/10 | Integration testing complete |
-| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 7.2.1 ✅ | 10/10 | E5 ingestion verified, Cohere needs ARN fix |
+| **HUD** | `~/Hud` | `tim-dev` | Phase 7.2.1 ✅ | 9/10 | Cross-repo index naming complete |
+| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 7.2.1 ✅ | 10/10 | Index override args added |
 | **BDE** | `~/BDE` | `antigravity` | Phase 7.2.1 ✅ | 10/10 | Separate index architecture verified |
 | **Temp-gen** | `~/Temp-gen` | `main` | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
+
+---
+
+## Cross-Repo Index Naming Alignment (2026-02-02) ✅ COMPLETE
+
+### Summary
+Implemented write/read separation across HUD and Brand_linter repositories.
+
+### Naming Contract
+```
+Pattern: {brand_slug}-{core|campaign}-{clip768|e5-1024|cohere1536}
+
+Core (READ for grading):          Campaign (WRITE AI outputs):
+├─ jennikayne-core-clip768        ├─ jennikayne-campaign-clip768
+├─ jennikayne-core-e5-1024        ├─ jennikayne-campaign-e5-1024
+└─ jennikayne-core-cohere1536     └─ jennikayne-campaign-cohere1536
+
+Legacy (treated as Core, READ-only):
+├─ jennikayne-brand-dna-clip768
+├─ jennikayne-brand-dna-e5
+└─ jennikayne-brand-dna-cohere
+```
+
+### Commits
+| Repo | Branch | Commit | Description |
+|------|--------|--------|-------------|
+| Brand_linter | `phase-3` | `a2c03c4` | feat: Add --index-clip/e5/cohere args, filename-based IDs |
+| HUD | `tim-dev` | `4419bc3` | feat: Wire index names to Brand_linter subprocess calls |
 
 ---
 
