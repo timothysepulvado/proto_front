@@ -115,13 +115,32 @@ When calling `multimodal_retriever.py --json`, expect this structure:
 └── HANDOFF.md                # Detailed session handoff
 ```
 
-## Current Phase: 7.2.1 Complete (Integration Testing)
+## Current Phase: 7.3 Prep (Architectural Decisions)
 
 - Phase 7.2.1: Integration testing complete
+- Phase 7.3 Prep: Architectural consistency resolved
 - E5 ingestion verified, Cohere needs ARN fix
 - Workers aligned with Brand_linter CLI interface
 - Frontend wiring is next (Phase 7.3)
 - See `HANDOFF.md` for detailed status and `TEST_LOG.md` for test results
+
+### Ingestion Failure Modes (Phase 7.3)
+
+**Default behavior**: Hard fail if any modality fails during ingestion.
+This prevents "looks green, actually broken" scenarios in production.
+
+```bash
+# Full ingestion - fails if E5 or Cohere unavailable
+python tools/ingest_to_pinecone.py --image /path/to/image.jpg --brand jenni_kayne --json
+
+# Bootstrap/testing only - allows partial success
+python tools/ingest_to_pinecone.py --image /path/to/image.jpg --brand jenni_kayne --allow-partial --json
+```
+
+**Scoring behavior**:
+- If `multimodal_retriever` returns `incomplete: true`, artifacts cannot AUTO_PASS
+- Incomplete results are downgraded to HITL_REVIEW for human verification
+- Failure reasons include `incomplete_modalities` for tracking
 
 ### Phase 7.2 Key Changes
 

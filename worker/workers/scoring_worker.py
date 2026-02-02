@@ -48,6 +48,9 @@ class ScoreResult:
 
     The fused score (combined_z) is a weighted z-score from multimodal_retriever,
     which aggregates CLIP, E5, and Cohere z-scores using configurable weights.
+
+    incomplete: True if any modality failed during retrieval. Artifacts with
+    incomplete scores cannot AUTO_PASS (prevents "looks green, actually broken").
     """
     passed_gate1: bool
     fused_z: float    # Weighted combination of z-scores (unbounded)
@@ -56,6 +59,12 @@ class ScoreResult:
     cohere_raw: float # Cohere multimodal similarity (0.0 - 1.0)
     decision: str     # AUTO_PASS, HITL_REVIEW, AUTO_FAIL
     failure_reasons: List[str]
+    incomplete: bool = False  # True if any modality failed
+    failed_modalities: Optional[List[str]] = None  # Which modalities failed
+
+    def __post_init__(self):
+        if self.failed_modalities is None:
+            self.failed_modalities = []
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API responses."""
@@ -68,7 +77,9 @@ class ScoreResult:
                 "fused_z": self.fused_z,
                 "decision": self.decision
             },
-            "failure_reasons": self.failure_reasons
+            "failure_reasons": self.failure_reasons,
+            "incomplete": self.incomplete,
+            "failed_modalities": self.failed_modalities,
         }
 
 
@@ -196,7 +207,7 @@ class ScoringWorker:
         image_path: str,
         text_query: str,
         brand_id: str
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """
         Call the multimodal_retriever.py script for scoring.
 
@@ -266,7 +277,10 @@ class ScoringWorker:
                         "clip_raw": fusion_data.get("clip_raw_score", clip_data.get("score", 0.0)),
                         "e5_raw": e5_data.get("score", 0.0),
                         "cohere_raw": cohere_data.get("score", 0.0),
-                        "fused_z": fusion_data.get("combined_z", 0.0)
+                        "fused_z": fusion_data.get("combined_z", 0.0),
+                        # Incomplete flag: True if any modality failed
+                        "incomplete": output.get("incomplete", False),
+                        "failed_modalities": output.get("failed_modalities", []),
                     }
                 except json.JSONDecodeError:
                     self.log("scoring", "warn", "Could not parse retriever output")
@@ -281,15 +295,17 @@ class ScoringWorker:
         except Exception as e:
             self.log("scoring", "error", f"Retriever error: {str(e)}")
 
-        # Return default scores on failure
+        # Return default scores on failure - marked as incomplete
         return {
             "clip_raw": 0.5,
             "e5_raw": 0.5,
             "cohere_raw": 0.5,
-            "fused_z": 0.0  # Default z-score of 0 (neutral)
+            "fused_z": 0.0,  # Default z-score of 0 (neutral)
+            "incomplete": True,  # Mark as incomplete on retriever failure
+            "failed_modalities": ["clip", "e5", "cohere"],  # Assume all failed
         }
 
-    def _analyze_scores(self, scores: Dict[str, float]) -> ScoreResult:
+    def _analyze_scores(self, scores: Dict[str, Any]) -> ScoreResult:
         """
         Analyze scores and determine decision.
 
@@ -298,11 +314,17 @@ class ScoringWorker:
 
         Returns:
             ScoreResult with analysis
+
+        Note:
+            Artifacts with incomplete scores (failed modalities) cannot AUTO_PASS.
+            This prevents "looks green, actually broken" scenarios in production.
         """
-        fused_z = scores.get("fused_z", 0.0)
-        clip_raw = scores.get("clip_raw", 0.0)
-        e5_raw = scores.get("e5_raw", 0.0)
-        cohere_raw = scores.get("cohere_raw", 0.0)
+        fused_z = float(scores.get("fused_z", 0.0))
+        clip_raw = float(scores.get("clip_raw", 0.0))
+        e5_raw = float(scores.get("e5_raw", 0.0))
+        cohere_raw = float(scores.get("cohere_raw", 0.0))
+        incomplete = bool(scores.get("incomplete", False))
+        failed_modalities = list(scores.get("failed_modalities", []))
 
         # Determine decision based on fused z-score
         if fused_z >= THRESHOLDS_Z["AUTO_PASS"]:
@@ -315,8 +337,19 @@ class ScoringWorker:
             decision = "AUTO_FAIL"
             passed = False
 
+        # SAFETY: Block AUTO_PASS for incomplete results
+        # Incomplete means at least one modality failed during retrieval
+        if incomplete and decision == "AUTO_PASS":
+            self.log("scoring", "warn",
+                    f"Blocking AUTO_PASS due to incomplete modalities: {failed_modalities}")
+            decision = "HITL_REVIEW"  # Downgrade to HITL for human review
+
         # Analyze why it failed
         failure_reasons = self._analyze_failure_reasons(scores)
+
+        # Add incomplete modalities to failure reasons
+        if incomplete:
+            failure_reasons.append("incomplete_modalities")
 
         return ScoreResult(
             passed_gate1=passed,
@@ -325,10 +358,12 @@ class ScoringWorker:
             e5_raw=e5_raw,
             cohere_raw=cohere_raw,
             decision=decision,
-            failure_reasons=failure_reasons
+            failure_reasons=failure_reasons,
+            incomplete=incomplete,
+            failed_modalities=failed_modalities,
         )
 
-    def _analyze_failure_reasons(self, scores: Dict[str, float]) -> List[str]:
+    def _analyze_failure_reasons(self, scores: Dict[str, Any]) -> List[str]:
         """
         Determine failure reasons based on score breakdown.
 
