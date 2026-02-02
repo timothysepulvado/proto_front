@@ -9,7 +9,7 @@ from typing import Callable, Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import TOOL_PATHS, TOOL_VENVS, OUTPUT_BASE
-from index_guard import brand_id_from_client_id
+from index_guard import brand_id_from_client_id, get_grading_indexes, assert_grading_index
 
 
 class GradingExecutor:
@@ -69,15 +69,23 @@ class GradingExecutor:
 
         try:
             # Extract brand_id from client_id format
-            brand_id = brand_id_from_client_id(client_id)
+            actual_brand_id = brand_id_from_client_id(client_id)
 
-            # Run the multimodal retriever with JSON output and --brand flag
+            # Get Core grading indexes using index_guard (enforces Core/legacy only)
+            grading_indexes = get_grading_indexes(actual_brand_id)
+            for model, index_name in grading_indexes.items():
+                assert_grading_index(index_name)
+
+            # Run the multimodal retriever with JSON output, --brand flag, and Core indexes
             cmd = [
                 str(self.python),
                 str(script),
                 image_path,
                 text_query,
-                "--brand", brand_id,
+                "--brand", actual_brand_id,
+                "--index-clip", grading_indexes["clip"],
+                "--index-e5", grading_indexes["e5"],
+                "--index-cohere", grading_indexes["cohere"],
                 "--json",
             ]
 

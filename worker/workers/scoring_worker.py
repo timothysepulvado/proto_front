@@ -237,13 +237,17 @@ class ScoringWorker:
             self.log("scoring", "debug", f"Using grading index: {index_name}")
 
         # Build command with positional args: image text --brand brand_id --json
-        # multimodal_retriever.py expects: <image> <text> [--brand brand_id] [--json]
+        # multimodal_retriever.py expects: <image> <text> [--brand brand_id] [--json] [--index-*]
+        # Pass Core indexes for grading (enforced by assert_grading_index above)
         cmd = [
             "python3",
             script_path,
             image_path,
             text_query,
             "--brand", actual_brand_id,
+            "--index-clip", grading_indexes["clip"],
+            "--index-e5", grading_indexes["e5"],
+            "--index-cohere", grading_indexes["cohere"],
             "--json"
         ]
 

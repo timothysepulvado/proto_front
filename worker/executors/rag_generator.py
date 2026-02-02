@@ -10,6 +10,7 @@ from typing import Callable, Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import TOOL_PATHS, TOOL_VENVS, OUTPUT_BASE
+from index_guard import brand_id_from_client_id, get_grading_indexes, assert_grading_index
 
 # Pinecone index suffixes for triple-modal retrieval
 INDEX_SUFFIXES = {
@@ -181,18 +182,25 @@ Focus on brand consistency and visual coherence."""
             return {"status": "skipped", "decision": "HITL_REVIEW"}
 
         # Extract brand_id from client_id format (e.g., 'client_jenni_kayne' -> 'jenni_kayne')
-        brand_id = client_id
-        if brand_id.startswith("client_"):
-            brand_id = brand_id[7:]  # Remove 'client_' prefix
+        actual_brand_id = brand_id_from_client_id(client_id)
+
+        # Get Core grading indexes using index_guard (enforces Core/legacy only)
+        grading_indexes = get_grading_indexes(actual_brand_id)
+        for model, index_name in grading_indexes.items():
+            assert_grading_index(index_name)
 
         try:
-            # multimodal_retriever expects: image (positional), text (positional), --brand, --json
+            # multimodal_retriever expects: image (positional), text (positional), --brand, --json, --index-*
+            # Pass Core indexes for grading
             cmd = [
                 str(self.brand_linter_python),
                 str(script),
                 image_path,
                 text_query,
-                "--brand", brand_id,
+                "--brand", actual_brand_id,
+                "--index-clip", grading_indexes["clip"],
+                "--index-e5", grading_indexes["e5"],
+                "--index-cohere", grading_indexes["cohere"],
                 "--json",
             ]
 

@@ -153,12 +153,15 @@ class DNAUpdater:
             self.log("dna", "warn", f"Ingestion script not found: {script_path}")
             return
 
-        # Pass brand_id for proper indexing
+        # Pass brand_id and Campaign index names for proper indexing
         # Note: namespace defaults to __default__ (Pinecone API 2025-04+)
         cmd = [
             "python3", script_path,
             "--image", image_path,
             "--brand", brand_id,
+            "--index-clip", campaign_indexes["clip"],
+            "--index-e5", campaign_indexes["e5"],
+            "--index-cohere", campaign_indexes["cohere"],
             "--json"
         ]
 
