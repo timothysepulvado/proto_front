@@ -115,12 +115,13 @@ When calling `multimodal_retriever.py --json`, expect this structure:
 └── HANDOFF.md                # Detailed session handoff
 ```
 
-## Current Phase: 7.2 Complete (Integration Fixes)
+## Current Phase: 7.2.1 Complete (Integration Testing)
 
-- Phase 7.2: Blocking integration fixes complete
-- Workers now aligned with Brand_linter CLI interface
+- Phase 7.2.1: Integration testing complete
+- E5 ingestion verified, Cohere needs ARN fix
+- Workers aligned with Brand_linter CLI interface
 - Frontend wiring is next (Phase 7.3)
-- See `HANDOFF.md` for detailed status
+- See `HANDOFF.md` for detailed status and `TEST_LOG.md` for test results
 
 ### Phase 7.2 Key Changes
 

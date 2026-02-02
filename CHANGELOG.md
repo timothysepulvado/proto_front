@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [0.4.3] - 2026-02-01 — Phase 7.2.1: Integration Testing
+
+### Tested
+- **E5 Ingestion**: Single-image mode verified with `index_e5_embeddings.py`
+- **Import Chain**: All worker modules importing correctly
+- **Triple Fusion**: `multimodal_retriever.py` queries returning expected results
+- **Per-brand Profiles**: Loading from `data/brand_profiles/<brand_id>.json`
+
+### Documented
+- Created `TEST_LOG.md` for tracking test results across phases
+- Updated `HANDOFF.md` with Phase 7.2.1 status and known blockers
+- Updated `CLAUDE.md` with correct namespace reference (`__default__`)
+
+### Known Issues
+- **Cohere Ingestion**: Requires AWS Bedrock inference profile ARN (`us.cohere.embed-v4:0`), not base model ID
+
+---
+
 ## [0.4.2] - 2026-01-31 — Phase 7.2: Blocking Integration Fixes
 
 ### Fixed

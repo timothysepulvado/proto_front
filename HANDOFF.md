@@ -1,8 +1,8 @@
 # BrandStudios OS - Session Handoff
 
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-01
 **Branch:** `tim-dev`
-**Status:** Phase 7.2 Complete (Blocking Integration Fixes)
+**Status:** Phase 7.2.1 Complete (Integration Testing)
 
 ---
 
@@ -10,10 +10,36 @@
 
 | Component | Location | Branch | Phase | Health | Notes |
 |-----------|----------|--------|-------|--------|-------|
-| **HUD** | `~/Hud` | `tim-dev` | Phase 7.2 ✅ | 9/10 | Workers aligned with Brand_linter |
-| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 7.2 ✅ | 10/10 | Per-brand profiles, triple-modal ingestion |
-| **BDE** | `~/BDE` | `antigravity` | Phase 7.2 ✅ | 10/10 | Separate index architecture |
+| **HUD** | `~/Hud` | `tim-dev` | Phase 7.2.1 ✅ | 9/10 | Integration testing complete |
+| **Brand_linter** | `~/Desktop/Brand_linter/local_quick_setup` | `phase-3` | Phase 7.2.1 ✅ | 10/10 | E5 ingestion verified, Cohere needs ARN fix |
+| **BDE** | `~/BDE` | `antigravity` | Phase 7.2.1 ✅ | 10/10 | Separate index architecture verified |
 | **Temp-gen** | `~/Temp-gen` | `main` | Phase 2 ✅ | 7/10 | Veo/Nano/Sora working |
+
+---
+
+## Phase 7.2.1: Integration Testing (2026-02-01) ✅ COMPLETE
+
+### Test Results Summary
+
+| Test | Status | Notes |
+|------|--------|-------|
+| E5 Ingestion | ✅ PASS | Single-image mode working via `index_e5_embeddings.py` |
+| Cohere Ingestion | ❌ FAIL | AWS Bedrock requires inference profile ARN |
+| Import Tests | ✅ ALL PASS | All modules importing correctly |
+
+### Known Blocker
+
+**Cohere Embeddings**: AWS Bedrock requires inference profile ARN format:
+- ❌ Wrong: `cohere.embed-v4:0`
+- ✅ Correct: `us.cohere.embed-v4:0` (inference profile ARN)
+
+This is documented in `Brand_linter/tools/index_cohere_embeddings.py`.
+
+### Verified Working
+- `ScoringWorker` imports and initializes
+- `index_e5_embeddings.py` single-image ingestion
+- `multimodal_retriever.py` triple fusion queries
+- Per-brand profile loading from `data/brand_profiles/`
 
 ---
 
