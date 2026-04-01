@@ -24,47 +24,66 @@ the **integration seams** between repos and maps them against the canonical arch
 
 | # | Integration Seam | Status | Evidence |
 |---|-------------------|--------|----------|
-| 1 | proto_front HUD → Supabase | **NOT PROVISIONED** | `.env` missing; project ID `tfbfzepaccvklpabllao` doesn't exist; migration never applied |
-| 2 | proto_front os-api → SQLite | **CONNECTED** | Only working data store for the HUD |
-| 3 | SQLite ↔ Supabase sync | **NOT PROVISIONED** | Supabase backend doesn't exist yet |
+| 1 | proto_front HUD → Supabase | **CONNECTED** | `.env` created, publishable key verified, 3 clients returned |
+| 2 | proto_front os-api → SQLite | **CONNECTED** | Works for local dev |
+| 3 | SQLite ↔ Supabase sync | **DISCONNECTED** | os-api writes SQLite, frontend reads Supabase — no bridge |
 | 4 | os-api runner → Brand_linter ingest | **WIRED** | CLI exists, args match, venv OK (Python 3.12). No per-brand data dirs |
 | 5 | os-api runner → Temp-gen generate | **WIRED** | CLI exists, args match, venv OK (Python 3.14). Would make real Gemini API calls |
-| 6 | os-api runner → Brand_linter drift | **PARTIALLY WIRED** | `--profile` flag not passed by runner → Pinecone RAG never runs, pixel-only |
+| 6 | os-api runner → Brand_linter drift | **PARTIALLY WIRED** | `--profile` flag not passed → Pinecone RAG never runs, pixel-only |
 | 7 | Brand_linter → Pinecone | **CONNECTED** | API key present, 20 indexes, Jenni Kayne fully populated |
 | 8 | BDE retriever → Pinecone | **WIRED (dim bug)** | Extractor produces 1024D Cohere for 1536D indexes |
 | 9 | BDE linter-api → ml-worker | **BROKEN** | `node_modules` missing, requires local Postgres |
 | 10 | proto_front → BDE | **DISCONNECTED** | Runner calls Brand_linter CLI directly, never touches BDE |
 | 11 | Temp-gen output → drift check | **WIRED** | Runner chains stages, but drift is neutered (#6) |
-| 12 | HITL: HUD → Supabase → BDE RL | **NOT PROVISIONED** | No Supabase project, no `hitl_decisions` table |
-| 13 | Supabase Realtime → HUD | **NOT PROVISIONED** | No Supabase to subscribe to |
-| 14 | Schema alignment | **DIVERGED** | proto_front and BDE schemas have zero table overlap |
+| 12 | HITL: HUD → Supabase → BDE RL | **WIRED** | `hitl_decisions` table exists (empty), BDE expects it, but os-api doesn't write to it |
+| 13 | Supabase Realtime → HUD | **WIRED** | Realtime enabled on runs + run_logs, but os-api writes SQLite not Supabase |
+| 14 | Schema alignment | **ADVANCED** | Supabase schema is more complete than either migration file |
 
 ### Summary
 
 | Rating | Count |
 |--------|-------|
-| CONNECTED | 2 |
-| WIRED (code exists, incomplete) | 4 |
+| CONNECTED | 3 |
+| WIRED (code exists, incomplete) | 7 |
 | PARTIALLY WIRED | 1 |
-| DISCONNECTED | 1 |
-| NOT PROVISIONED | 4 |
-| BROKEN | 2 |
+| DISCONNECTED | 2 |
+| BROKEN | 1 |
 
 ---
 
 ## Supabase Status
 
-The project ID `tfbfzepaccvklpabllao` referenced in proto_front config does not exist.
+Project `tfbfzepaccvklpabllao` is **active** with a schema more advanced than the migration
+files in the codebase. It was not visible through the Supabase MCP tool due to org/auth
+mismatch, but is reachable via the Management API and REST API with the access token.
 
-Active Supabase projects in the account:
+### Tables (12 total)
 
-| Project | ID | Status | Tables |
-|---------|----|--------|--------|
-| Mk2-Vr1 | nlelvebfgcxtrjuiwbms | ACTIVE | dishes, demo_runs (different app) |
-| jenny kayne | mwobsatczhpxemisjhqi | ACTIVE | dishes, demo_runs (different app) |
+| Table | Rows | Notes |
+|-------|------|-------|
+| `clients` | 3 | Cylndr, Jenni Kayne, Lilydale — has `storage_config`, `pinecone_namespace`, `brand_slug` |
+| `runs` | 1 | Cylndr failed run from Jan 17 |
+| `run_logs` | 8 | Logs from that run |
+| `artifacts` | 0 | Empty |
+| `hitl_decisions` | 0 | Exists and ready for HITL data |
+| `campaigns` | 3 | Real campaigns: Cylndr merch shoots, JK spring collection |
+| `campaign_memory` | 0 | Empty — Phase 3 short-term project memory |
+| `campaign_deliverables` | 0 | Empty — Phase 7 asset preparation |
+| `brand_baselines` | 0 | Empty — Phase 2 memory formation |
+| `drift_alerts` | 0 | Empty — Phase 6 governance |
+| `drift_metrics` | 0 | Empty — Phase 6 governance |
+| `rejection_categories` | 10 | Fully seeded with negative/positive prompt guidance |
 
-**Neither project has Brand Studios tables.** The migration at
-`supabase/migrations/001_initial_schema.sql` (clients, runs, run_logs, artifacts) was never applied.
+### Schema vs Codebase
+
+The Supabase schema has columns and tables not in the migration files:
+- `clients` has: `storage_config` (JSONB), `pinecone_namespace`, `brand_slug`
+- `campaigns`, `campaign_memory`, `campaign_deliverables` — not in any migration file
+- `brand_baselines`, `drift_alerts`, `drift_metrics` — not in any migration file
+- `rejection_categories` — HITL rejection taxonomy with prompt guidance
+- `hitl_decisions` — the table BDE's `hitl_store.py` queries
+
+The migration files in the repos are **behind the actual database**.
 
 ---
 
@@ -117,7 +136,7 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | Validation before baseline | Not implemented | Ingest is fire-and-forget |
 | Continuity references | brand_profiles JSON per brand | Minimal — thresholds only, no strategic context |
 
-**Coverage: ~20%** — Tools exist for embedding ingestion but no structured onboarding flow, no validation, no provenance.
+**Coverage: ~20%** — Tools exist for embedding ingestion but no structured onboarding flow.
 
 ### Phase 2: Memory Formation, Baselines, Isolation
 > Protected brand foundation, long-term brand memory, RLS, versioning
@@ -126,23 +145,23 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 |-----------------|---------------|-----|
 | Protected brand foundation | Pinecone indexes with data | Indexes exist but no access controls |
 | Long-term brand memory | Pinecone `core` and `brand-dna` tiers | Partially populated |
-| RLS / governance | Supabase RLS designed but never deployed | NOT PROVISIONED |
-| Versioning / branching | Not implemented | No version control on brand memory |
-| Baseline approval | Not implemented | No approval flow for baselines |
+| RLS / governance | Supabase RLS enabled (public policies) | Exists but permissive — needs tightening |
+| Versioning / branching | `brand_baselines` table exists (empty) | Schema ready, no logic |
+| Baseline approval | Not implemented | No approval flow |
 
-**Coverage: ~15%** — Vector storage exists, governance layer is completely absent.
+**Coverage: ~20%** — Vector storage + schema exist, governance logic absent.
 
 ### Phase 3: Project / Campaign Activation
 > Scoped project object with goals, audiences, destinations, branch decisions
 
 | Spec Requirement | Current State | Gap |
 |-----------------|---------------|-----|
-| Project activation | HUD "Start Run" with mode selection | Minimal — mode only, no goals/audiences/destinations |
-| Campaign-specific materials | Not implemented | No upload flow for project references |
+| Project activation | `campaigns` table with 3 real entries | Schema exists with prompt, deliverables, platforms |
+| Campaign-specific materials | `reference_images` column exists | Empty on all campaigns |
 | Branch / split-direction | Not implemented | No branching concept |
-| Short-term project memory | Not implemented | No project-scoped memory layer |
+| Short-term project memory | `campaign_memory` table exists (empty) | Schema ready, no logic |
 
-**Coverage: ~10%** — HUD can start runs with mode selection but nothing resembling scoped project activation.
+**Coverage: ~25%** — Schema is more complete than expected. Needs execution logic.
 
 ### Phase 4: Protected Runtime Environment
 > Isolated working environment with correct memory retrieval package
@@ -163,11 +182,11 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 |-----------------|---------------|-----|
 | Image generation | Temp-gen CLI (Gemini 3 Pro) | **Works** via CLI |
 | Video generation | Temp-gen CLI (Veo 3.1) | **Works** via CLI |
-| Prompt evolution | Not implemented | Static prompts from runner |
-| Run metadata capture | SQLite run_logs (local only) | Logs exist but not in Supabase |
+| Prompt evolution | `rejection_categories` has negative/positive prompts | Schema supports it, no runtime logic |
+| Run metadata capture | SQLite run_logs (local only) | Logs exist but os-api writes to SQLite, not Supabase |
 | Iterative reruns | Not implemented | One-shot generation only |
 
-**Coverage: ~30%** — Generation tools work, but no orchestration intelligence.
+**Coverage: ~30%** — Generation tools work, prompt evolution schema exists.
 
 ### Phase 6: Governance, Drift, Human Review
 > Brand fit checks, drift detection, continuity testing, human gates
@@ -175,22 +194,23 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | Spec Requirement | Current State | Gap |
 |-----------------|---------------|-----|
 | Brand drift check | Brand_linter `image_analyzer.py` | **Neutered** — pixel-only (missing --profile) |
+| Drift tracking | `drift_alerts` + `drift_metrics` tables exist (empty) | Schema ready, no logic |
 | Historical comparison | BDE triple fusion retriever | **Disconnected** from HUD runner |
-| Human review gate | HITL stage in runner | Sets `needs_review` in SQLite, no UI for review |
-| Governance rules | Not implemented | No automated policy checks |
+| Human review gate | `hitl_decisions` table exists, HITL stage in runner | Table ready, runner writes SQLite not Supabase |
+| Rejection taxonomy | `rejection_categories` fully seeded (10 categories) | Ready to use |
 
-**Coverage: ~15%** — Drift tools exist but aren't properly connected. HITL is a stub.
+**Coverage: ~25%** — Schema infrastructure is solid. Execution logic missing.
 
 ### Phase 7: Outputs, Actions, Asset Preparation
 > Destination-specific formatting, packaging, delivery
 
 | Spec Requirement | Current State | Gap |
 |-----------------|---------------|-----|
-| Asset preparation | Export stage (placeholder) | **Stub** — creates fake zip artifact |
+| Asset preparation | `campaign_deliverables` table exists (empty) | Schema ready |
 | Channel-specific variants | Not implemented | No platform formatting |
 | Delivery manifests | Not implemented | No delivery tracking |
 
-**Coverage: ~5%** — Export is a placeholder.
+**Coverage: ~10%** — Schema exists, no logic.
 
 ### Phase 8: Insight Loop & Asset Intelligence
 > Performance tracking, provenance, authenticity, legal visibility
@@ -206,48 +226,48 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 
 | Spec Requirement | Current State | Gap |
 |-----------------|---------------|-----|
-| RL threshold calibration | Brand_linter `rl_trainer.py` | Exists but reads from local SQLite, disconnected |
+| RL threshold calibration | Brand_linter `rl_trainer.py` | Exists but reads local SQLite, not Supabase |
 | Governed promotion | Not implemented | No promotion flow |
 | Memory layer protection | Not implemented | No contamination boundaries |
 
-**Coverage: ~5%** — RL trainer exists conceptually but is disconnected.
+**Coverage: ~5%** — RL trainer exists but is disconnected.
 
 ### Overall Phase Coverage
 
 | Phase | Coverage | Key Blocker |
 |-------|----------|-------------|
 | 1. Brand Onboarding | ~20% | No UI, no validation |
-| 2. Memory Formation | ~15% | Supabase not provisioned, no RLS |
-| 3. Project Activation | ~10% | No scoped project model |
+| 2. Memory Formation | ~20% | Governance logic absent |
+| 3. Project Activation | ~25% | Schema ready, needs execution logic |
 | 4. Runtime Environment | ~10% | No memory retrieval |
 | 5. Generation | ~30% | Tools work, no orchestration |
-| 6. Governance & Drift | ~15% | Drift neutered, HITL stub |
-| 7. Asset Preparation | ~5% | Export is placeholder |
+| 6. Governance & Drift | ~25% | Drift neutered, HITL needs Supabase bridge |
+| 7. Asset Preparation | ~10% | Schema only |
 | 8. Insight Loop | 0% | Not started |
 | 9. Governed Promotion | ~5% | RL trainer disconnected |
-| **Overall** | **~12%** | |
+| **Overall** | **~16%** | |
 
 ---
 
 ## What Works End-to-End Today
 
-1. **Brand_linter CLI → Pinecone** — ingest images and query brand similarity
-2. **Temp-gen CLI** — generate images (Gemini) and video (Veo)
-3. **HUD → SQLite (local)** — renders, creates runs, streams demo logs
-4. **Pinecone infrastructure** — 20 indexes provisioned, real data for 2 brands
+1. **HUD → Supabase** — frontend can now read clients, campaigns, rejection categories
+2. **Brand_linter CLI → Pinecone** — ingest images and query brand similarity
+3. **Temp-gen CLI** — generate images (Gemini) and video (Veo)
+4. **HUD → SQLite (local)** — renders, creates runs, streams demo logs via os-api
+5. **Pinecone infrastructure** — 20 indexes provisioned, real data for 2 brands
 
 ---
 
 ## Prioritized Fix List
 
-### Tier 0 — Foundation (must do first)
+### Tier 0 — Done
 
-| Fix | Effort | Unblocks |
-|-----|--------|----------|
-| Create Supabase project for Brand Studios | 10 min | All Supabase seams |
-| Apply proto_front migration | 5 min | clients/runs/run_logs/artifacts tables |
-| Create `.env` files with credentials | 5 min | Frontend + backend connectivity |
-| Add `hitl_decisions` table to migration | 30 min | HITL loop across repos |
+| Fix | Status |
+|-----|--------|
+| ~~Create Supabase project~~ | Project already exists with 12 tables |
+| ~~Create `.env` files with credentials~~ | Created for proto_front + os-api |
+| ~~`hitl_decisions` table~~ | Already exists in Supabase |
 
 ### Tier 1 — Quick wiring (afternoon)
 
@@ -258,15 +278,16 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | `npm install` in BDE linter-api | 2 min | Unblocks BDE API |
 | Create per-brand data dirs in Brand_linter | 10 min | Prevents demo fallback |
 | Ingest Cylndr E5+Cohere vectors | 2-4 hrs | Completes triple-fusion |
+| Sync migration files with actual DB schema | 1 hr | Codebase matches reality |
 
 ### Tier 2 — Connect data layer (1-2 days)
 
 | Fix | Effort | Impact |
 |-----|--------|--------|
-| Rewrite os-api db.ts → Supabase | 1 day | Single source of truth |
-| Enable Supabase Realtime | 15 min | Live HUD updates |
-| Wire BDE hitl_store to new Supabase | 2 hrs | HITL feedback loop |
-| Update proto_front .mcp.json project ID | 2 min | MCP integration |
+| Rewrite os-api db.ts → Supabase client | 1 day | Single source of truth |
+| Enable Supabase Realtime subscriptions | 15 min | Live HUD updates |
+| Wire BDE hitl_store to this Supabase project | 2 hrs | HITL feedback loop |
+| Connect runner HITL stage to write `hitl_decisions` | 2 hrs | Close the feedback loop |
 
 ### Tier 3 — Architecture decisions
 
@@ -275,7 +296,6 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | BDE vs Brand_linter | Consolidate or keep separate? |
 | Demo fallbacks | Keep, remove, or make configurable? |
 | Gemini Embedding 2 | Replace Replicate CLIP (blocks BDE on Python 3.14) |
-| Unified schema | Merge proto_front + BDE schemas? |
 
 ---
 
@@ -286,10 +306,10 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | `proto_front/os-api/src/runner.ts` | Central orchestrator |
 | `proto_front/os-api/src/db.ts` | SQLite layer (needs Supabase bridge) |
 | `proto_front/src/api.ts` | Frontend Supabase client |
-| `proto_front/src/lib/supabase.ts` | Supabase init (crashes without .env) |
-| `proto_front/supabase/migrations/001_initial_schema.sql` | HUD schema |
+| `proto_front/src/lib/supabase.ts` | Supabase init |
+| `proto_front/supabase/migrations/001_initial_schema.sql` | HUD schema (behind actual DB) |
 | `BDE/services/ml-worker/core/hitl_store.py` | HITL consumer |
 | `BDE/services/ml-worker/core/retriever.py` | Triple fusion retriever |
-| `BDE/services/ml-worker/core/feature_extractor.py` | Embedding extraction |
+| `BDE/services/ml-worker/core/feature_extractor.py` | Embedding extraction (Cohere dim bug) |
 | `Brand_linter/local_quick_setup/tools/brand_dna_indexer.py` | Ingest CLI |
 | `Brand_linter/local_quick_setup/tools/image_analyzer.py` | Drift check CLI |
