@@ -14,7 +14,7 @@ export const runEvents = new EventEmitter();
 
 // Environment paths
 const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || "/Users/timothysepulvado/Temp-gen";
-const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulvado/Desktop/Brand_linter/local_quick_setup";
+const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulvado/Brand_linter/local_quick_setup";
 const TEMP_GEN_VENV = process.env.TEMP_GEN_VENV || path.join(TEMP_GEN_PATH, ".venv");
 const BRAND_LINTER_VENV = process.env.BRAND_LINTER_VENV || path.join(BRAND_LINTER_PATH, ".venv");
 
