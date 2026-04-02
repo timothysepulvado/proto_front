@@ -38,7 +38,7 @@ Before onboarding any client, these platform services must be operational.
 |---------|--------|------------|
 | Replicate CLIP broken on Python 3.14 | BDE cannot run on latest Python | Migrate to Gemini Embedding 2 |
 | os-api writes SQLite, not Supabase | HUD frontend and backend see different data | Rewrite `db.ts` to use Supabase client |
-| BDE Cohere dimension mismatch | Triple fusion retrieval fails for Cohere | Fix `feature_extractor.py` output_dimension → 1536 |
+| BDE Cohere dimension mismatch | Dormant — BDE is sidelined (runner calls Brand_linter) | Fix `feature_extractor.py` output_dimension → 1536 when BDE activated |
 
 ### HITL Gate: Platform Readiness
 
@@ -448,7 +448,7 @@ Post-MVP. When built, requires integration with client's analytics platforms.
 ### One-Time Platform Setup (do once)
 
 - [ ] Resolve Replicate/CLIP blocker (Gemini Embedding 2 migration)
-- [ ] Fix BDE Cohere dimension mismatch (1024 → 1536)
+- [ ] Fix BDE Cohere dimension mismatch (1024 → 1536) — dormant, fix when BDE activated
 - [ ] Bridge os-api to write Supabase instead of SQLite
 - [ ] Build HITL review UI in HUD
 - [ ] Connect runner to use campaign prompts from Supabase

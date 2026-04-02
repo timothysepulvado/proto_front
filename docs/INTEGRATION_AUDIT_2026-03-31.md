@@ -31,7 +31,7 @@ the **integration seams** between repos and maps them against the canonical arch
 | 5 | os-api runner → Temp-gen generate | **WIRED** | CLI exists, args match, venv OK (Python 3.14). Would make real Gemini API calls |
 | 6 | os-api runner → Brand_linter drift | **PARTIALLY WIRED** | `--profile` flag not passed → Pinecone RAG never runs, pixel-only |
 | 7 | Brand_linter → Pinecone | **CONNECTED** | API key present, 20 indexes, Jenni Kayne fully populated |
-| 8 | BDE retriever → Pinecone | **WIRED (dim bug)** | Extractor produces 1024D Cohere for 1536D indexes |
+| 8 | BDE retriever → Pinecone | **WIRED (dormant dim bug)** | Extractor produces 1024D Cohere for 1536D indexes — dormant while BDE is sidelined |
 | 9 | BDE linter-api → ml-worker | **BROKEN** | `node_modules` missing, requires local Postgres |
 | 10 | proto_front → BDE | **DISCONNECTED** | Runner calls Brand_linter CLI directly, never touches BDE |
 | 11 | Temp-gen output → drift check | **WIRED** | Runner chains stages, but drift is neutered (#6) |
@@ -117,8 +117,8 @@ The migration files in the repos are **behind the actual database**.
 
 **Legacy indexes**: `jennikayne-brand-dna` (512D, 28 vectors) and `cylndr-brand-dna` (512D, empty).
 
-**Known bug**: BDE `feature_extractor.py` requests `output_dimension: 1024` for Cohere,
-but all Cohere indexes are 1536D. Queries would fail with dimension mismatch.
+**Dormant bug**: BDE `feature_extractor.py` requests `output_dimension: 1024` for Cohere,
+but all Cohere indexes are 1536D. Queries would fail with dimension mismatch. **This is dormant** — the runner calls Brand_linter, not BDE, so this code path is never hit. Fix when BDE is activated.
 
 ---
 
@@ -274,7 +274,7 @@ Mapping the 9 phases from `BrandStudiosAI_Canonical_Architecture_Spec.docx` to c
 | Fix | Effort | Impact |
 |-----|--------|--------|
 | Pass `--profile` flag in runner.ts drift stage | 10 min | Enables RAG drift checking |
-| Fix BDE Cohere `output_dimension` → 1536 | 5 min | Fixes dimension mismatch |
+| Fix BDE Cohere `output_dimension` → 1536 | 5 min | Dormant — fix when BDE activated |
 | `npm install` in BDE linter-api | 2 min | Unblocks BDE API |
 | Create per-brand data dirs in Brand_linter | 10 min | Prevents demo fallback |
 | Ingest Cylndr E5+Cohere vectors | 2-4 hrs | Completes triple-fusion |
