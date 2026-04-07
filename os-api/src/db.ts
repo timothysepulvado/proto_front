@@ -1,5 +1,5 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, RunStatus, RunStage } from "./types.js";
+import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, PromptTemplate, PromptScore, RunStatus, RunStage } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -484,4 +484,134 @@ export async function getCampaign(campaignId: string): Promise<Record<string, un
   }
 
   return data;
+}
+
+// ============ Prompt Template Operations ============
+
+export async function getActivePrompt(clientId: string, stage: string = "generate", campaignId?: string): Promise<PromptTemplate | null> {
+  let query = supabase
+    .from("prompt_templates")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("stage", stage)
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1);
+
+  if (campaignId) {
+    query = query.eq("campaign_id", campaignId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Failed to get active prompt: ${error.message}`);
+  if (!data || data.length === 0) return null;
+
+  const d = data[0];
+  return {
+    id: d.id, clientId: d.client_id, campaignId: d.campaign_id ?? undefined,
+    stage: d.stage, version: d.version, promptText: d.prompt_text,
+    parentId: d.parent_id ?? undefined, isActive: d.is_active,
+    source: d.source ?? undefined, metadata: d.metadata ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+export async function createPromptTemplate(template: Omit<PromptTemplate, "id" | "createdAt">): Promise<PromptTemplate> {
+  const { data, error } = await supabase
+    .from("prompt_templates")
+    .insert({
+      client_id: template.clientId,
+      campaign_id: template.campaignId ?? null,
+      stage: template.stage,
+      version: template.version,
+      prompt_text: template.promptText,
+      parent_id: template.parentId ?? null,
+      is_active: template.isActive,
+      source: template.source ?? "manual",
+      metadata: template.metadata ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create prompt template: ${error.message}`);
+
+  return {
+    id: data.id, clientId: data.client_id, campaignId: data.campaign_id ?? undefined,
+    stage: data.stage, version: data.version, promptText: data.prompt_text,
+    parentId: data.parent_id ?? undefined, isActive: data.is_active,
+    source: data.source, metadata: data.metadata, createdAt: data.created_at,
+  };
+}
+
+export async function getPromptHistory(clientId: string, stage: string = "generate"): Promise<PromptTemplate[]> {
+  const { data, error } = await supabase
+    .from("prompt_templates")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("stage", stage)
+    .order("version", { ascending: false });
+
+  if (error) throw new Error(`Failed to get prompt history: ${error.message}`);
+
+  return (data ?? []).map((d: Record<string, unknown>) => ({
+    id: d.id as string, clientId: d.client_id as string,
+    campaignId: (d.campaign_id as string) ?? undefined,
+    stage: d.stage as string, version: d.version as number,
+    promptText: d.prompt_text as string, parentId: (d.parent_id as string) ?? undefined,
+    isActive: d.is_active as boolean, source: (d.source as string) ?? undefined,
+    metadata: (d.metadata as Record<string, unknown>) ?? undefined,
+    createdAt: d.created_at as string,
+  }));
+}
+
+export async function addPromptScore(score: Omit<PromptScore, "id" | "createdAt">): Promise<PromptScore> {
+  const { data, error } = await supabase
+    .from("prompt_scores")
+    .insert({
+      prompt_id: score.promptId,
+      run_id: score.runId,
+      artifact_id: score.artifactId ?? null,
+      score: score.score,
+      gate_decision: score.gateDecision ?? null,
+      feedback: score.feedback ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to add prompt score: ${error.message}`);
+
+  return {
+    id: data.id, promptId: data.prompt_id, runId: data.run_id,
+    artifactId: data.artifact_id ?? undefined, score: data.score,
+    gateDecision: data.gate_decision ?? undefined,
+    feedback: data.feedback ?? undefined, createdAt: data.created_at,
+  };
+}
+
+export async function getPromptScores(promptId: string): Promise<PromptScore[]> {
+  const { data, error } = await supabase
+    .from("prompt_scores")
+    .select("*")
+    .eq("prompt_id", promptId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get prompt scores: ${error.message}`);
+
+  return (data ?? []).map((d: Record<string, unknown>) => ({
+    id: d.id as string, promptId: d.prompt_id as string, runId: d.run_id as string,
+    artifactId: (d.artifact_id as string) ?? undefined, score: d.score as number,
+    gateDecision: (d.gate_decision as string) ?? undefined,
+    feedback: (d.feedback as string) ?? undefined, createdAt: d.created_at as string,
+  }));
+}
+
+export async function getPromptLineage(promptId: string): Promise<Record<string, unknown>[]> {
+  const { data, error } = await supabase
+    .from("prompt_evolution_log")
+    .select("*")
+    .or(`parent_prompt_id.eq.${promptId},child_prompt_id.eq.${promptId}`)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  return data ?? [];
 }

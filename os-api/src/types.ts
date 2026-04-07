@@ -101,6 +101,31 @@ export interface ReviewPayload {
   rejectionCategories?: string[];
 }
 
+export interface PromptTemplate {
+  id?: string;
+  clientId: string;
+  campaignId?: string;
+  stage: string;
+  version: number;
+  promptText: string;
+  parentId?: string;
+  isActive: boolean;
+  source?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface PromptScore {
+  id?: string;
+  promptId: string;
+  runId: string;
+  artifactId?: string;
+  score: number;
+  gateDecision?: string;
+  feedback?: string;
+  createdAt?: string;
+}
+
 export interface RunCreatePayload {
   mode: RunMode;
   campaignId?: string;

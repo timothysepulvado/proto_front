@@ -27,3 +27,8 @@ OUTPUT_BASE = Path("/Users/timothysepulvado/Desktop/T7Sheild/ExternalDrives")
 # Worker settings
 POLL_INTERVAL_SECONDS = 2
 MAX_CONCURRENT_RUNS = 1  # Start with 1 for simplicity
+
+# Prompt evolution thresholds
+PROMPT_AUTO_EVOLVE_THRESHOLD = 0.7   # Below this, auto-evolve
+PROMPT_PASSING_THRESHOLD = 0.85      # At or above this, prompt is good
+MAX_EVOLUTIONS_PER_RUN = 5           # Max prompt mutations in a single run

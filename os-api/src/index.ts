@@ -16,6 +16,12 @@ import {
   getAllClients,
   addHitlDecision,
   getHitlDecisionsByRun,
+  getActivePrompt,
+  createPromptTemplate,
+  getPromptHistory,
+  addPromptScore,
+  getPromptScores,
+  getPromptLineage,
 } from "./db.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -351,6 +357,107 @@ app.post("/api/runs/:runId/export", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("POST /api/runs/:runId/export error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Prompt Routes ============
+
+// GET /api/clients/:clientId/prompts - Get prompt history
+app.get("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const stage = (req.query.stage as string) || "generate";
+    const prompts = await getPromptHistory(clientId, stage);
+    res.json(prompts);
+  } catch (err) {
+    console.error("GET /api/clients/:clientId/prompts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/clients/:clientId/prompts/active - Get active prompt
+app.get("/api/clients/:clientId/prompts/active", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const stage = (req.query.stage as string) || "generate";
+    const campaignId = req.query.campaignId as string | undefined;
+    const prompt = await getActivePrompt(clientId, stage, campaignId);
+    if (!prompt) {
+      res.status(404).json({ error: "No active prompt found" });
+      return;
+    }
+    res.json(prompt);
+  } catch (err) {
+    console.error("GET /api/clients/:clientId/prompts/active error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/clients/:clientId/prompts - Create prompt template
+app.post("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const { promptText, stage, campaignId, version } = req.body;
+    if (!promptText) {
+      res.status(400).json({ error: "promptText is required" });
+      return;
+    }
+    const template = await createPromptTemplate({
+      clientId,
+      stage: stage || "generate",
+      version: version || 1,
+      promptText,
+      isActive: true,
+      source: "manual",
+      campaignId,
+    });
+    res.status(201).json(template);
+  } catch (err) {
+    console.error("POST /api/clients/:clientId/prompts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/prompts/:promptId/scores - Get scores for a prompt
+app.get("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
+  try {
+    const promptId = getParam(req, "promptId");
+    const scores = await getPromptScores(promptId);
+    res.json(scores);
+  } catch (err) {
+    console.error("GET /api/prompts/:promptId/scores error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/prompts/:promptId/scores - Record a score
+app.post("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
+  try {
+    const promptId = getParam(req, "promptId");
+    const { runId, score, gateDecision, artifactId, feedback } = req.body;
+    if (!runId || score === undefined) {
+      res.status(400).json({ error: "runId and score are required" });
+      return;
+    }
+    const result = await addPromptScore({
+      promptId, runId, score, gateDecision, artifactId, feedback,
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    console.error("POST /api/prompts/:promptId/scores error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/prompts/:promptId/lineage - Get evolution lineage
+app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) => {
+  try {
+    const promptId = getParam(req, "promptId");
+    const lineage = await getPromptLineage(promptId);
+    res.json(lineage);
+  } catch (err) {
+    console.error("GET /api/prompts/:promptId/lineage error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

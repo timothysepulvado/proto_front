@@ -472,6 +472,132 @@ export function subscribeToClients(
   };
 }
 
+// ============ Prompt Template Operations ============
+
+export interface PromptTemplate {
+  id: string;
+  clientId: string;
+  campaignId?: string;
+  stage: string;
+  version: number;
+  promptText: string;
+  parentId?: string;
+  isActive: boolean;
+  source?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+interface DbPromptTemplate {
+  id: string;
+  client_id: string;
+  campaign_id: string | null;
+  stage: string;
+  version: number;
+  prompt_text: string;
+  parent_id: string | null;
+  is_active: boolean;
+  source: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+function mapDbPromptToPrompt(d: DbPromptTemplate): PromptTemplate {
+  return {
+    id: d.id, clientId: d.client_id, campaignId: d.campaign_id ?? undefined,
+    stage: d.stage, version: d.version, promptText: d.prompt_text,
+    parentId: d.parent_id ?? undefined, isActive: d.is_active,
+    source: d.source ?? undefined, metadata: d.metadata ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+// Get active prompt for a client/stage
+export async function getActivePrompt(clientId: string, stage: string = "generate"): Promise<PromptTemplate | null> {
+  const { data, error } = await supabase
+    .from("prompt_templates")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("stage", stage)
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1);
+
+  if (error) throw new Error(`Failed to get active prompt: ${error.message}`);
+  if (!data || data.length === 0) return null;
+  return mapDbPromptToPrompt(data[0] as DbPromptTemplate);
+}
+
+// Get prompt version history
+export async function getPromptHistory(clientId: string, stage: string = "generate"): Promise<PromptTemplate[]> {
+  const { data, error } = await supabase
+    .from("prompt_templates")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("stage", stage)
+    .order("version", { ascending: false });
+
+  if (error) throw new Error(`Failed to get prompt history: ${error.message}`);
+  return (data as DbPromptTemplate[]).map(mapDbPromptToPrompt);
+}
+
+// Get prompt scores
+export async function getPromptScores(promptId: string): Promise<{ id: string; score: number; gateDecision?: string; createdAt: string }[]> {
+  const { data, error } = await supabase
+    .from("prompt_scores")
+    .select("*")
+    .eq("prompt_id", promptId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get prompt scores: ${error.message}`);
+  return (data ?? []).map((d: Record<string, unknown>) => ({
+    id: d.id as string,
+    score: d.score as number,
+    gateDecision: (d.gate_decision as string) ?? undefined,
+    createdAt: d.created_at as string,
+  }));
+}
+
+// Get evolution lineage
+export async function getPromptLineage(promptId: string): Promise<Record<string, unknown>[]> {
+  const { data, error } = await supabase
+    .from("prompt_evolution_log")
+    .select("*")
+    .or(`parent_prompt_id.eq.${promptId},child_prompt_id.eq.${promptId}`)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  return data ?? [];
+}
+
+// Subscribe to prompt changes
+export function subscribeToPrompts(
+  clientId: string,
+  onUpdate: (prompt: PromptTemplate) => void
+): () => void {
+  const channel = supabase
+    .channel(`prompts:${clientId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "prompt_templates",
+        filter: `client_id=eq.${clientId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(mapDbPromptToPrompt(payload.new as DbPromptTemplate));
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // Health check
 export async function healthCheck(): Promise<boolean> {
   try {
