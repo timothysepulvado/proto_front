@@ -8,22 +8,23 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "https://tfbfzepaccvklpabllao.supabase.
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_2_iH1zN1jMxixX0xjvtkSw_BboPk9Wm")
 
 # Tool Paths
+# Brand_linter and BDE are now consolidated into brand-engine (in-repo)
+# Only Temp-gen remains as an external subprocess tool
 TOOL_PATHS = {
-    "brand_linter": Path("/Users/timothysepulvado/Desktop/Brand_linter/local_quick_setup"),
-    "temp_gen": Path("/Users/timothysepulvado/Temp-gen"),
-    "bde": Path("/Users/timothysepulvado/BDE"),
+    "temp_gen": Path(os.getenv("TEMP_GEN_PATH", "/Users/timothysepulvado/Temp-gen")),
 }
 
-# Python environments for each tool
+# Python environments for subprocess tools (Temp-gen only)
 TOOL_VENVS = {
-    "brand_linter": TOOL_PATHS["brand_linter"] / ".venv" / "bin" / "python",
     "temp_gen": TOOL_PATHS["temp_gen"] / ".venv" / "bin" / "python",
-    "bde": TOOL_PATHS["bde"] / "venv" / "bin" / "python",
 }
+
+# Brand Engine API (FastAPI sidecar — optional, worker can import directly)
+BRAND_ENGINE_URL = os.getenv("BRAND_ENGINE_URL", "http://localhost:8100")
 
 # Output paths
-OUTPUT_BASE = Path("/Users/timothysepulvado/Desktop/T7Sheild/ExternalDrives")
+OUTPUT_BASE = Path(os.getenv("OUTPUT_BASE", "/Users/timothysepulvado/Desktop/T7Sheild/ExternalDrives"))
 
 # Worker settings
 POLL_INTERVAL_SECONDS = 2
-MAX_CONCURRENT_RUNS = 1  # Start with 1 for simplicity
+MAX_CONCURRENT_RUNS = 1

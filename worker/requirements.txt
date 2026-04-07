@@ -1,2 +1,6 @@
 supabase>=2.0.0
 python-dotenv>=1.0.0
+
+# Brand Engine (local package — install with: pip install -e ../brand-engine)
+# Dependencies pulled from brand-engine/pyproject.toml:
+#   google-genai, cohere, pinecone, pydantic, Pillow, numpy

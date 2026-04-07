@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "vite",
     "dev:api": "npm run --prefix os-api dev",
-    "dev:all": "concurrently -n hud,api -c cyan,magenta \"npm run dev\" \"npm run dev:api\"",
+    "dev:engine": "cd brand-engine && uvicorn brand_engine.api.server:app --port 8100 --reload",
+    "dev:all": "concurrently -n hud,api,engine -c cyan,magenta,yellow \"npm run dev\" \"npm run dev:api\" \"npm run dev:engine\"",
     "build": "tsc -b && vite build",
     "build:api": "npm run --prefix os-api build",
     "lint": "eslint .",

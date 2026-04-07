@@ -1,80 +1,79 @@
-"""Ingest executor - runs Brand_linter indexing."""
+"""Ingest executor - runs Brand_linter indexing via brand-engine core.
 
-import subprocess
+Rewired from subprocess calls to brand_engine.core direct imports.
+"""
+
 import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import TOOL_PATHS, TOOL_VENVS
+# Add brand-engine to path for direct imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "brand-engine"))
 
 
 class IngestExecutor:
-    """Executor for ingest (Brand Memory) operations."""
+    """Executor for ingest (Brand Memory) operations.
+
+    Uses brand_engine.core directly — no subprocess, shared model singletons.
+    """
 
     def __init__(self, log_callback: Callable[[str, str, str], None]):
-        """
-        Initialize the ingest executor.
-
-        Args:
-            log_callback: Function to call with (stage, level, message) for logging
-        """
         self.log = log_callback
-        self.tool_path = TOOL_PATHS["brand_linter"]
-        self.python = TOOL_VENVS["brand_linter"]
 
     def execute(self, run_id: str, client_id: str, params: Optional[dict] = None) -> dict:
-        """
-        Execute the ingest operation.
-
-        For now, this runs the brand_dna_indexer to index brand assets.
-        In the future, this could accept file paths or URLs to ingest.
+        """Execute the ingest operation.
 
         Args:
             run_id: The run ID
             client_id: The client ID
-            params: Optional parameters (e.g., asset_path, asset_type)
+            params: Optional parameters (e.g., images_dir, index_tier)
 
         Returns:
             dict with status and any artifacts
         """
-        self.log("ingest", "info", f"Starting ingest for client {client_id}")
+        params = params or {}
+        brand_slug = client_id.replace("client_", "")
+        images_dir = params.get("images_dir", f"data/{brand_slug}")
+        index_tier = params.get("index_tier", "brand-dna")
+        documents_dir = params.get("documents_dir")
 
-        # For demo, we'll run the check_pinecone_vectors to verify the index
-        # In production, this would run brand_dna_indexer with new assets
-        script = self.tool_path / "tools" / "check_pinecone_vectors.py"
-
-        if not script.exists():
-            self.log("ingest", "error", f"Script not found: {script}")
-            return {"status": "failed", "error": "Script not found"}
-
-        self.log("ingest", "info", "Checking Pinecone index status...")
+        self.log("ingest", "info", f"Starting ingest for brand '{brand_slug}'")
 
         try:
-            result = subprocess.run(
-                [str(self.python), str(script)],
-                cwd=str(self.tool_path),
-                capture_output=True,
-                text=True,
-                timeout=120,
+            from brand_engine.core.indexer import BrandIndexer
+            from brand_engine.core.retriever import load_brand_profile
+
+            profile = load_brand_profile(brand_slug)
+            indexer = BrandIndexer(log_callback=self.log)
+
+            result = indexer.ingest(
+                profile=profile,
+                images_dir=images_dir,
+                index_tier=index_tier,
+                documents_dir=documents_dir,
             )
 
-            # Stream stdout lines as logs
-            for line in result.stdout.strip().split("\n"):
-                if line.strip():
-                    self.log("ingest", "info", line.strip())
+            self.log("ingest", "info", f"Indexed {result.vectors_indexed} vectors")
+            self.log("ingest", "info", f"  Gemini index: {result.gemini_index}")
+            self.log("ingest", "info", f"  Cohere index: {result.cohere_index}")
 
-            if result.returncode != 0:
-                self.log("ingest", "error", f"Ingest failed: {result.stderr}")
-                return {"status": "failed", "error": result.stderr}
+            if result.errors:
+                self.log("ingest", "warn", f"{len(result.errors)} errors during ingest")
+                for err in result.errors[:5]:
+                    self.log("ingest", "warn", f"  {err}")
 
-            self.log("ingest", "info", "Ingest completed successfully")
-            return {"status": "completed", "artifacts": []}
+            return {
+                "status": "completed",
+                "artifacts": [],
+                "metrics": {
+                    "vectors_indexed": result.vectors_indexed,
+                    "errors": len(result.errors),
+                },
+            }
 
-        except subprocess.TimeoutExpired:
-            self.log("ingest", "error", "Ingest timed out after 120s")
-            return {"status": "failed", "error": "Timeout"}
+        except FileNotFoundError as e:
+            self.log("ingest", "error", f"Not found: {e}")
+            return {"status": "failed", "error": str(e)}
         except Exception as e:
             self.log("ingest", "error", f"Ingest error: {str(e)}")
             return {"status": "failed", "error": str(e)}

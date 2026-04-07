@@ -13,6 +13,7 @@
 
 ## Related Repos
 
-- **[~/BDE/](~/BDE/)** — Brand DNA Engine (ML worker, triple fusion retriever, HITL/RL) — currently sidelined
-- **[~/Brand_linter/local_quick_setup/](~/Brand_linter/local_quick_setup/)** — Brand compliance CLI — active tool called by runner
-- **[~/Temp-gen/](~/Temp-gen/)** — Image/video generation CLI (Gemini, Veo)
+- **[brand-engine/](brand-engine/)** — Brand compliance engine (Gemini Embed 2 + Cohere v4 dual-fusion) — **in-repo**, consolidates BDE + Brand_linter
+- **[~/Temp-gen/](~/Temp-gen/)** — Image/video generation CLI (Gemini, Veo) — still external subprocess
+- **[~/BDE/](~/BDE/)** — **ARCHIVED** — ML code cherry-picked into brand-engine/
+- **[~/Brand_linter/](~/Brand_linter/)** — **ARCHIVED** — consolidated into brand-engine/

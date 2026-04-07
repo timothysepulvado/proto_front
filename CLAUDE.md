@@ -14,15 +14,17 @@ the real product — the client-facing tool that runs brand operations.
 
 ## Architecture
 - **Frontend:** React 19 + TypeScript + Vite + Tailwind v4
-- **Backend:** Supabase (Postgres, Realtime) — production. Express + SQLite (os-api/) — local dev fallback.
+- **Backend:** Supabase (Postgres, Realtime) — production. Express (os-api/) — API gateway.
+- **Brand Engine:** Python FastAPI sidecar (`brand-engine/`) — Gemini Embed 2 + Cohere v4 dual-fusion for brand compliance. Runs on port 8100.
 - **Pipeline:** Four pillars — Brand Memory, Creative Studio, Brand Drift, Insight Loop
+- **Embeddings:** Gemini Embedding 2 (768D via MRL) + Cohere v4 (1536D) — dual-fusion z-score normalization
 - **Data:** `hud.json` is the UI data source. Supabase tables: `clients`, `runs`, `run_logs`, `artifacts`.
-- **Realtime:** SSE log streaming for pipeline execution. Supabase Realtime on `runs` and `run_logs`.
+- **Realtime:** Supabase Realtime on `runs` and `run_logs`.
 
 ## Connected Repos (wired but optional)
-- `Temp-gen/` — Image/video generation CLI (Gemini, Veo)
-- `Brand_linter/` — Brand DNA indexing and drift analysis
-- More connections TBD — this HUD orchestrates multiple tools
+- `Temp-gen/` — Image/video generation CLI (Gemini, Veo) — still subprocess
+- `Brand_linter/` — **ARCHIVED** — consolidated into `brand-engine/` (in-repo)
+- `BDE/` — **ARCHIVED** — ML code cherry-picked into `brand-engine/`
 
 ## Key Files
 | File | Purpose |
@@ -31,7 +33,8 @@ the real product — the client-facing tool that runs brand operations.
 | `src/api.ts` | API client + SSE subscriptions |
 | `src/lib/supabase.ts` | Supabase client |
 | `hud.json` | Client data + UI config (source of truth) |
-| `os-api/` | Express backend (local dev) |
+| `os-api/` | Express backend (API gateway) |
+| `brand-engine/` | Python brand compliance engine (Gemini+Cohere dual-fusion) |
 | `supabase/` | Migrations |
 | `worker/` | Python worker for HUD run execution |
 
@@ -45,7 +48,8 @@ These are TWO SEPARATE projects. Never cross the streams:
 - Node 22.x (`nvm use`)
 - `npm run dev` → HUD at localhost:5173
 - `npm run dev:api` → API at localhost:3001
-- `npm run dev:all` → both concurrently
+- `npm run dev:engine` → brand-engine API at localhost:8100
+- `npm run dev:all` → HUD + API + brand-engine concurrently
 - Supabase project: `tfbfzepaccvklpabllao`
 
 ## Run Modes
