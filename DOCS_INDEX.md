@@ -4,6 +4,7 @@
 
 ## Authoritative Docs (This Repo)
 
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — Roadmap, state of play, and next steps (start here)
 - **[docs/INTEGRATION_AUDIT_2026-04-07.md](docs/INTEGRATION_AUDIT_2026-04-07.md)** — Cross-repo integration audit (source of truth for all repos)
 - **[docs/INTEGRATION_AUDIT_2026-03-31.md](docs/INTEGRATION_AUDIT_2026-03-31.md)** — Previous audit (historical snapshot)
 - **[docs/TECH_REQUIREMENTS_CLIENT_IMPLEMENTATION.md](docs/TECH_REQUIREMENTS_CLIENT_IMPLEMENTATION.md)** — Client implementation playbook
@@ -15,5 +16,5 @@
 ## Related Repos
 
 - **[~/BDE/](~/BDE/)** — Brand DNA Engine (ML worker, triple fusion retriever, HITL/RL) — currently sidelined
-- **[~/Brand_linter/local_quick_setup/](~/Brand_linter/local_quick_setup/)** — Brand compliance CLI — active tool called by runner
+- **[~/Brand_linter/local_quick_setup/](~/Brand_linter/local_quick_setup/)** — Brand compliance CLI — being superseded by brand-engine/
 - **[~/Temp-gen/](~/Temp-gen/)** — Image/video generation CLI (Gemini, Veo)
