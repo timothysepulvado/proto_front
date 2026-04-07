@@ -1,3 +1,5 @@
+> **Note**: This audit reflects the state as of 2026-03-31. For current integration status, see [INTEGRATION_AUDIT_2026-04-07.md](INTEGRATION_AUDIT_2026-04-07.md).
+
 # Brand Studios Integration Audit — 2026-03-31
 
 ## Purpose

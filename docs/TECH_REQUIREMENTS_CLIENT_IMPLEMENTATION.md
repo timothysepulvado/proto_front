@@ -37,7 +37,7 @@ Before onboarding any client, these platform services must be operational.
 | Blocker | Impact | Resolution |
 |---------|--------|------------|
 | Replicate CLIP broken on Python 3.14 | BDE cannot run on latest Python | Migrate to Gemini Embedding 2 |
-| os-api writes SQLite, not Supabase | HUD frontend and backend see different data | Rewrite `db.ts` to use Supabase client |
+| ~~os-api writes SQLite, not Supabase~~ | ~~HUD frontend and backend see different data~~ | **RESOLVED** — db.ts rewritten to Supabase (`b4d4fac`, 2026-04-07) |
 | BDE Cohere dimension mismatch | Dormant — BDE is sidelined (runner calls Brand_linter) | Fix `feature_extractor.py` output_dimension → 1536 when BDE activated |
 
 ### HITL Gate: Platform Readiness
@@ -45,7 +45,7 @@ Before onboarding any client, these platform services must be operational.
 - [ ] All API keys verified and funded
 - [ ] Supabase project accessible (Management API + REST API)
 - [ ] Pinecone account has capacity for new indexes
-- [ ] os-api → Supabase bridge built (or decision to bypass os-api)
+- [x] os-api → Supabase bridge built (`b4d4fac`, 2026-04-07)
 - [ ] Replicate/CLIP blocker resolved OR Gemini Embedding 2 migration complete
 
 ---
@@ -248,10 +248,10 @@ Before onboarding any client, these platform services must be operational.
 
 | Gap | Effort | Priority |
 |-----|--------|----------|
-| Runner doesn't pull from Pinecone at runtime | Large | High |
-| Runner doesn't load campaign brief from Supabase | Medium | High |
-| No runtime retrieval package assembly | Large | High |
-| Runner writes to SQLite, not Supabase | Medium | Critical |
+| ~~Runner doesn't pull from Pinecone at runtime~~ | ~~Large~~ | **RESOLVED** (`17dd313`, 2026-04-06) |
+| ~~Runner doesn't load campaign brief from Supabase~~ | ~~Medium~~ | **RESOLVED** (`e12f5f5`, 2026-04-04) |
+| ~~No runtime retrieval package assembly~~ | ~~Large~~ | **RESOLVED** (`17dd313`, 2026-04-06) |
+| ~~Runner writes to SQLite, not Supabase~~ | ~~Medium~~ | **RESOLVED** (`b4d4fac`, 2026-04-07) |
 
 ### Per-Client Work
 
@@ -283,8 +283,8 @@ Runtime assembly should be automatic. Human intervention only if the environment
 
 | Gap | Effort | Priority |
 |-----|--------|----------|
-| Prompts are static ("Brand campaign image for X") | Medium | High — should use campaign prompt + brand context |
-| No prompt evolution from rejection feedback | Medium | High |
+| ~~Prompts are static~~ | ~~Medium~~ | **RESOLVED** — campaign prompts propagated (`e12f5f5`), prompt evolution system built (`b7118ce`) |
+| ~~No prompt evolution from rejection feedback~~ | ~~Medium~~ | **RESOLVED** (`b7118ce`, 2026-04-07) |
 | No connection between `campaign_deliverables.current_prompt` and Temp-gen | Medium | High |
 | Generated artifacts not written to `artifacts` table in Supabase | Medium | High |
 
@@ -318,11 +318,11 @@ Generation runs automatically. HITL happens at the drift/review stage (Phase 6).
 
 | Gap | Effort | Priority |
 |-----|--------|----------|
-| Runner doesn't pass `--profile` to drift check | 10 min | Critical |
-| Drift check only runs pixel analysis, not RAG similarity | Medium | Critical |
-| No connection between drift results and `drift_metrics` table | Medium | High |
+| ~~Runner doesn't pass `--profile` to drift check~~ | ~~10 min~~ | **RESOLVED** (`cd65bbd`, 2026-04-03) |
+| ~~Drift check only runs pixel analysis, not RAG similarity~~ | ~~Medium~~ | **RESOLVED** — `--profile` enables RAG |
+| ~~No connection between drift results and `drift_metrics` table~~ | ~~Medium~~ | **RESOLVED** (`e12f5f5`, 2026-04-04) |
 | No alert generation logic for `drift_alerts` | Medium | High |
-| HITL decisions written to SQLite, not `hitl_decisions` table | Medium | Critical |
+| ~~HITL decisions written to SQLite, not `hitl_decisions` table~~ | ~~Medium~~ | **RESOLVED** (`cd65bbd`, 2026-04-03) |
 | No review UI in HUD for HITL decisions | Large | High |
 
 ### Per-Client Work
@@ -424,7 +424,7 @@ Post-MVP. When built, requires integration with client's analytics platforms.
 
 | Gap | Effort | Priority |
 |-----|--------|----------|
-| RL trainer reads local SQLite, not Supabase `hitl_decisions` | Medium | High |
+| ~~RL trainer reads local SQLite, not Supabase `hitl_decisions`~~ | ~~Medium~~ | **RESOLVED** (BDE `260037e`, 2026-04-07) |
 | No promotion UI or approval flow | Large | Medium |
 | No logic to copy vectors between Pinecone index tiers | Medium | Medium |
 
@@ -449,10 +449,10 @@ Post-MVP. When built, requires integration with client's analytics platforms.
 
 - [ ] Resolve Replicate/CLIP blocker (Gemini Embedding 2 migration)
 - [ ] Fix BDE Cohere dimension mismatch (1024 → 1536) — dormant, fix when BDE activated
-- [ ] Bridge os-api to write Supabase instead of SQLite
+- [x] Bridge os-api to write Supabase instead of SQLite (`b4d4fac`, 2026-04-07)
 - [ ] Build HITL review UI in HUD
-- [ ] Connect runner to use campaign prompts from Supabase
-- [ ] Add `--profile` flag to drift stage in runner
+- [x] Connect runner to use campaign prompts from Supabase (`e12f5f5`, 2026-04-04)
+- [x] Add `--profile` flag to drift stage in runner (`cd65bbd`, 2026-04-03)
 
 ### Per-Client Onboarding (~1-2 days with HITL gates)
 

@@ -8,8 +8,11 @@ React + TypeScript HUD for BrandStudios.ai OS. Features a draggable Ironman-insp
 HUD/
 ├── src/              # React frontend (Vite + Tailwind v4)
 │   └── lib/supabase.ts  # Supabase client
-├── os-api/           # Express backend (SQLite + SSE) - legacy/local dev
-├── supabase/         # Supabase migrations
+├── os-api/           # Express backend (Supabase + SSE) - orchestrator
+│   └── src/supabase.ts  # Supabase client for os-api
+├── worker/           # Python worker for headless run execution
+│   └── executors/    # Stage executors (ingest, creative, grading, prompt_evolver)
+├── supabase/         # Supabase migrations (001-003)
 ├── hud.json          # UI data source
 ├── .mcp.json         # Supabase MCP config
 └── package.json      # Monorepo scripts
@@ -19,11 +22,14 @@ HUD/
 
 **Supabase** (production):
 - Project: `tfbfzepaccvklpabllao`
-- Tables: `clients`, `runs`, `run_logs`, `artifacts`
+- Tables: `clients`, `runs`, `run_logs`, `artifacts`, `hitl_decisions`, `rejection_categories`, `campaigns`, `campaign_deliverables`, `campaign_memory`, `drift_metrics`, `drift_alerts`, `brand_baselines`, `prompt_templates`, `prompt_scores`, `prompt_evolution_log`
 - Realtime enabled on `runs` and `run_logs`
 
-**os-api** (local dev):
-- Express + SQLite fallback for offline development
+**os-api** (orchestrator):
+- Express server — writes to Supabase (SQLite removed 2026-04-07)
+
+**worker** (headless execution):
+- Python worker — polls Supabase for pending runs, executes via stage executors
 
 **External repos (wired but optional):**
 - `Temp-gen/` - Image/video generation CLI (Gemini, Veo)
@@ -83,7 +89,7 @@ The HUD organizes brand operations into four pillars:
 
 | Mode | Stages | Description |
 |------|--------|-------------|
-| `full` | ingest → generate → drift → hitl → export | Complete pipeline |
+| `full` | ingest → retrieve → generate → drift → hitl → export | Complete pipeline |
 | `ingest` | ingest | Index brand assets only |
 | `images` | generate_images | Generate images only |
 | `video` | generate_video | Generate video only |
@@ -99,7 +105,12 @@ If external tools (Temp-gen, Brand_linter) aren't available or fail, the runner 
 - `hud.json` - Source of truth for client data and UI config
 - `src/App.tsx` - Main HUD component with Tailwind styling
 - `src/api.ts` - API client with SSE subscription
+- `src/lib/supabase.ts` - Supabase client initialization
 - `os-api/` - Backend server (see `os-api/README.md`)
+- `os-api/src/supabase.ts` - Supabase client for os-api
+- `worker/worker.py` - Python worker entry point
+- `worker/config.py` - Worker configuration (Supabase URL, keys, thresholds)
+- `supabase/migrations/` - Schema migrations (001-003)
 
 ## Notes
 
