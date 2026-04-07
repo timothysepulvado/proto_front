@@ -1,214 +1,335 @@
-import Database from "better-sqlite3";
-import path from "path";
-import { fileURLToPath } from "url";
-import type { Run, RunLog, Artifact, Client, RunStatus } from "./types.js";
+import { supabase } from "./supabase.js";
+import type { Run, RunLog, Artifact, Client, RunStatus, RunStage } from "./types.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, "..", "data", "runs.db");
+// ============ Database Row Types (snake_case, matching Supabase schema) ============
 
-// Ensure data directory exists
-import fs from "fs";
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+interface DbRun {
+  id: string;
+  client_id: string;
+  mode: string;
+  status: string;
+  stages: RunStage[];
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+  hitl_required: boolean;
+  hitl_notes: string | null;
 }
 
-const db: InstanceType<typeof Database> = new Database(DB_PATH);
-
-// Initialize tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS runs (
-    runId TEXT PRIMARY KEY,
-    clientId TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    stages TEXT NOT NULL DEFAULT '[]',
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL,
-    startedAt TEXT,
-    completedAt TEXT,
-    error TEXT,
-    hitlRequired INTEGER DEFAULT 0,
-    hitlNotes TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS run_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    runId TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    stage TEXT NOT NULL,
-    level TEXT NOT NULL DEFAULT 'info',
-    message TEXT NOT NULL,
-    FOREIGN KEY (runId) REFERENCES runs(runId)
-  );
-
-  CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
-    runId TEXT NOT NULL,
-    type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    path TEXT NOT NULL,
-    size INTEGER,
-    createdAt TEXT NOT NULL,
-    FOREIGN KEY (runId) REFERENCES runs(runId)
-  );
-
-  CREATE TABLE IF NOT EXISTS clients (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    lastRunId TEXT,
-    lastRunAt TEXT,
-    lastRunStatus TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_runs_clientId ON runs(clientId);
-  CREATE INDEX IF NOT EXISTS idx_run_logs_runId ON run_logs(runId);
-  CREATE INDEX IF NOT EXISTS idx_artifacts_runId ON artifacts(runId);
-`);
-
-// Run operations
-export function createRun(run: Run): Run {
-  const stmt = db.prepare(`
-    INSERT INTO runs (runId, clientId, mode, status, stages, createdAt, updatedAt, startedAt, completedAt, error, hitlRequired, hitlNotes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  stmt.run(
-    run.runId,
-    run.clientId,
-    run.mode,
-    run.status,
-    JSON.stringify(run.stages),
-    run.createdAt,
-    run.updatedAt,
-    run.startedAt ?? null,
-    run.completedAt ?? null,
-    run.error ?? null,
-    run.hitlRequired ? 1 : 0,
-    run.hitlNotes ?? null
-  );
-  return run;
+interface DbRunLog {
+  id: number;
+  run_id: string;
+  timestamp: string;
+  stage: string;
+  level: "info" | "warn" | "error" | "debug";
+  message: string;
 }
 
-export function getRun(runId: string): Run | null {
-  const stmt = db.prepare("SELECT * FROM runs WHERE runId = ?");
-  const row = stmt.get(runId) as Record<string, unknown> | undefined;
-  if (!row) return null;
+interface DbArtifact {
+  id: string;
+  run_id: string;
+  type: "image" | "video" | "report" | "package";
+  name: string;
+  path: string;
+  size: number | null;
+  created_at: string;
+}
+
+interface DbClient {
+  id: string;
+  name: string;
+  status: string;
+  last_run_id: string | null;
+  last_run_at: string | null;
+  last_run_status: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ============ Mappers (DB → App) ============
+
+function mapDbRunToRun(dbRun: DbRun): Run {
   return {
-    ...row,
-    stages: JSON.parse(row.stages as string),
-    hitlRequired: Boolean(row.hitlRequired),
-  } as Run;
+    runId: dbRun.id,
+    clientId: dbRun.client_id,
+    mode: dbRun.mode as Run["mode"],
+    status: dbRun.status as Run["status"],
+    stages: dbRun.stages,
+    createdAt: dbRun.created_at,
+    updatedAt: dbRun.updated_at,
+    startedAt: dbRun.started_at ?? undefined,
+    completedAt: dbRun.completed_at ?? undefined,
+    error: dbRun.error ?? undefined,
+    hitlRequired: dbRun.hitl_required,
+    hitlNotes: dbRun.hitl_notes ?? undefined,
+  };
 }
 
-export function updateRun(runId: string, updates: Partial<Run>): Run | null {
-  const run = getRun(runId);
-  if (!run) return null;
-
-  const updated = { ...run, ...updates, updatedAt: new Date().toISOString() };
-  const stmt = db.prepare(`
-    UPDATE runs SET
-      status = ?,
-      stages = ?,
-      updatedAt = ?,
-      startedAt = ?,
-      completedAt = ?,
-      error = ?,
-      hitlRequired = ?,
-      hitlNotes = ?
-    WHERE runId = ?
-  `);
-  stmt.run(
-    updated.status,
-    JSON.stringify(updated.stages),
-    updated.updatedAt,
-    updated.startedAt ?? null,
-    updated.completedAt ?? null,
-    updated.error ?? null,
-    updated.hitlRequired ? 1 : 0,
-    updated.hitlNotes ?? null,
-    runId
-  );
-  return updated;
+function mapDbLogToRunLog(dbLog: DbRunLog): RunLog {
+  return {
+    id: dbLog.id,
+    runId: dbLog.run_id,
+    timestamp: dbLog.timestamp,
+    stage: dbLog.stage,
+    level: dbLog.level,
+    message: dbLog.message,
+  };
 }
 
-export function getRunsByClient(clientId: string): Run[] {
-  const stmt = db.prepare("SELECT * FROM runs WHERE clientId = ? ORDER BY createdAt DESC");
-  const rows = stmt.all(clientId) as Record<string, unknown>[];
-  return rows.map((row) => ({
-    ...row,
-    stages: JSON.parse(row.stages as string),
-    hitlRequired: Boolean(row.hitlRequired),
-  })) as Run[];
+function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
+  return {
+    id: dbArtifact.id,
+    runId: dbArtifact.run_id,
+    type: dbArtifact.type,
+    name: dbArtifact.name,
+    path: dbArtifact.path,
+    size: dbArtifact.size ?? undefined,
+    createdAt: dbArtifact.created_at,
+  };
 }
 
-// Log operations
-export function addLog(log: Omit<RunLog, "id">): RunLog {
-  const stmt = db.prepare(`
-    INSERT INTO run_logs (runId, timestamp, stage, level, message)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-  const result = stmt.run(log.runId, log.timestamp, log.stage, log.level, log.message);
-  return { ...log, id: result.lastInsertRowid as number };
+function mapDbClientToClient(dbClient: DbClient): Client {
+  return {
+    id: dbClient.id,
+    name: dbClient.name,
+    status: dbClient.status,
+    lastRunId: dbClient.last_run_id ?? undefined,
+    lastRunAt: dbClient.last_run_at ?? undefined,
+    lastRunStatus: (dbClient.last_run_status as RunStatus) ?? undefined,
+  };
 }
 
-export function getLogsByRun(runId: string, since?: number): RunLog[] {
-  let stmt;
-  if (since !== undefined) {
-    stmt = db.prepare("SELECT * FROM run_logs WHERE runId = ? AND id > ? ORDER BY id ASC");
-    return stmt.all(runId, since) as RunLog[];
+// ============ Mappers (App → DB) ============
+
+function mapRunUpdatesToDb(updates: Partial<Run>): Record<string, unknown> {
+  const mapped: Record<string, unknown> = {};
+  if (updates.status !== undefined) mapped.status = updates.status;
+  if (updates.stages !== undefined) mapped.stages = updates.stages;
+  if (updates.startedAt !== undefined) mapped.started_at = updates.startedAt;
+  if (updates.completedAt !== undefined) mapped.completed_at = updates.completedAt;
+  if (updates.error !== undefined) mapped.error = updates.error;
+  if (updates.hitlRequired !== undefined) mapped.hitl_required = updates.hitlRequired;
+  if (updates.hitlNotes !== undefined) mapped.hitl_notes = updates.hitlNotes;
+  return mapped;
+}
+
+// ============ Run Operations ============
+
+export async function createRun(run: Run): Promise<Run> {
+  const { data, error } = await supabase
+    .from("runs")
+    .insert({
+      id: run.runId,
+      client_id: run.clientId,
+      mode: run.mode,
+      status: run.status,
+      stages: run.stages,
+      started_at: run.startedAt ?? null,
+      completed_at: run.completedAt ?? null,
+      error: run.error ?? null,
+      hitl_required: run.hitlRequired ?? false,
+      hitl_notes: run.hitlNotes ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create run: ${error.message}`);
   }
-  stmt = db.prepare("SELECT * FROM run_logs WHERE runId = ? ORDER BY id ASC");
-  return stmt.all(runId) as RunLog[];
+
+  return mapDbRunToRun(data as DbRun);
 }
 
-// Artifact operations
-export function addArtifact(artifact: Artifact): Artifact {
-  const stmt = db.prepare(`
-    INSERT INTO artifacts (id, runId, type, name, path, size, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  stmt.run(artifact.id, artifact.runId, artifact.type, artifact.name, artifact.path, artifact.size ?? null, artifact.createdAt);
-  return artifact;
+export async function getRun(runId: string): Promise<Run | null> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("id", runId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get run: ${error.message}`);
+  }
+
+  if (!data) return null;
+  return mapDbRunToRun(data as DbRun);
 }
 
-export function getArtifactsByRun(runId: string): Artifact[] {
-  const stmt = db.prepare("SELECT * FROM artifacts WHERE runId = ? ORDER BY createdAt ASC");
-  return stmt.all(runId) as Artifact[];
+export async function updateRun(runId: string, updates: Partial<Run>): Promise<Run | null> {
+  const dbUpdates = mapRunUpdatesToDb(updates);
+
+  const { data, error } = await supabase
+    .from("runs")
+    .update(dbUpdates)
+    .eq("id", runId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update run: ${error.message}`);
+  }
+
+  return mapDbRunToRun(data as DbRun);
 }
 
-// Client operations
-export function getClient(clientId: string): Client | null {
-  const stmt = db.prepare("SELECT * FROM clients WHERE id = ?");
-  return stmt.get(clientId) as Client | null;
+export async function getRunsByClient(clientId: string): Promise<Run[]> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to get runs by client: ${error.message}`);
+  }
+
+  return (data as DbRun[]).map(mapDbRunToRun);
 }
 
-export function upsertClient(client: Client): Client {
-  const stmt = db.prepare(`
-    INSERT INTO clients (id, name, status, lastRunId, lastRunAt, lastRunStatus)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      status = excluded.status,
-      lastRunId = excluded.lastRunId,
-      lastRunAt = excluded.lastRunAt,
-      lastRunStatus = excluded.lastRunStatus
-  `);
-  stmt.run(client.id, client.name, client.status, client.lastRunId ?? null, client.lastRunAt ?? null, client.lastRunStatus ?? null);
-  return client;
+// ============ Log Operations ============
+
+export async function addLog(log: Omit<RunLog, "id">): Promise<RunLog> {
+  const { data, error } = await supabase
+    .from("run_logs")
+    .insert({
+      run_id: log.runId,
+      timestamp: log.timestamp,
+      stage: log.stage,
+      level: log.level,
+      message: log.message,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to add log: ${error.message}`);
+  }
+
+  return mapDbLogToRunLog(data as DbRunLog);
 }
 
-export function getAllClients(): Client[] {
-  const stmt = db.prepare("SELECT * FROM clients ORDER BY name ASC");
-  return stmt.all() as Client[];
+export async function getLogsByRun(runId: string, since?: number): Promise<RunLog[]> {
+  let query = supabase
+    .from("run_logs")
+    .select("*")
+    .eq("run_id", runId)
+    .order("id", { ascending: true });
+
+  if (since !== undefined) {
+    query = query.gt("id", since);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw new Error(`Failed to get logs: ${error.message}`);
+  }
+
+  return (data as DbRunLog[]).map(mapDbLogToRunLog);
 }
 
-export function updateClientLastRun(clientId: string, runId: string, status: RunStatus): void {
-  const stmt = db.prepare(`
-    UPDATE clients SET lastRunId = ?, lastRunAt = ?, lastRunStatus = ?
-    WHERE id = ?
-  `);
-  stmt.run(runId, new Date().toISOString(), status, clientId);
+// ============ Artifact Operations ============
+
+export async function addArtifact(artifact: Artifact): Promise<Artifact> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .insert({
+      id: artifact.id,
+      run_id: artifact.runId,
+      type: artifact.type,
+      name: artifact.name,
+      path: artifact.path,
+      size: artifact.size ?? null,
+      created_at: artifact.createdAt,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to add artifact: ${error.message}`);
+  }
+
+  return mapDbArtifactToArtifact(data as DbArtifact);
 }
 
-export default db;
+export async function getArtifactsByRun(runId: string): Promise<Artifact[]> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to get artifacts: ${error.message}`);
+  }
+
+  return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
+}
+
+// ============ Client Operations ============
+
+export async function getClient(clientId: string): Promise<Client | null> {
+  const { data, error } = await supabase
+    .from("clients")
+    .select("*")
+    .eq("id", clientId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get client: ${error.message}`);
+  }
+
+  if (!data) return null;
+  return mapDbClientToClient(data as DbClient);
+}
+
+export async function upsertClient(client: Client): Promise<Client> {
+  const { data, error } = await supabase
+    .from("clients")
+    .upsert({
+      id: client.id,
+      name: client.name,
+      status: client.status,
+      last_run_id: client.lastRunId ?? null,
+      last_run_at: client.lastRunAt ?? null,
+      last_run_status: client.lastRunStatus ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to upsert client: ${error.message}`);
+  }
+
+  return mapDbClientToClient(data as DbClient);
+}
+
+export async function getAllClients(): Promise<Client[]> {
+  const { data, error } = await supabase
+    .from("clients")
+    .select("*")
+    .order("name");
+
+  if (error) {
+    throw new Error(`Failed to get clients: ${error.message}`);
+  }
+
+  return (data as DbClient[]).map(mapDbClientToClient);
+}
+
+export async function updateClientLastRun(clientId: string, runId: string, status: RunStatus): Promise<void> {
+  const { error } = await supabase
+    .from("clients")
+    .update({
+      last_run_id: runId,
+      last_run_at: new Date().toISOString(),
+      last_run_status: status,
+    })
+    .eq("id", clientId);
+
+  if (error) {
+    throw new Error(`Failed to update client last run: ${error.message}`);
+  }
+}

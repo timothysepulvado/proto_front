@@ -1,8 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, RunMode, RunStage, StageStatus } from "./types.js";
-import { STAGE_DEFINITIONS } from "./types.js";
+import type { Run, StageStatus } from "./types.js";
 import { updateRun, addLog, updateClientLastRun, addArtifact } from "./db.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -22,7 +21,7 @@ function getPythonPath(venvPath: string): string {
   return path.join(venvPath, "bin", "python");
 }
 
-function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
+async function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
   const log = {
     runId,
     timestamp: new Date().toISOString(),
@@ -30,11 +29,11 @@ function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" 
     level,
     message,
   };
-  addLog(log);
+  await addLog(log);
   runEvents.emit(`log:${runId}`, log);
 }
 
-function updateStageStatus(run: Run, stageId: string, status: StageStatus, error?: string): Run {
+async function updateStageStatus(run: Run, stageId: string, status: StageStatus, error?: string): Promise<Run> {
   const stages = run.stages.map((s) =>
     s.id === stageId
       ? {
@@ -46,7 +45,8 @@ function updateStageStatus(run: Run, stageId: string, status: StageStatus, error
         }
       : s
   );
-  return updateRun(run.runId, { stages }) || run;
+  const updated = await updateRun(run.runId, { stages });
+  return updated || run;
 }
 
 async function runCommand(
@@ -58,7 +58,7 @@ async function runCommand(
   env?: Record<string, string>
 ): Promise<{ success: boolean; output: string }> {
   return new Promise((resolve) => {
-    emitLog(runId, stage, "info", `Executing: ${command} ${args.join(" ")}`);
+    emitLog(runId, stage, "info", `Executing: ${command} ${args.join(" ")}`).catch(console.error);
 
     const proc = spawn(command, args, {
       cwd,
@@ -74,7 +74,7 @@ async function runCommand(
       const text = data.toString();
       output += text;
       text.split("\n").filter(Boolean).forEach((line) => {
-        emitLog(runId, stage, "info", line);
+        emitLog(runId, stage, "info", line).catch(console.error);
       });
     });
 
@@ -82,24 +82,24 @@ async function runCommand(
       const text = data.toString();
       output += text;
       text.split("\n").filter(Boolean).forEach((line) => {
-        emitLog(runId, stage, "warn", line);
+        emitLog(runId, stage, "warn", line).catch(console.error);
       });
     });
 
-    proc.on("close", (code) => {
+    proc.on("close", async (code) => {
       activeProcesses.delete(runId);
       if (code === 0) {
-        emitLog(runId, stage, "info", `Stage completed successfully`);
+        await emitLog(runId, stage, "info", `Stage completed successfully`);
         resolve({ success: true, output });
       } else {
-        emitLog(runId, stage, "error", `Stage failed with exit code ${code}`);
+        await emitLog(runId, stage, "error", `Stage failed with exit code ${code}`);
         resolve({ success: false, output });
       }
     });
 
-    proc.on("error", (err) => {
+    proc.on("error", async (err) => {
       activeProcesses.delete(runId);
-      emitLog(runId, stage, "error", `Process error: ${err.message}`);
+      await emitLog(runId, stage, "error", `Process error: ${err.message}`);
       resolve({ success: false, output: err.message });
     });
   });
@@ -118,8 +118,8 @@ function directoryExists(dirPath: string): boolean {
 // Stage executors
 async function executeIngestStage(run: Run): Promise<boolean> {
   const stageId = "ingest";
-  run = updateStageStatus(run, stageId, "running");
-  emitLog(run.runId, stageId, "info", "Starting Brand Memory ingest and index...");
+  run = await updateStageStatus(run, stageId, "running");
+  await emitLog(run.runId, stageId, "info", "Starting Brand Memory ingest and index...");
 
   const brandName = run.clientId.replace("client_", "");
 
@@ -133,25 +133,25 @@ async function executeIngestStage(run: Run): Promise<boolean> {
   let imagesPath = possiblePaths.find(p => directoryExists(p));
 
   if (!imagesPath) {
-    emitLog(run.runId, stageId, "warn", `No data directory found for brand '${brandName}'`);
-    emitLog(run.runId, stageId, "warn", `Searched: ${possiblePaths.join(", ")}`);
-    emitLog(run.runId, stageId, "info", "Running in demo mode - simulating ingest...");
+    await emitLog(run.runId, stageId, "warn", `No data directory found for brand '${brandName}'`);
+    await emitLog(run.runId, stageId, "warn", `Searched: ${possiblePaths.join(", ")}`);
+    await emitLog(run.runId, stageId, "info", "Running in demo mode - simulating ingest...");
 
     // Demo mode - simulate some activity
     await new Promise(r => setTimeout(r, 1500));
-    emitLog(run.runId, stageId, "info", `[DEMO] Scanning brand assets for ${brandName}...`);
+    await emitLog(run.runId, stageId, "info", `[DEMO] Scanning brand assets for ${brandName}...`);
     await new Promise(r => setTimeout(r, 1000));
-    emitLog(run.runId, stageId, "info", "[DEMO] Generating CLIP embeddings...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Generating CLIP embeddings...");
     await new Promise(r => setTimeout(r, 1200));
-    emitLog(run.runId, stageId, "info", "[DEMO] Indexing to vector store...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Indexing to vector store...");
     await new Promise(r => setTimeout(r, 800));
-    emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed successfully");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed successfully");
 
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 
-  emitLog(run.runId, stageId, "info", `Using images from: ${imagesPath}`);
+  await emitLog(run.runId, stageId, "info", `Using images from: ${imagesPath}`);
 
   // Run brand_dna_indexer.py
   const pythonPath = getPythonPath(BRAND_LINTER_VENV);
@@ -168,21 +168,21 @@ async function executeIngestStage(run: Run): Promise<boolean> {
   );
 
   if (result.success) {
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
-    emitLog(run.runId, stageId, "warn", "Real indexer failed - falling back to demo mode");
-    emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed (simulated)");
-    run = updateStageStatus(run, stageId, "completed");
+    await emitLog(run.runId, stageId, "warn", "Real indexer failed - falling back to demo mode");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed (simulated)");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 }
 
 async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_images";
-  run = updateStageStatus(run, stageId, "running");
+  run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
-  emitLog(run.runId, stageId, "info", "Starting image generation with Temp-gen...");
+  await emitLog(run.runId, stageId, "info", "Starting image generation with Temp-gen...");
 
   const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
@@ -203,7 +203,7 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
 
   if (result.success) {
     // Add artifact
-    addArtifact({
+    await addArtifact({
       id: uuidv4(),
       runId: run.runId,
       type: "image",
@@ -211,20 +211,20 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
       path: path.join(outputDir, "generated.png"),
       createdAt: new Date().toISOString(),
     });
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
     // Demo fallback
-    emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
-    emitLog(run.runId, stageId, "info", "[DEMO] Initializing Gemini image model...");
+    await emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Initializing Gemini image model...");
     await new Promise(r => setTimeout(r, 1200));
-    emitLog(run.runId, stageId, "info", `[DEMO] Generating brand image for ${brandName}...`);
+    await emitLog(run.runId, stageId, "info", `[DEMO] Generating brand image for ${brandName}...`);
     await new Promise(r => setTimeout(r, 2000));
-    emitLog(run.runId, stageId, "info", "[DEMO] Applying brand style transfer...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Applying brand style transfer...");
     await new Promise(r => setTimeout(r, 1500));
-    emitLog(run.runId, stageId, "info", "[DEMO] Image generated successfully");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Image generated successfully");
 
-    addArtifact({
+    await addArtifact({
       id: uuidv4(),
       runId: run.runId,
       type: "image",
@@ -232,16 +232,16 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
       path: path.join(outputDir, "generated.png"),
       createdAt: new Date().toISOString(),
     });
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 }
 
 async function executeGenerateVideoStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_video";
-  run = updateStageStatus(run, stageId, "running");
+  run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
-  emitLog(run.runId, stageId, "info", "Starting video generation with Temp-gen...");
+  await emitLog(run.runId, stageId, "info", "Starting video generation with Temp-gen...");
 
   const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
@@ -261,7 +261,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
   );
 
   if (result.success) {
-    addArtifact({
+    await addArtifact({
       id: uuidv4(),
       runId: run.runId,
       type: "video",
@@ -269,22 +269,22 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
       path: path.join(outputDir, "generated.mp4"),
       createdAt: new Date().toISOString(),
     });
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
     // Demo fallback
-    emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
-    emitLog(run.runId, stageId, "info", "[DEMO] Initializing Veo video model...");
+    await emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Initializing Veo video model...");
     await new Promise(r => setTimeout(r, 1500));
-    emitLog(run.runId, stageId, "info", `[DEMO] Generating brand video for ${brandName}...`);
+    await emitLog(run.runId, stageId, "info", `[DEMO] Generating brand video for ${brandName}...`);
     await new Promise(r => setTimeout(r, 3000));
-    emitLog(run.runId, stageId, "info", "[DEMO] Rendering frames...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Rendering frames...");
     await new Promise(r => setTimeout(r, 2000));
-    emitLog(run.runId, stageId, "info", "[DEMO] Encoding video...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Encoding video...");
     await new Promise(r => setTimeout(r, 1500));
-    emitLog(run.runId, stageId, "info", "[DEMO] Video generated successfully");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Video generated successfully");
 
-    addArtifact({
+    await addArtifact({
       id: uuidv4(),
       runId: run.runId,
       type: "video",
@@ -292,16 +292,16 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
       path: path.join(outputDir, "generated.mp4"),
       createdAt: new Date().toISOString(),
     });
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 }
 
 async function executeDriftStage(run: Run): Promise<boolean> {
   const stageId = "drift";
-  run = updateStageStatus(run, stageId, "running");
+  run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
-  emitLog(run.runId, stageId, "info", "Starting Brand Drift check...");
+  await emitLog(run.runId, stageId, "info", "Starting Brand Drift check...");
 
   // Check if drift tool exists
   const pythonPath = getPythonPath(BRAND_LINTER_VENV);
@@ -320,44 +320,44 @@ async function executeDriftStage(run: Run): Promise<boolean> {
   );
 
   if (result.success) {
-    run = updateStageStatus(run, stageId, "completed");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
     // Demo fallback
-    emitLog(run.runId, stageId, "warn", "Real drift analyzer failed - falling back to demo mode");
-    emitLog(run.runId, stageId, "info", "[DEMO] Loading brand reference embeddings...");
+    await emitLog(run.runId, stageId, "warn", "Real drift analyzer failed - falling back to demo mode");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Loading brand reference embeddings...");
     await new Promise(r => setTimeout(r, 1000));
-    emitLog(run.runId, stageId, "info", "[DEMO] Computing similarity scores...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Computing similarity scores...");
     await new Promise(r => setTimeout(r, 1200));
-    emitLog(run.runId, stageId, "info", `[DEMO] Brand alignment score: 0.87 for ${brandName}`);
+    await emitLog(run.runId, stageId, "info", `[DEMO] Brand alignment score: 0.87 for ${brandName}`);
     await new Promise(r => setTimeout(r, 800));
-    emitLog(run.runId, stageId, "info", "[DEMO] Drift check passed - within tolerance");
-    run = updateStageStatus(run, stageId, "completed");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Drift check passed - within tolerance");
+    run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 }
 
 async function executeHITLStage(run: Run): Promise<boolean> {
   const stageId = "hitl";
-  run = updateStageStatus(run, stageId, "running");
-  emitLog(run.runId, stageId, "info", "HITL gate - awaiting review...");
+  run = await updateStageStatus(run, stageId, "running");
+  await emitLog(run.runId, stageId, "info", "HITL gate - awaiting review...");
 
-  // For now, mark as requiring review
-  updateRun(run.runId, { status: "needs_review", hitlRequired: true });
-  run = updateStageStatus(run, stageId, "completed");
+  // Mark as requiring review
+  await updateRun(run.runId, { status: "needs_review", hitlRequired: true });
+  run = await updateStageStatus(run, stageId, "completed");
 
   return true;
 }
 
 async function executeExportStage(run: Run): Promise<boolean> {
   const stageId = "export";
-  run = updateStageStatus(run, stageId, "running");
-  emitLog(run.runId, stageId, "info", "Preparing export package...");
+  run = await updateStageStatus(run, stageId, "running");
+  await emitLog(run.runId, stageId, "info", "Preparing export package...");
 
   // Create a placeholder export artifact
   const exportPath = path.join(TEMP_GEN_PATH, "outputs", run.runId, "export_package.zip");
 
-  addArtifact({
+  await addArtifact({
     id: uuidv4(),
     runId: run.runId,
     type: "package",
@@ -366,21 +366,22 @@ async function executeExportStage(run: Run): Promise<boolean> {
     createdAt: new Date().toISOString(),
   });
 
-  emitLog(run.runId, stageId, "info", "Export package prepared (placeholder)");
-  run = updateStageStatus(run, stageId, "completed");
+  await emitLog(run.runId, stageId, "info", "Export package prepared (placeholder)");
+  run = await updateStageStatus(run, stageId, "completed");
 
   return true;
 }
 
 // Main run executor
 export async function executeRun(run: Run): Promise<void> {
-  emitLog(run.runId, "system", "info", `Starting run ${run.runId} in mode: ${run.mode}`);
+  await emitLog(run.runId, "system", "info", `Starting run ${run.runId} in mode: ${run.mode}`);
 
   // Update run status to running
-  run = updateRun(run.runId, {
+  const updatedRun = await updateRun(run.runId, {
     status: "running",
     startedAt: new Date().toISOString(),
-  }) || run;
+  });
+  run = updatedRun || run;
 
   let success = true;
 
@@ -417,35 +418,35 @@ export async function executeRun(run: Run): Promise<void> {
 
     // Finalize run
     const finalStatus = success ? (run.hitlRequired ? "needs_review" : "completed") : "failed";
-    updateRun(run.runId, {
+    await updateRun(run.runId, {
       status: finalStatus,
       completedAt: new Date().toISOString(),
     });
-    updateClientLastRun(run.clientId, run.runId, finalStatus);
+    await updateClientLastRun(run.clientId, run.runId, finalStatus);
 
-    emitLog(run.runId, "system", "info", `Run ${run.runId} finished with status: ${finalStatus}`);
+    await emitLog(run.runId, "system", "info", `Run ${run.runId} finished with status: ${finalStatus}`);
     runEvents.emit(`complete:${run.runId}`, { runId: run.runId, status: finalStatus });
 
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    emitLog(run.runId, "system", "error", `Run failed: ${errorMsg}`);
-    updateRun(run.runId, {
+    await emitLog(run.runId, "system", "error", `Run failed: ${errorMsg}`);
+    await updateRun(run.runId, {
       status: "failed",
       error: errorMsg,
       completedAt: new Date().toISOString(),
     });
-    updateClientLastRun(run.clientId, run.runId, "failed");
+    await updateClientLastRun(run.clientId, run.runId, "failed");
     runEvents.emit(`complete:${run.runId}`, { runId: run.runId, status: "failed", error: errorMsg });
   }
 }
 
-export function cancelRun(runId: string): boolean {
+export async function cancelRun(runId: string): Promise<boolean> {
   const proc = activeProcesses.get(runId);
   if (proc) {
     proc.kill("SIGTERM");
     activeProcesses.delete(runId);
-    emitLog(runId, "system", "warn", "Run cancelled by user");
-    updateRun(runId, { status: "cancelled", completedAt: new Date().toISOString() });
+    await emitLog(runId, "system", "warn", "Run cancelled by user");
+    await updateRun(runId, { status: "cancelled", completedAt: new Date().toISOString() });
     return true;
   }
   return false;
