@@ -1,0 +1,21 @@
+{
+  "brand_slug": "lilydale",
+  "display_name": "Lilydale",
+  "pinecone_namespace": "lilydale",
+  "thresholds": {
+    "auto_pass_z": 1.0,
+    "auto_fail_z": -1.5,
+    "gemini_weight": 0.6,
+    "cohere_weight": 0.4
+  },
+  "allowed_colors": [],
+  "disallowed_patterns": [],
+  "indexes": {
+    "brand-dna-gemini768": "lilydale-brand-dna-gemini768",
+    "brand-dna-cohere": "lilydale-brand-dna-cohere",
+    "core-gemini768": "lilydale-core-gemini768",
+    "core-cohere": "lilydale-core-cohere1536",
+    "campaign-gemini768": "lilydale-campaign-gemini768",
+    "campaign-cohere": "lilydale-campaign-cohere1536"
+  }
+}

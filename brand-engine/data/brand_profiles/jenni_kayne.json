@@ -1,0 +1,35 @@
+{
+  "brand_slug": "jenni_kayne",
+  "display_name": "Jenni Kayne",
+  "pinecone_namespace": "jenni_kayne",
+  "thresholds": {
+    "auto_pass_z": 1.0,
+    "auto_fail_z": -1.5,
+    "gemini_weight": 0.6,
+    "cohere_weight": 0.4
+  },
+  "allowed_colors": [
+    "#F5F0EB",
+    "#E8DDD3",
+    "#C4B5A5",
+    "#8B7D6B",
+    "#4A3F35",
+    "#2C2420",
+    "#D4C5B2",
+    "#F8F6F3"
+  ],
+  "disallowed_patterns": [
+    "neon colors",
+    "high saturation",
+    "cluttered compositions",
+    "loud typography"
+  ],
+  "indexes": {
+    "brand-dna-gemini768": "jenni_kayne-brand-dna-gemini768",
+    "brand-dna-cohere": "jenni_kayne-brand-dna-cohere",
+    "core-gemini768": "jenni_kayne-core-gemini768",
+    "core-cohere": "jenni_kayne-core-cohere1536",
+    "campaign-gemini768": "jenni_kayne-campaign-gemini768",
+    "campaign-cohere": "jenni_kayne-campaign-cohere1536"
+  }
+}
