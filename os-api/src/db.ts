@@ -1,11 +1,12 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, HitlDecision, RunStatus, RunStage } from "./types.js";
+import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, RunStatus, RunStage } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
 interface DbRun {
   id: string;
   client_id: string;
+  campaign_id: string | null;
   mode: string;
   status: string;
   stages: RunStage[];
@@ -54,6 +55,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
   return {
     runId: dbRun.id,
     clientId: dbRun.client_id,
+    campaignId: dbRun.campaign_id ?? undefined,
     mode: dbRun.mode as Run["mode"],
     status: dbRun.status as Run["status"],
     stages: dbRun.stages,
@@ -123,6 +125,7 @@ export async function createRun(run: Run): Promise<Run> {
     .insert({
       id: run.runId,
       client_id: run.clientId,
+      campaign_id: run.campaignId ?? null,
       mode: run.mode,
       status: run.status,
       stages: run.stages,
@@ -393,4 +396,92 @@ export async function getHitlDecisionsByRun(runId: string): Promise<HitlDecision
   }
 
   return (data as DbHitlDecision[]).map(mapDbHitlDecisionToHitlDecision);
+}
+
+// ============ Drift Metric Operations ============
+
+export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> {
+  const { data, error } = await supabase
+    .from("drift_metrics")
+    .insert({
+      run_id: metric.runId,
+      artifact_id: metric.artifactId ?? null,
+      clip_z: metric.clipZ ?? null,
+      e5_z: metric.e5Z ?? null,
+      cohere_z: metric.cohereZ ?? null,
+      fused_z: metric.fusedZ ?? null,
+      clip_raw: metric.clipRaw ?? null,
+      e5_raw: metric.e5Raw ?? null,
+      cohere_raw: metric.cohereRaw ?? null,
+      gate_decision: metric.gateDecision ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to add drift metric: ${error.message}`);
+  }
+
+  return {
+    id: data.id,
+    runId: data.run_id,
+    artifactId: data.artifact_id ?? undefined,
+    clipZ: data.clip_z ?? undefined,
+    e5Z: data.e5_z ?? undefined,
+    cohereZ: data.cohere_z ?? undefined,
+    fusedZ: data.fused_z ?? undefined,
+    clipRaw: data.clip_raw ?? undefined,
+    e5Raw: data.e5_raw ?? undefined,
+    cohereRaw: data.cohere_raw ?? undefined,
+    gateDecision: data.gate_decision ?? undefined,
+    createdAt: data.created_at,
+  };
+}
+
+// ============ Drift Alert Operations ============
+
+export async function addDriftAlert(alert: DriftAlert): Promise<DriftAlert> {
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .insert({
+      client_id: alert.clientId,
+      run_id: alert.runId,
+      severity: alert.severity,
+      message: alert.message,
+      fused_z: alert.fusedZ ?? null,
+      acknowledged: false,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to add drift alert: ${error.message}`);
+  }
+
+  return {
+    id: data.id,
+    clientId: data.client_id,
+    runId: data.run_id,
+    severity: data.severity,
+    message: data.message,
+    fusedZ: data.fused_z ?? undefined,
+    acknowledged: data.acknowledged,
+    createdAt: data.created_at,
+  };
+}
+
+// ============ Campaign Operations ============
+
+export async function getCampaign(campaignId: string): Promise<Record<string, unknown> | null> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get campaign: ${error.message}`);
+  }
+
+  return data;
 }

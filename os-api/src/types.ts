@@ -16,6 +16,7 @@ export interface RunStage {
 export interface Run {
   runId: string;
   clientId: string;
+  campaignId?: string;
   mode: RunMode;
   status: RunStatus;
   stages: RunStage[];
@@ -26,6 +27,32 @@ export interface Run {
   error?: string;
   hitlRequired?: boolean;
   hitlNotes?: string;
+}
+
+export interface DriftMetric {
+  id?: string;
+  runId: string;
+  artifactId?: string;
+  clipZ?: number;
+  e5Z?: number;
+  cohereZ?: number;
+  fusedZ?: number;
+  clipRaw?: number;
+  e5Raw?: number;
+  cohereRaw?: number;
+  gateDecision?: string;
+  createdAt?: string;
+}
+
+export interface DriftAlert {
+  id?: string;
+  clientId: string;
+  runId: string;
+  severity: "warn" | "error" | "critical";
+  message: string;
+  fusedZ?: number;
+  acknowledged?: boolean;
+  createdAt?: string;
 }
 
 export interface RunLog {
@@ -76,6 +103,7 @@ export interface ReviewPayload {
 
 export interface RunCreatePayload {
   mode: RunMode;
+  campaignId?: string;
   inputs?: Record<string, unknown>;
 }
 

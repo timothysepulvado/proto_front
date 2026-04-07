@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
 import type { Run, StageStatus } from "./types.js";
-import { updateRun, addLog, updateClientLastRun, addArtifact } from "./db.js";
+import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getCampaign } from "./db.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation
@@ -187,6 +187,20 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
 
+  // Build prompt — use campaign prompt if available, else fallback
+  let prompt = `Brand campaign image for ${brandName}`;
+  if (run.campaignId) {
+    try {
+      const campaign = await getCampaign(run.campaignId);
+      if (campaign?.prompt) {
+        prompt = campaign.prompt as string;
+        await emitLog(run.runId, stageId, "info", `Using campaign prompt: "${prompt.substring(0, 80)}..."`);
+      }
+    } catch {
+      await emitLog(run.runId, stageId, "warn", "Failed to load campaign prompt — using default");
+    }
+  }
+
   const result = await runCommand(
     run.runId,
     stageId,
@@ -195,7 +209,7 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
       "main.py",
       "nano",
       "generate",
-      "--prompt", `Brand campaign image for ${brandName}`,
+      "--prompt", prompt,
       "--output", path.join(outputDir, "generated.png"),
     ],
     TEMP_GEN_PATH
@@ -336,6 +350,8 @@ async function executeDriftStage(run: Run): Promise<boolean> {
   );
 
   if (result.success) {
+    // Try to parse drift report and record metrics
+    await recordDriftMetrics(run, brandName, stageId);
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
@@ -350,6 +366,56 @@ async function executeDriftStage(run: Run): Promise<boolean> {
     await emitLog(run.runId, stageId, "info", "[DEMO] Drift check passed - within tolerance");
     run = await updateStageStatus(run, stageId, "completed");
     return true;
+  }
+}
+
+// Parse drift report JSON and record metrics + alerts
+async function recordDriftMetrics(run: Run, brandName: string, stageId: string): Promise<void> {
+  const fs = require("fs");
+  const reportPath = path.join(BRAND_LINTER_PATH, "reports", `${run.runId}_analysis.json`);
+
+  try {
+    if (!fs.existsSync(reportPath)) {
+      await emitLog(run.runId, stageId, "warn", "No drift report JSON found — skipping metrics recording");
+      return;
+    }
+
+    const reportData = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
+
+    // Record drift metric
+    const metric = await addDriftMetric({
+      runId: run.runId,
+      clipZ: reportData.clip_z ?? reportData.rag_similarity ?? undefined,
+      e5Z: reportData.e5_z ?? undefined,
+      cohereZ: reportData.cohere_z ?? undefined,
+      fusedZ: reportData.fused_z ?? reportData.rag_similarity ?? undefined,
+      clipRaw: reportData.clip_raw_score ?? undefined,
+      e5Raw: reportData.e5_raw ?? undefined,
+      cohereRaw: reportData.cohere_raw ?? undefined,
+      gateDecision: reportData.gate_decision ?? undefined,
+    });
+
+    await emitLog(run.runId, stageId, "info",
+      `Drift metrics recorded: fused_z=${metric.fusedZ ?? "N/A"}, gate=${metric.gateDecision ?? "N/A"}`);
+
+    // Check for drift alert — trigger if fused_z is below threshold
+    const DRIFT_ALERT_THRESHOLD = 0.5;
+    const fusedZ = metric.fusedZ ?? metric.clipZ;
+    if (fusedZ !== undefined && fusedZ < DRIFT_ALERT_THRESHOLD) {
+      const severity = fusedZ < 0.3 ? "critical" : fusedZ < 0.4 ? "error" : "warn";
+      await addDriftAlert({
+        clientId: run.clientId,
+        runId: run.runId,
+        severity,
+        message: `Brand drift detected for ${brandName}: fused_z=${fusedZ.toFixed(3)} (threshold: ${DRIFT_ALERT_THRESHOLD})`,
+        fusedZ,
+      });
+      await emitLog(run.runId, stageId, "warn",
+        `Drift alert triggered (${severity}): fused_z=${fusedZ.toFixed(3)}`);
+    }
+  } catch (err) {
+    await emitLog(run.runId, stageId, "warn",
+      `Failed to record drift metrics: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

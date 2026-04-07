@@ -66,7 +66,7 @@ app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
 app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const { mode } = req.body as RunCreatePayload;
+    const { mode, campaignId } = req.body as RunCreatePayload;
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
@@ -88,6 +88,7 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
     const run: Run = {
       runId: uuidv4(),
       clientId,
+      campaignId,
       mode,
       status: "pending",
       stages,
