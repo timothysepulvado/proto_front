@@ -111,6 +111,7 @@ export interface RunCreatePayload {
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [
     { id: "ingest", name: "Ingest and Index" },
+    { id: "retrieve", name: "Retrieve Brand Context" },
     { id: "generate", name: "Generate" },
     { id: "drift", name: "Drift Check" },
     { id: "hitl", name: "HITL Gate" },

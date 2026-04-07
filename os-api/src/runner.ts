@@ -178,6 +178,100 @@ async function executeIngestStage(run: Run): Promise<boolean> {
   }
 }
 
+// Runtime context assembled by retrieve stage — used by generate
+let retrievalContext: Map<string, string> = new Map();
+
+async function executeRetrieveStage(run: Run): Promise<boolean> {
+  const stageId = "retrieve";
+  run = await updateStageStatus(run, stageId, "running");
+  const brandName = run.clientId.replace("client_", "");
+  await emitLog(run.runId, stageId, "info", "Retrieving brand context from Pinecone...");
+
+  const pythonPath = getPythonPath(BRAND_LINTER_VENV);
+
+  // Build the text query from campaign prompt or brand name
+  let textQuery = `Brand content for ${brandName}`;
+  if (run.campaignId) {
+    try {
+      const campaign = await getCampaign(run.campaignId);
+      if (campaign?.prompt) {
+        textQuery = campaign.prompt as string;
+        await emitLog(run.runId, stageId, "info", `Using campaign prompt as retrieval query`);
+      }
+    } catch {
+      await emitLog(run.runId, stageId, "warn", "Failed to load campaign — using default query");
+    }
+  }
+
+  // Call multimodal_retriever.py for brand context
+  const result = await runCommand(
+    run.runId,
+    stageId,
+    pythonPath,
+    [
+      "tools/multimodal_retriever.py",
+      "placeholder.png",  // image arg required but we're doing text-first retrieval
+      textQuery,
+      "--brand", brandName,
+      "--top-k", "5",
+      "--json",
+    ],
+    BRAND_LINTER_PATH
+  );
+
+  if (result.success) {
+    // Parse retrieval results and build context for generation
+    try {
+      // Extract JSON from output (may have logging before it)
+      const jsonMatch = result.output.match(/\{[\s\S]*\}$/);
+      if (jsonMatch) {
+        const retrievalData = JSON.parse(jsonMatch[0]);
+        const topResults = retrievalData.fusion?.top_results || [];
+
+        if (topResults.length > 0) {
+          // Build context string from top retrieved assets
+          const contextParts = topResults.slice(0, 5).map((r: { id?: string; fused_score?: number }) =>
+            `Reference: ${r.id ?? "unknown"} (score: ${(r.fused_score ?? 0).toFixed(3)})`
+          );
+          const brandContext = contextParts.join("; ");
+
+          // Store context for the generate stage
+          retrievalContext.set(run.runId, brandContext);
+
+          await emitLog(run.runId, stageId, "info",
+            `Retrieved ${topResults.length} reference assets from brand memory`);
+          await emitLog(run.runId, stageId, "info",
+            `Gate decision: ${retrievalData.fusion?.gate_decision ?? "N/A"}`);
+        } else {
+          await emitLog(run.runId, stageId, "warn", "No matching references found in brand memory");
+        }
+      }
+    } catch (err) {
+      await emitLog(run.runId, stageId, "warn",
+        `Could not parse retrieval results: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    run = await updateStageStatus(run, stageId, "completed");
+    return true;
+  } else {
+    // Demo fallback
+    await emitLog(run.runId, stageId, "warn", "Brand memory retrieval failed - falling back to demo mode");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Querying CLIP index...");
+    await new Promise(r => setTimeout(r, 800));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Querying E5 index...");
+    await new Promise(r => setTimeout(r, 600));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Querying Cohere index...");
+    await new Promise(r => setTimeout(r, 600));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Fusing scores across 3 modalities...");
+    await new Promise(r => setTimeout(r, 400));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Retrieved 5 reference assets (simulated)");
+
+    retrievalContext.set(run.runId, "[DEMO] warm neutral tones, minimal composition, tactile materials");
+    run = await updateStageStatus(run, stageId, "completed");
+    return true;
+  }
+}
+
 async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_images";
   run = await updateStageStatus(run, stageId, "running");
@@ -199,6 +293,15 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
     } catch {
       await emitLog(run.runId, stageId, "warn", "Failed to load campaign prompt — using default");
     }
+  }
+
+  // Enrich prompt with brand context from retrieve stage
+  const brandContext = retrievalContext.get(run.runId);
+  if (brandContext) {
+    prompt = `${prompt}. Brand context: ${brandContext}`;
+    await emitLog(run.runId, stageId, "info", "Prompt enriched with brand memory context");
+    // Clean up after use
+    retrievalContext.delete(run.runId);
   }
 
   const result = await runCommand(
@@ -471,6 +574,7 @@ export async function executeRun(run: Run): Promise<void> {
     switch (run.mode) {
       case "full":
         success = await executeIngestStage(run);
+        if (success) success = await executeRetrieveStage(run);
         if (success) success = await executeGenerateImagesStage(run);
         if (success) success = await executeDriftStage(run);
         if (success) success = await executeHITLStage(run);
