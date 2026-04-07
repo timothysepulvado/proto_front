@@ -1,5 +1,5 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, RunStatus, RunStage } from "./types.js";
+import type { Run, RunLog, Artifact, Client, HitlDecision, RunStatus, RunStage } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -332,4 +332,65 @@ export async function updateClientLastRun(clientId: string, runId: string, statu
   if (error) {
     throw new Error(`Failed to update client last run: ${error.message}`);
   }
+}
+
+// ============ HITL Decision Operations ============
+
+interface DbHitlDecision {
+  id: string;
+  run_id: string;
+  artifact_id: string | null;
+  decision: string;
+  notes: string | null;
+  grade_scores: Record<string, number> | null;
+  rejection_categories: string[] | null;
+  created_at: string;
+}
+
+function mapDbHitlDecisionToHitlDecision(db: DbHitlDecision): HitlDecision {
+  return {
+    id: db.id,
+    runId: db.run_id,
+    artifactId: db.artifact_id ?? undefined,
+    decision: db.decision as HitlDecision["decision"],
+    notes: db.notes ?? undefined,
+    gradeScores: db.grade_scores ?? undefined,
+    rejectionCategories: db.rejection_categories ?? undefined,
+    createdAt: db.created_at,
+  };
+}
+
+export async function addHitlDecision(decision: HitlDecision): Promise<HitlDecision> {
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .insert({
+      run_id: decision.runId,
+      artifact_id: decision.artifactId ?? null,
+      decision: decision.decision,
+      notes: decision.notes ?? null,
+      grade_scores: decision.gradeScores ?? null,
+      rejection_categories: decision.rejectionCategories ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to add HITL decision: ${error.message}`);
+  }
+
+  return mapDbHitlDecisionToHitlDecision(data as DbHitlDecision);
+}
+
+export async function getHitlDecisionsByRun(runId: string): Promise<HitlDecision[]> {
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to get HITL decisions: ${error.message}`);
+  }
+
+  return (data as DbHitlDecision[]).map(mapDbHitlDecisionToHitlDecision);
 }

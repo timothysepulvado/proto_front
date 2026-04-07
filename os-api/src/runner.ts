@@ -306,16 +306,32 @@ async function executeDriftStage(run: Run): Promise<boolean> {
   // Check if drift tool exists
   const pythonPath = getPythonPath(BRAND_LINTER_VENV);
 
-  // Try to run image_analyzer.py as a drift check proxy
+  // Build args for image_analyzer.py with brand profile for RAG similarity
+  const profilePath = path.join(BRAND_LINTER_PATH, "data", "brand_profiles", `${brandName}.json`);
+  const analyzerArgs = [
+    "tools/image_analyzer.py",
+    "--image", path.join(TEMP_GEN_PATH, "outputs", run.runId, "generated.png"),
+    "--json", path.join(BRAND_LINTER_PATH, "reports", `${run.runId}_analysis.json`),
+  ];
+
+  // Add --profile flag if brand profile exists (enables RAG similarity checking)
+  try {
+    const fs = require("fs");
+    if (fs.existsSync(profilePath)) {
+      analyzerArgs.push("--profile", profilePath);
+      await emitLog(run.runId, stageId, "info", `Using brand profile: ${profilePath}`);
+    } else {
+      await emitLog(run.runId, stageId, "warn", `No brand profile found at ${profilePath} — running pixel-only analysis`);
+    }
+  } catch {
+    await emitLog(run.runId, stageId, "warn", "Could not check for brand profile — running pixel-only analysis");
+  }
+
   const result = await runCommand(
     run.runId,
     stageId,
     pythonPath,
-    [
-      "tools/image_analyzer.py",
-      "--image", path.join(TEMP_GEN_PATH, "outputs", run.runId, "generated.png"),
-      "--json", path.join(BRAND_LINTER_PATH, "reports", `${run.runId}_analysis.json`),
-    ],
+    analyzerArgs,
     BRAND_LINTER_PATH
   );
 

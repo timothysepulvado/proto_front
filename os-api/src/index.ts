@@ -14,6 +14,8 @@ import {
   getArtifactsByRun,
   getClient,
   getAllClients,
+  addHitlDecision,
+  getHitlDecisionsByRun,
 } from "./db.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -214,12 +216,14 @@ app.get("/api/runs/:runId/review", async (req: Request, res: Response) => {
     }
 
     const artifacts = await getArtifactsByRun(runId);
+    const decisions = await getHitlDecisionsByRun(runId);
     res.json({
       runId,
       requiresReview: run.hitlRequired,
       status: run.status,
       notes: run.hitlNotes,
       artifacts,
+      decisions,
     });
   } catch (err) {
     console.error("GET /api/runs/:runId/review error:", err);
@@ -231,6 +235,8 @@ app.get("/api/runs/:runId/review", async (req: Request, res: Response) => {
 app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+    const { artifactId, gradeScores, notes } = req.body as ReviewPayload;
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
@@ -242,6 +248,15 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
       return;
     }
 
+    // Record the HITL decision in hitl_decisions table
+    const decision = await addHitlDecision({
+      runId,
+      artifactId,
+      decision: "approved",
+      notes: notes || "Approved",
+      gradeScores,
+    });
+
     const updated = await updateRun(runId, {
       status: "completed",
       hitlRequired: false,
@@ -249,7 +264,7 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
       completedAt: new Date().toISOString(),
     });
 
-    res.json(updated);
+    res.json({ ...updated, decision });
   } catch (err) {
     console.error("POST /api/runs/:runId/review/approve error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -260,7 +275,7 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
 app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
-    const { notes } = req.body as ReviewPayload;
+    const { notes, artifactId, gradeScores, rejectionCategories } = req.body as ReviewPayload;
 
     const run = await getRun(runId);
     if (!run) {
@@ -273,12 +288,22 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
       return;
     }
 
+    // Record the HITL decision in hitl_decisions table
+    const decision = await addHitlDecision({
+      runId,
+      artifactId,
+      decision: "rejected",
+      notes: notes || "Rejected",
+      gradeScores,
+      rejectionCategories,
+    });
+
     const updated = await updateRun(runId, {
       status: "blocked",
       hitlNotes: notes || "Rejected",
     });
 
-    res.json(updated);
+    res.json({ ...updated, decision });
   } catch (err) {
     console.error("POST /api/runs/:runId/review/reject error:", err);
     res.status(500).json({ error: "Internal server error" });

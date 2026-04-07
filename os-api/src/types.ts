@@ -56,8 +56,22 @@ export interface Artifact {
   createdAt: string;
 }
 
+export interface HitlDecision {
+  id?: string;
+  runId: string;
+  artifactId?: string;
+  decision: "approved" | "rejected" | "needs_revision";
+  notes?: string;
+  gradeScores?: Record<string, number>;
+  rejectionCategories?: string[];
+  createdAt?: string;
+}
+
 export interface ReviewPayload {
   notes?: string;
+  artifactId?: string;
+  gradeScores?: Record<string, number>;
+  rejectionCategories?: string[];
 }
 
 export interface RunCreatePayload {
