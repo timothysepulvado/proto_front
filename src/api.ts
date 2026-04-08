@@ -598,6 +598,190 @@ export function subscribeToPrompts(
   };
 }
 
+// ============ HITL Decision Operations ============
+
+export type HitlDecisionType = "approved" | "rejected" | "needs_revision";
+
+export interface HitlDecision {
+  id: string;
+  runId: string;
+  artifactId?: string;
+  decision: HitlDecisionType;
+  notes?: string;
+  gradeScores?: Record<string, number>;
+  rejectionCategories: string[];
+  createdAt: string;
+}
+
+export interface RejectionCategory {
+  id: string;
+  name: string;
+  description?: string;
+  negativePrompt?: string;
+  positiveGuidance?: string;
+}
+
+interface DbHitlDecision {
+  id: string;
+  run_id: string;
+  artifact_id: string | null;
+  decision: HitlDecisionType;
+  notes: string | null;
+  grade_scores: Record<string, number> | null;
+  rejection_categories: string[] | null;
+  created_at: string;
+}
+
+interface DbRejectionCategory {
+  id: string;
+  name: string;
+  description: string | null;
+  negative_prompt: string | null;
+  positive_guidance: string | null;
+}
+
+function mapDbHitlDecision(d: DbHitlDecision): HitlDecision {
+  return {
+    id: d.id,
+    runId: d.run_id,
+    artifactId: d.artifact_id ?? undefined,
+    decision: d.decision,
+    notes: d.notes ?? undefined,
+    gradeScores: d.grade_scores ?? undefined,
+    rejectionCategories: d.rejection_categories ?? [],
+    createdAt: d.created_at,
+  };
+}
+
+function mapDbRejectionCategory(d: DbRejectionCategory): RejectionCategory {
+  return {
+    id: d.id,
+    name: d.name,
+    description: d.description ?? undefined,
+    negativePrompt: d.negative_prompt ?? undefined,
+    positiveGuidance: d.positive_guidance ?? undefined,
+  };
+}
+
+// Get rejection categories taxonomy
+export async function getRejectionCategories(): Promise<RejectionCategory[]> {
+  const { data, error } = await supabase
+    .from("rejection_categories")
+    .select("*")
+    .order("name");
+
+  if (error) throw new Error(`Failed to get rejection categories: ${error.message}`);
+  return (data as DbRejectionCategory[]).map(mapDbRejectionCategory);
+}
+
+// Get artifacts for a run (for review queue)
+export async function getArtifactsForReview(runId: string): Promise<Artifact[]> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at");
+
+  if (error) throw new Error(`Failed to get artifacts for review: ${error.message}`);
+  return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
+}
+
+// Get existing HITL decisions for a run
+export async function getHitlDecisions(runId: string): Promise<HitlDecision[]> {
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at");
+
+  if (error) throw new Error(`Failed to get HITL decisions: ${error.message}`);
+  return (data as DbHitlDecision[]).map(mapDbHitlDecision);
+}
+
+// Submit a single HITL decision
+export async function submitHitlDecision(
+  runId: string,
+  decision: HitlDecisionType,
+  opts?: {
+    artifactId?: string;
+    notes?: string;
+    gradeScores?: Record<string, number>;
+    rejectionCategories?: string[];
+  }
+): Promise<HitlDecision> {
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .insert({
+      run_id: runId,
+      artifact_id: opts?.artifactId ?? null,
+      decision,
+      notes: opts?.notes ?? null,
+      grade_scores: opts?.gradeScores ?? null,
+      rejection_categories: opts?.rejectionCategories ?? [],
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to submit HITL decision: ${error.message}`);
+  return mapDbHitlDecision(data as DbHitlDecision);
+}
+
+// Batch submit HITL decisions for multiple artifacts
+export async function submitBatchHitlDecisions(
+  runId: string,
+  decisions: Array<{
+    artifactId?: string;
+    decision: HitlDecisionType;
+    notes?: string;
+    rejectionCategories?: string[];
+  }>
+): Promise<HitlDecision[]> {
+  const rows = decisions.map((d) => ({
+    run_id: runId,
+    artifact_id: d.artifactId ?? null,
+    decision: d.decision,
+    notes: d.notes ?? null,
+    grade_scores: null,
+    rejection_categories: d.rejectionCategories ?? [],
+  }));
+
+  const { data, error } = await supabase
+    .from("hitl_decisions")
+    .insert(rows)
+    .select();
+
+  if (error) throw new Error(`Failed to submit batch HITL decisions: ${error.message}`);
+  return (data as DbHitlDecision[]).map(mapDbHitlDecision);
+}
+
+// Subscribe to HITL decisions (realtime)
+export function subscribeToHitlDecisions(
+  runId: string,
+  onDecision: (decision: HitlDecision) => void
+): () => void {
+  const channel = supabase
+    .channel(`hitl_decisions:${runId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "hitl_decisions",
+        filter: `run_id=eq.${runId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onDecision(mapDbHitlDecision(payload.new as DbHitlDecision));
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // Health check
 export async function healthCheck(): Promise<boolean> {
   try {

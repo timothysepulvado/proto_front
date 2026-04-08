@@ -21,6 +21,7 @@ import hudData from "../hud.json";
 import type { HudRoot } from "./types/hud";
 import desktopBg from "./assets/desktop-bg.png";
 import noiseTexture from "./assets/noise.svg";
+import ReviewPanel from "./components/ReviewPanel";
 import {
   createRun,
   cancelRun,
@@ -270,6 +271,7 @@ export default function App() {
   const hasMovedRef = useRef(false);
   const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "insight">("memory");
   const [showRunMenu, setShowRunMenu] = useState(false);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
 
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
@@ -494,16 +496,23 @@ export default function App() {
     }
   }, [activeClient]);
 
-  const handleApproveReview = useCallback(async () => {
-    if (!currentRun) return;
-    try {
-      const updated = await approveReview(currentRun.runId);
-      setCurrentRun(updated);
-      const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-      setLogs((prev) => [...prev, { time: now, msg: "REVIEW_APPROVED", status: "OK" }]);
-    } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Failed to approve review");
+  const handleOpenReview = useCallback(() => {
+    setShowReviewPanel(true);
+  }, []);
+
+  const handleReviewComplete = useCallback(async () => {
+    setShowReviewPanel(false);
+    // Refresh run state
+    if (currentRun) {
+      try {
+        const updated = await approveReview(currentRun.runId);
+        setCurrentRun(updated);
+      } catch {
+        // Run may already be updated — just log
+      }
     }
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [...prev, { time: now, msg: "HITL_REVIEW_SUBMITTED", status: "OK" }]);
   }, [currentRun]);
 
   const handleExport = useCallback(async () => {
@@ -649,8 +658,8 @@ export default function App() {
           <OverlayEffects />
         </aside>
 
-        <div className="flex-1 flex flex-col relative">
-          <div className="pt-6 md:pt-8 px-8 md:px-10">
+        <div className="flex-1 flex flex-col relative min-h-0">
+          <div className="pt-2 px-8 md:px-10 shrink-0">
             <nav className="group h-9 w-full max-w-2xl ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative overflow-hidden">
               <TickMarks count={80} />
 
@@ -687,7 +696,7 @@ export default function App() {
             </nav>
           </div>
 
-          <main className="flex-1 p-6 md:p-10 flex flex-col items-start justify-start relative">
+          <main className="flex-1 p-6 md:p-10 flex flex-col items-start justify-start relative overflow-y-auto min-h-0">
             <div className="absolute inset-0 pointer-events-none opacity-20 flex items-center justify-center overflow-hidden">
               <div className="w-[800px] h-[800px] border border-cyan-500/10 rounded-full absolute animate-[ping_10s_linear_infinite]" />
               <div className="w-[1200px] h-[1200px] border border-cyan-500/5 rounded-full absolute" />
@@ -885,9 +894,9 @@ export default function App() {
                         {/* Review Button - only when HITL needed or run needs review */}
                         {(currentClient.alert || currentRun?.status === "needs_review") && (
                           <button
-                            onClick={handleApproveReview}
-                            disabled={!currentRun || currentRun.status !== "needs_review"}
-                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={handleOpenReview}
+                            disabled={!currentRun}
+                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
                           </button>
@@ -924,6 +933,15 @@ export default function App() {
           <OverlayEffects />
         </aside>
       </div>
+
+      {showReviewPanel && currentRun && currentClient && (
+        <ReviewPanel
+          runId={currentRun.runId}
+          clientName={currentClient.name}
+          onClose={() => setShowReviewPanel(false)}
+          onComplete={handleReviewComplete}
+        />
+      )}
 
       {showIntake && (
         <div className="fixed inset-0 z-[700] flex items-center justify-center p-6 bg-black/60 backdrop-blur-xl fade-zoom-in">
