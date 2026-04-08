@@ -782,6 +782,30 @@ export function subscribeToHitlDecisions(
   };
 }
 
+// Get runs pending HITL review for a client
+export async function getPendingReviewRuns(clientId: string): Promise<Run[]> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("status", "needs_review")
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get pending review runs: ${error.message}`);
+  return (data as DbRun[]).map(mapDbRunToRun);
+}
+
+// Get count of all pending reviews across all clients
+export async function getPendingReviewCount(): Promise<number> {
+  const { count, error } = await supabase
+    .from("runs")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "needs_review");
+
+  if (error) throw new Error(`Failed to get pending review count: ${error.message}`);
+  return count ?? 0;
+}
+
 // Health check
 export async function healthCheck(): Promise<boolean> {
   try {

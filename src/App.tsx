@@ -30,6 +30,8 @@ import {
   exportRun,
   getClients,
   subscribeToClients,
+  getPendingReviewRuns,
+  getPendingReviewCount,
   type Run,
   type RunLog,
   type RunMode,
@@ -272,6 +274,8 @@ export default function App() {
   const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "insight">("memory");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
+  const [globalPendingCount, setGlobalPendingCount] = useState(0);
 
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
@@ -318,6 +322,24 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  // Fetch pending HITL reviews for the active client + global count
+  useEffect(() => {
+    if (!activeClient) return;
+    async function loadPendingReviews() {
+      try {
+        const [clientRuns, count] = await Promise.all([
+          getPendingReviewRuns(activeClient),
+          getPendingReviewCount(),
+        ]);
+        setPendingReviewRuns(clientRuns);
+        setGlobalPendingCount(count);
+      } catch {
+        // Silently fail — non-critical
+      }
+    }
+    loadPendingReviews();
+  }, [activeClient]);
 
   const runMenuOptions = [
     { id: "full", label: "Full Pipeline", mode: "full" },
@@ -496,10 +518,6 @@ export default function App() {
     }
   }, [activeClient]);
 
-  const handleOpenReview = useCallback(() => {
-    setShowReviewPanel(true);
-  }, []);
-
   const handleReviewComplete = useCallback(async () => {
     setShowReviewPanel(false);
     // Refresh run state
@@ -513,7 +531,18 @@ export default function App() {
     }
     const now = new Date().toLocaleTimeString("en-US", { hour12: false });
     setLogs((prev) => [...prev, { time: now, msg: "HITL_REVIEW_SUBMITTED", status: "OK" }]);
-  }, [currentRun]);
+    // Refresh pending review counts
+    try {
+      const [clientRuns, count] = await Promise.all([
+        getPendingReviewRuns(activeClient),
+        getPendingReviewCount(),
+      ]);
+      setPendingReviewRuns(clientRuns);
+      setGlobalPendingCount(count);
+    } catch {
+      // Non-critical
+    }
+  }, [currentRun, activeClient]);
 
   const handleExport = useCallback(async () => {
     if (!currentRun) return;
@@ -676,6 +705,25 @@ export default function App() {
               </div>
 
               <div className="flex items-center space-x-4 z-10">
+                {/* HITL Review notification badge */}
+                {globalPendingCount > 0 && (
+                  <button
+                    onClick={() => {
+                      if (pendingReviewRuns.length > 0) {
+                        setCurrentRun(pendingReviewRuns[0]);
+                        setShowReviewPanel(true);
+                      }
+                    }}
+                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 hover:bg-amber-500/30 transition-all cursor-pointer group"
+                    title="Pending HITL reviews"
+                  >
+                    <Eye size={10} className="text-amber-400" />
+                    <span className="text-[8px] font-mono font-bold text-amber-400 tracking-wider">
+                      {globalPendingCount}
+                    </span>
+                    <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  </button>
+                )}
                 <div className="flex space-x-1.5 h-2 items-center">
                   {[1, 2, 3, 4, 5, 6].map((i) => (
                     <div
@@ -749,9 +797,52 @@ export default function App() {
                   <p className="text-[10px] font-mono text-white/40">
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
-                  <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
-                    Pillar: {activePillar}
-                  </p>
+
+                  {/* Brand Drift: show pending reviews */}
+                  {activePillar === "drift" && pendingReviewRuns.length > 0 ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
+                          <Eye size={10} className="mr-1.5" />
+                          {pendingReviewRuns.length} run{pendingReviewRuns.length !== 1 ? "s" : ""} awaiting review
+                        </span>
+                      </div>
+                      {pendingReviewRuns.map((run) => (
+                        <button
+                          key={run.runId}
+                          onClick={() => {
+                            setCurrentRun(run);
+                            setShowReviewPanel(true);
+                          }}
+                          className="w-full flex items-center justify-between p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all group text-left"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-mono text-white truncate">
+                              {run.mode.toUpperCase()} — {new Date(run.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                            </p>
+                            <p className="text-[8px] font-mono text-white/30 uppercase tracking-wider">
+                              Run {run.runId.slice(0, 8)}
+                            </p>
+                          </div>
+                          <div className="flex items-center space-x-2 shrink-0 ml-2">
+                            <span className="text-[8px] font-mono text-amber-400 uppercase px-2 py-0.5 border border-amber-500/30 bg-amber-500/10 rounded">
+                              Review
+                            </span>
+                            <ChevronDown size={12} className="text-white/20 -rotate-90 group-hover:text-amber-400 transition-colors" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : activePillar === "drift" && pendingReviewRuns.length === 0 ? (
+                    <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
+                      <ShieldCheck size={10} className="mr-1.5" />
+                      No pending reviews — all clear
+                    </p>
+                  ) : (
+                    <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
+                      Pillar: {activePillar}
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 gap-4">
@@ -891,14 +982,24 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Review Button - only when HITL needed or run needs review */}
-                        {(currentClient.alert || currentRun?.status === "needs_review") && (
+                        {/* Review Button - when HITL needed, active run needs review, or pending reviews exist */}
+                        {(currentClient.alert || currentRun?.status === "needs_review" || pendingReviewRuns.length > 0) && (
                           <button
-                            onClick={handleOpenReview}
-                            disabled={!currentRun}
-                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
+                            onClick={() => {
+                              // Use current run if it needs review, otherwise use first pending run
+                              if (!currentRun && pendingReviewRuns.length > 0) {
+                                setCurrentRun(pendingReviewRuns[0]);
+                              }
+                              setShowReviewPanel(true);
+                            }}
+                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
+                            {pendingReviewRuns.length > 0 && (
+                              <span className="ml-2 px-1.5 py-0.5 bg-black/20 rounded-lg text-[9px] font-mono">
+                                {pendingReviewRuns.length}
+                              </span>
+                            )}
                           </button>
                         )}
 
