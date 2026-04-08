@@ -8,7 +8,7 @@
 
 | Repo | Location | GitHub | Branch | Latest | Purpose |
 |------|----------|--------|--------|--------|---------|
-| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `cb1f2d0` | The product — HUD, runner, worker, brand-engine |
+| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `ced83f3` | The product — HUD, runner, worker, brand-engine |
 | **Brand_linter** | ~/Brand_linter/local_quick_setup | timothysepulvado/BDE | phase-3 | `74eebbd` | Legacy brand compliance CLI (being superseded by brand-engine) |
 | **BDE** | ~/BDE | timothysepulvado/BDE | main | `cbdc8b7` | Sidelined ML worker architecture (OOP absorbed into brand-engine) |
 | **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `921180a` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) |
