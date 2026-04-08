@@ -25,11 +25,11 @@
     "loud typography"
   ],
   "indexes": {
-    "brand-dna-gemini768": "jenni_kayne-brand-dna-gemini768",
-    "brand-dna-cohere": "jenni_kayne-brand-dna-cohere",
-    "core-gemini768": "jenni_kayne-core-gemini768",
-    "core-cohere": "jenni_kayne-core-cohere1536",
-    "campaign-gemini768": "jenni_kayne-campaign-gemini768",
-    "campaign-cohere": "jenni_kayne-campaign-cohere1536"
+    "brand-dna-gemini768": "jennikayne-brand-dna-gemini768",
+    "brand-dna-cohere": "jennikayne-brand-dna-cohere",
+    "core-gemini768": "jennikayne-core-gemini768",
+    "core-cohere": "jennikayne-core-cohere1536",
+    "campaign-gemini768": "jennikayne-campaign-gemini768",
+    "campaign-cohere": "jennikayne-campaign-cohere1536"
   }
 }

@@ -88,9 +88,9 @@ This audit reflects the current state.
 
 1. **HUD → Supabase → os-api** — frontend and backend share Supabase as single source of truth
 2. **Run pipeline** — ingest → retrieve → generate → drift → hitl → export (with campaign context)
-3. **Brand_linter CLI → Pinecone** — ingest images and query brand similarity with RAG
+3. **brand-engine → Pinecone** — Gemini Embed 2 (768D) + Cohere v4 Bedrock (1536D) dual-fusion. Runner calls sidecar at :8100, worker imports directly. *(Replaced Brand_linter CLI subprocess calls on April 8.)*
 4. **Temp-gen CLI** — generate images (Gemini) and video (Veo)
-5. **HITL feedback loop** — HUD → `hitl_decisions` table → Brand_linter `rl_trainer.py`
+5. **HITL feedback loop** — HUD → `hitl_decisions` table → brand-engine `trainer.py`
 6. **Drift monitoring** — runner records drift scores to `drift_metrics` and `drift_alerts`
 7. **Prompt evolution** — rejection feedback mutates prompts across retries with lineage
 8. **Supabase Realtime** — live updates on runs and run_logs

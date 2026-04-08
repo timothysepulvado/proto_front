@@ -1,6 +1,6 @@
 # BrandStudios OS — Roadmap & State of Play
 
-> Last updated: 2026-04-07 | Maintainer: Brandy
+> Last updated: 2026-04-08 | Maintainer: Brandy
 
 ---
 
@@ -25,15 +25,16 @@
 | Layer | Key Files | Status |
 |-------|-----------|--------|
 | HUD UI | `src/App.tsx`, `src/api.ts`, `src/lib/supabase.ts` | Working |
-| os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `supabase.ts` | Working — Supabase backend, 6 prompt evolution routes |
-| Worker | `worker/worker.py`, `executors/ingest.py`, `grading.py`, `prompt_evolver.py` | Working — polls Supabase, 4 executors |
-| Brand Engine | `brand-engine/brand_engine/core/` (7 modules) + `api/server.py` + `cli/main.py` | **Added, not yet wired** |
+| os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `supabase.ts` | Working — calls brand-engine sidecar via HTTP |
+| Worker | `worker/worker.py`, `executors/ingest.py`, `grading.py`, `prompt_evolver.py` | Working — imports brand_engine.core directly |
+| Brand Engine | `brand-engine/brand_engine/core/` (7 modules) + `api/server.py` + `cli/main.py` | **Wired — E2E verified** |
 | Migrations | `supabase/migrations/001-003` | Applied |
 | Data | `hud.json` | Source of truth for UI |
 
 **Pipeline (current):** `ingest → retrieve → generate → drift → hitl → export`
-- Runner still calls Brand_linter CLI via subprocess (legacy path)
-- Brand-engine SDK is committed but runner/worker rewiring is the next step
+- Runner calls brand-engine FastAPI sidecar at `:8100` (ingest, retrieve, drift stages)
+- Worker executors import `brand_engine.core` directly (Python-to-Python, no subprocess)
+- Generate stages still call Temp-gen CLI via subprocess (unchanged)
 
 **Supabase tables (15):** clients, runs, run_logs, artifacts, hitl_decisions, rejection_categories, campaigns, campaign_deliverables, campaign_memory, drift_metrics, drift_alerts, brand_baselines, prompt_templates, prompt_scores, prompt_evolution_log
 
@@ -55,18 +56,19 @@ BDE's OOP class hierarchy + Brand_linter's production features → merged into `
 | PostgreSQL job queue | BDE (dropped) | Supabase runs table covers this |
 | Express linter-api | BDE (dropped) | FastAPI sidecar in brand-engine |
 
-**Embedding upgrade:** CLIP (768D, broken on Python 3.14) + E5 (1024D) replaced by Gemini Embedding 2 (768D via MRL). Higher accuracy, natively multimodal, single API. Pinecone indexes reduced from 6 to 4 per brand.
+**Embedding upgrade:** CLIP (768D, broken on Python 3.14) + E5 (1024D) replaced by Gemini Embedding 2 (`gemini-embedding-2-preview`, 768D via MRL). Caption model: `gemini-2.5-flash`. Cohere v4 via AWS Bedrock (`us.cohere.embed-v4:0`, 1536D). Pinecone indexes reduced from 6 to 4 per brand. Old E5 and 512D indexes deleted (16/20 capacity used).
 
 ### Migration Status
 
 - [x] brand-engine/ SDK committed in proto_front (`cb1f2d0`)
 - [x] Brand profiles for all 3 brands (cylndr, jenni_kayne, lilydale)
-- [ ] Wire worker/executors to `import brand_engine.core` (replace subprocess)
-- [ ] Wire os-api/runner.ts to call FastAPI sidecar (replace Brand_linter CLI spawn)
-- [ ] Create Gemini Embedding 2 Pinecone indexes (4 per brand)
+- [x] Wire worker/executors to `import brand_engine.core` (replace subprocess)
+- [x] Wire os-api/runner.ts to call FastAPI sidecar (replace Brand_linter CLI spawn)
+- [x] Create Gemini Embedding 2 Pinecone indexes (brand-dna tier, 3 brands)
+- [x] Write ADR documenting consolidation decision (`~/agent-vault/adr/002`)
+- [x] Verify embedding pipeline E2E (Gemini Embed 2 + Cohere v4 Bedrock → Pinecone)
 - [ ] Re-embed existing assets through brand-engine indexer
-- [ ] Write ADR documenting consolidation decision
-- [ ] Verify end-to-end pipeline through brand-engine
+- [ ] Verify end-to-end pipeline through brand-engine (full run)
 - [ ] Deprecate Brand_linter subprocess calls in runner
 - [ ] Archive BDE main and Brand_linter phase-3 branches
 
@@ -85,29 +87,29 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 
 ## Architecture Coverage (vs Canonical 9-Phase Spec)
 
-| Phase | Coverage | Key Change (April 7) |
+| Phase | Coverage | Key Change (April 8) |
 |-------|----------|---------------------|
-| 1. Brand Onboarding | ~25% | Per-brand data dirs created |
-| 2. Memory Formation | ~20% | — |
+| 1. Brand Onboarding | ~30% | Per-brand data dirs + brand profiles wired |
+| 2. Memory Formation | ~35% | Gemini Embed 2 + Cohere v4 pipeline verified E2E |
 | 3. Project Activation | ~40% | Campaign prompt propagation in runner |
-| 4. Runtime Environment | ~35% | Memory retrieval stage added |
+| 4. Runtime Environment | ~40% | Memory retrieval via brand-engine /retrieve |
 | 5. Generation | ~50% | Prompt evolution system built |
-| 6. Governance & Drift | ~55% | --profile flag, drift metrics, HITL to Supabase |
+| 6. Governance & Drift | ~65% | brand-engine grader wired (dual-fusion + pixel analysis) |
 | 7. Asset Preparation | ~10% | — |
 | 8. Insight Loop | 0% | Not started |
 | 9. Governed Promotion | ~20% | RL trainer reads Supabase |
-| **Overall** | **~28%** | Up from 16% on March 31 |
+| **Overall** | **~32%** | Up from 28% on April 7 |
 
 ---
 
 ## What's Next (Priority Order)
 
-### Immediate — Brand Engine Wiring
-1. Wire `worker/executors/` to `import brand_engine.core` instead of subprocess calls
-2. Wire `os-api/src/runner.ts` to call brand-engine FastAPI sidecar instead of Brand_linter CLI
-3. Create Gemini Embedding 2 Pinecone indexes (4 per brand × 3 brands = 12 indexes)
-4. Re-embed existing assets through brand-engine indexer
-5. ADR documenting the consolidation decision
+### Immediate — Brand Engine Completion
+1. ~~Wire worker/executors~~ ✅
+2. ~~Wire runner.ts to sidecar~~ ✅
+3. ~~Create Gemini Embed 2 Pinecone indexes~~ ✅ (brand-dna tier)
+4. Re-embed existing JK assets (23 images) through brand-engine indexer
+5. ~~ADR~~ ✅ (`~/agent-vault/adr/002`)
 
 ### Near-term — Pipeline Completion
 6. HITL review UI in the HUD (currently no UI for approve/reject)

@@ -1,2 +1,13 @@
+# Worker base dependencies
 supabase>=2.0.0
 python-dotenv>=1.0.0
+
+# Brand-engine dependencies (for direct import in executors)
+# These are needed when brand_engine.core is imported instead of subprocess calls.
+# If not installed, executors fall back to demo mode gracefully.
+google-genai==1.14.0
+cohere==5.13.8
+pinecone==6.0.2
+pydantic==2.11.1
+Pillow==11.2.1
+numpy==2.2.4

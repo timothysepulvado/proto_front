@@ -5,13 +5,16 @@ Replaces the old CLIP + E5 + Cohere triple-model stack with:
 - Cohere v4 at 1536D — complementary semantic diversity
 
 Gemini subsumes both CLIP (visual) and E5 (text-semantic) in a single model.
+
+Cohere access supports two backends:
+1. AWS Bedrock (preferred) — uses existing AWS credentials, model: us.cohere.embed-v4:0
+2. Direct Cohere API — uses COHERE_API_KEY, model: embed-v4.0
 """
 
-import base64
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import cohere
 from google import genai
@@ -45,33 +48,71 @@ class EmbeddingClient:
       - Text-only embeddings at 1536D
       - For images: caption with Gemini first, then embed caption
       - Provides ensemble diversity from a different training corpus
+      - Accessed via AWS Bedrock (preferred) or direct API key
     """
 
-    GEMINI_MODEL = "gemini-embedding-exp-03-07"
+    GEMINI_MODEL = "gemini-embedding-2-preview"
     GEMINI_OUTPUT_DIM = 768
-    COHERE_MODEL = "embed-v4.0"
+
+    # Cohere model IDs differ by backend
+    COHERE_MODEL_DIRECT = "embed-v4.0"
+    COHERE_MODEL_BEDROCK = "us.cohere.embed-v4:0"
+
     COHERE_INPUT_TYPE_SEARCH_DOC = "search_document"
     COHERE_INPUT_TYPE_SEARCH_QUERY = "search_query"
-    GEMINI_CAPTION_MODEL = "gemini-2.0-flash"
+    GEMINI_CAPTION_MODEL = "gemini-2.5-flash"
 
     def __init__(self):
-        """Initialize API clients from environment variables."""
-        google_api_key = os.getenv("GOOGLE_GENAI_API_KEY")
+        """Initialize API clients from environment variables.
+
+        Gemini: requires GOOGLE_GENAI_API_KEY or GEMINI_API_KEY.
+        Cohere: prefers AWS Bedrock (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY),
+                falls back to direct API (COHERE_API_KEY).
+        """
+        # Gemini — accept either env var name
+        google_api_key = os.getenv("GOOGLE_GENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not google_api_key:
-            raise ValueError("GOOGLE_GENAI_API_KEY environment variable is required")
-
-        cohere_api_key = os.getenv("COHERE_API_KEY")
-        if not cohere_api_key:
-            raise ValueError("COHERE_API_KEY environment variable is required")
-
+            raise ValueError(
+                "GOOGLE_GENAI_API_KEY or GEMINI_API_KEY environment variable is required"
+            )
         self._genai_client = genai.Client(api_key=google_api_key)
-        self._cohere_client = cohere.Client(api_key=cohere_api_key)
+
+        # Cohere — prefer Bedrock, fall back to direct API
+        self._cohere_client: Union[cohere.BedrockClient, cohere.Client]
+        self._cohere_model: str
+
+        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        cohere_api_key = os.getenv("COHERE_API_KEY")
+
+        if aws_access_key and aws_secret_key:
+            aws_region = os.getenv("AWS_DEFAULT_REGION", os.getenv("AWS_REGION", "us-east-2"))
+            self._cohere_client = cohere.BedrockClient(
+                aws_access_key=aws_access_key,
+                aws_secret_key=aws_secret_key,
+                aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+                aws_region=aws_region,
+            )
+            self._cohere_model = self.COHERE_MODEL_BEDROCK
+            logger.info(
+                "Cohere initialized via AWS Bedrock (region=%s, model=%s)",
+                aws_region, self._cohere_model,
+            )
+        elif cohere_api_key:
+            self._cohere_client = cohere.Client(api_key=cohere_api_key)
+            self._cohere_model = self.COHERE_MODEL_DIRECT
+            logger.info("Cohere initialized via direct API (model=%s)", self._cohere_model)
+        else:
+            raise ValueError(
+                "Cohere credentials required: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY "
+                "(for Bedrock) or COHERE_API_KEY (for direct API)"
+            )
 
         logger.info(
             "EmbeddingClient initialized: Gemini=%s (%dD), Cohere=%s (1536D)",
             self.GEMINI_MODEL,
             self.GEMINI_OUTPUT_DIM,
-            self.COHERE_MODEL,
+            self._cohere_model,
         )
 
     def embed_image(self, image_path: str) -> EmbeddingResult:
@@ -155,7 +196,7 @@ class EmbeddingClient:
         """Embed text using Cohere v4 at 1536D."""
         result = self._cohere_client.embed(
             texts=[text],
-            model=self.COHERE_MODEL,
+            model=self._cohere_model,
             input_type=input_type,
             embedding_types=["float"],
         )
@@ -198,7 +239,7 @@ class EmbeddingClient:
         try:
             test = self._cohere_client.embed(
                 texts=["connectivity test"],
-                model=self.COHERE_MODEL,
+                model=self._cohere_model,
                 input_type="search_query",
                 embedding_types=["float"],
             )

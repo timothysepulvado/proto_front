@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-04-08
+
+### Added
+- **brand-engine wiring** — worker executors import `brand_engine.core` directly (no subprocess). runner.ts calls FastAPI sidecar via HTTP.
+- **Gemini Embedding 2** (`gemini-embedding-2-preview`) — replaces CLIP+E5. Natively multimodal, 768D via MRL.
+- **Cohere v4 via AWS Bedrock** (`us.cohere.embed-v4:0`, 1536D) — replaces direct Cohere API.
+- **`/retrieve` endpoint** on brand-engine sidecar — text-query-only dual-fusion retrieval for runner.ts.
+- **Pinecone indexes** — 3 Gemini 768D indexes (brand-dna tier, all brands) + 1 Cohere for lilydale.
+- `callBrandEngine<T>()` typed helper in runner.ts with abort timeout.
+- `.env` files for brand-engine, worker, os-api with all API keys configured.
+- `brand-engine/.venv` (Python 3.13) with all dependencies installed.
+- ADR-002: BDE + Brand_linter consolidation decision record.
+
+### Changed
+- `worker/executors/ingest.py` — rewrote from subprocess Brand_linter to BrandIndexer import.
+- `worker/executors/grading.py` — rewrote from subprocess Brand_linter to BrandGrader import.
+- `worker/config.py` — adds brand-engine to sys.path, brand asset paths.
+- `os-api/src/runner.ts` — ingest/retrieve/drift stages call brand-engine sidecar, not Brand_linter.
+- `brand-engine/core/embeddings.py` — supports both Bedrock and direct Cohere API, accepts GEMINI_API_KEY or GOOGLE_GENAI_API_KEY.
+- JK brand profile index names: `jenni_kayne-*` → `jennikayne-*` (matches existing Pinecone indexes).
+- Caption model: `gemini-2.0-flash` → `gemini-2.5-flash`.
+
+### Removed
+- 8 superseded Pinecone indexes (E5 1024D ×6, legacy 512D ×2). Capacity: 16/20.
+
 ## [0.5.0] - 2026-04-07
 
 ### Added

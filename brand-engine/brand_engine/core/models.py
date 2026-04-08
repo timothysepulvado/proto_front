@@ -134,6 +134,14 @@ class BrandProfile(BaseModel):
 
 # ============ API Request/Response Models ============
 
+class RetrieveRequest(BaseModel):
+    """API request for brand context retrieval (text query → Pinecone)."""
+    brand_slug: str
+    text_query: str
+    index_tier: str = Field(default="brand-dna", description="brand-dna | core | campaign")
+    top_k: int = Field(default=10, description="Number of results per index")
+
+
 class GradeRequest(BaseModel):
     """API request to grade an image."""
     image_path: str

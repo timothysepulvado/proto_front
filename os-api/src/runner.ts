@@ -13,9 +13,16 @@ export const runEvents = new EventEmitter();
 
 // Environment paths
 const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || "/Users/timothysepulvado/Temp-gen";
-const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulvado/Brand_linter/local_quick_setup";
 const TEMP_GEN_VENV = process.env.TEMP_GEN_VENV || path.join(TEMP_GEN_PATH, ".venv");
-const BRAND_LINTER_VENV = process.env.BRAND_LINTER_VENV || path.join(BRAND_LINTER_PATH, ".venv");
+
+// Brand Engine FastAPI sidecar (replaces Brand_linter subprocess calls)
+const BRAND_ENGINE_URL = process.env.BRAND_ENGINE_URL || "http://localhost:8100";
+
+// Legacy path — still used for BRAND_ASSETS_BASE default. Active stages call brand-engine sidecar.
+const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulvado/Brand_linter/local_quick_setup";
+
+// Brand asset base directory (where per-brand asset folders live)
+const BRAND_ASSETS_BASE = process.env.BRAND_ASSETS_BASE || path.join(BRAND_LINTER_PATH, "data");
 
 function getPythonPath(venvPath: string): string {
   return path.join(venvPath, "bin", "python");
@@ -115,6 +122,47 @@ function directoryExists(dirPath: string): boolean {
   }
 }
 
+// Brand Engine sidecar helper — POST JSON, parse response, handle errors
+async function callBrandEngine<T = unknown>(
+  endpoint: string,
+  body: Record<string, unknown>,
+  runId: string,
+  stage: string,
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  try {
+    await emitLog(runId, stage, "info", `Calling brand-engine: POST ${endpoint}`);
+    const response = await fetch(`${BRAND_ENGINE_URL}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000), // 2 minute timeout
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { ok: false, error: `HTTP ${response.status}: ${text}` };
+    }
+
+    const data = (await response.json()) as T;
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
+
+// Check brand-engine sidecar health
+async function checkBrandEngineHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${BRAND_ENGINE_URL}/health`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Stage executors
 async function executeIngestStage(run: Run): Promise<boolean> {
   const stageId = "ingest";
@@ -123,56 +171,65 @@ async function executeIngestStage(run: Run): Promise<boolean> {
 
   const brandName = run.clientId.replace("client_", "");
 
-  // Try multiple possible data paths
+  // Resolve images directory
   const possiblePaths = [
-    path.join(BRAND_LINTER_PATH, "data", brandName),
-    path.join(BRAND_LINTER_PATH, "data", "reference_images"),
-    path.join(BRAND_LINTER_PATH, "data", "reference_images", "lifestyle"),
+    path.join(BRAND_ASSETS_BASE, brandName, "reference_images"),
+    path.join(BRAND_ASSETS_BASE, brandName),
   ];
-
-  let imagesPath = possiblePaths.find(p => directoryExists(p));
+  const imagesPath = possiblePaths.find(p => directoryExists(p));
 
   if (!imagesPath) {
     await emitLog(run.runId, stageId, "warn", `No data directory found for brand '${brandName}'`);
     await emitLog(run.runId, stageId, "warn", `Searched: ${possiblePaths.join(", ")}`);
-    await emitLog(run.runId, stageId, "info", "Running in demo mode - simulating ingest...");
-
-    // Demo mode - simulate some activity
-    await new Promise(r => setTimeout(r, 1500));
-    await emitLog(run.runId, stageId, "info", `[DEMO] Scanning brand assets for ${brandName}...`);
-    await new Promise(r => setTimeout(r, 1000));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Generating CLIP embeddings...");
-    await new Promise(r => setTimeout(r, 1200));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Indexing to vector store...");
-    await new Promise(r => setTimeout(r, 800));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed successfully");
-
-    run = await updateStageStatus(run, stageId, "completed");
-    return true;
   }
 
-  await emitLog(run.runId, stageId, "info", `Using images from: ${imagesPath}`);
+  // Call brand-engine sidecar
+  type IngestResponse = {
+    brand_slug: string;
+    vectors_indexed: number;
+    gemini_index: string;
+    cohere_index: string;
+    errors: string[];
+  };
 
-  // Run brand_dna_indexer.py
-  const pythonPath = getPythonPath(BRAND_LINTER_VENV);
-  const result = await runCommand(
+  const result = await callBrandEngine<IngestResponse>(
+    "/ingest",
+    {
+      brand_slug: brandName,
+      images_dir: imagesPath || path.join(BRAND_ASSETS_BASE, brandName),
+      index_tier: "brand-dna",
+    },
     run.runId,
     stageId,
-    pythonPath,
-    [
-      "tools/brand_dna_indexer.py",
-      "--brand", brandName,
-      "--images", imagesPath,
-    ],
-    BRAND_LINTER_PATH
   );
 
-  if (result.success) {
+  if (result.ok) {
+    const { data } = result;
+    await emitLog(run.runId, stageId, "info",
+      `Indexed ${data.vectors_indexed} vectors into ${data.gemini_index} + ${data.cohere_index}`);
+
+    if (data.errors?.length) {
+      for (const err of data.errors) {
+        await emitLog(run.runId, stageId, "warn", `Ingest warning: ${err}`);
+      }
+    }
+
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
-    await emitLog(run.runId, stageId, "warn", "Real indexer failed - falling back to demo mode");
-    await emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed (simulated)");
+    // Demo fallback — sidecar unavailable or request failed
+    await emitLog(run.runId, stageId, "warn", `Brand-engine ingest failed: ${result.error}`);
+    await emitLog(run.runId, stageId, "info", "Falling back to demo mode...");
+
+    await new Promise(r => setTimeout(r, 1000));
+    await emitLog(run.runId, stageId, "info", `[DEMO] Scanning brand assets for ${brandName}...`);
+    await new Promise(r => setTimeout(r, 800));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Generating Gemini Embed 2 embeddings (768D)...");
+    await new Promise(r => setTimeout(r, 600));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Generating Cohere v4 embeddings (1536D)...");
+    await new Promise(r => setTimeout(r, 500));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Brand Memory indexed successfully");
+
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
@@ -187,83 +244,77 @@ async function executeRetrieveStage(run: Run): Promise<boolean> {
   const brandName = run.clientId.replace("client_", "");
   await emitLog(run.runId, stageId, "info", "Retrieving brand context from Pinecone...");
 
-  const pythonPath = getPythonPath(BRAND_LINTER_VENV);
-
-  // Build the text query from campaign prompt or brand name
+  // Build text query from campaign prompt or brand name
   let textQuery = `Brand content for ${brandName}`;
   if (run.campaignId) {
     try {
       const campaign = await getCampaign(run.campaignId);
       if (campaign?.prompt) {
         textQuery = campaign.prompt as string;
-        await emitLog(run.runId, stageId, "info", `Using campaign prompt as retrieval query`);
+        await emitLog(run.runId, stageId, "info", "Using campaign prompt as retrieval query");
       }
     } catch {
       await emitLog(run.runId, stageId, "warn", "Failed to load campaign — using default query");
     }
   }
 
-  // Call multimodal_retriever.py for brand context
-  const result = await runCommand(
+  // Call brand-engine sidecar /retrieve
+  type RetrieveResponse = {
+    gemini_score: { model: string; raw_score: number; z_score: number; top_k_ids: string[] };
+    cohere_score: { model: string; raw_score: number; z_score: number; top_k_ids: string[] };
+    combined_z: number;
+    gate_decision: string;
+    confidence: number;
+  };
+
+  const result = await callBrandEngine<RetrieveResponse>(
+    "/retrieve",
+    {
+      brand_slug: brandName,
+      text_query: textQuery,
+      index_tier: "brand-dna",
+      top_k: 5,
+    },
     run.runId,
     stageId,
-    pythonPath,
-    [
-      "tools/multimodal_retriever.py",
-      "placeholder.png",  // image arg required but we're doing text-first retrieval
-      textQuery,
-      "--brand", brandName,
-      "--top-k", "5",
-      "--json",
-    ],
-    BRAND_LINTER_PATH
   );
 
-  if (result.success) {
-    // Parse retrieval results and build context for generation
-    try {
-      // Extract JSON from output (may have logging before it)
-      const jsonMatch = result.output.match(/\{[\s\S]*\}$/);
-      if (jsonMatch) {
-        const retrievalData = JSON.parse(jsonMatch[0]);
-        const topResults = retrievalData.fusion?.top_results || [];
+  if (result.ok) {
+    const { data } = result;
+    const allIds = [...data.gemini_score.top_k_ids, ...data.cohere_score.top_k_ids];
+    const uniqueIds = [...new Set(allIds)];
 
-        if (topResults.length > 0) {
-          // Build context string from top retrieved assets
-          const contextParts = topResults.slice(0, 5).map((r: { id?: string; fused_score?: number }) =>
-            `Reference: ${r.id ?? "unknown"} (score: ${(r.fused_score ?? 0).toFixed(3)})`
-          );
-          const brandContext = contextParts.join("; ");
+    if (uniqueIds.length > 0) {
+      // Build context string from retrieved asset IDs and scores
+      const contextParts = uniqueIds.slice(0, 5).map(id => `ref:${id.substring(0, 12)}`);
+      const brandContext = `${contextParts.join("; ")} | combined_z=${data.combined_z.toFixed(3)}`;
 
-          // Store context for the generate stage
-          retrievalContext.set(run.runId, brandContext);
+      retrievalContext.set(run.runId, brandContext);
 
-          await emitLog(run.runId, stageId, "info",
-            `Retrieved ${topResults.length} reference assets from brand memory`);
-          await emitLog(run.runId, stageId, "info",
-            `Gate decision: ${retrievalData.fusion?.gate_decision ?? "N/A"}`);
-        } else {
-          await emitLog(run.runId, stageId, "warn", "No matching references found in brand memory");
-        }
-      }
-    } catch (err) {
-      await emitLog(run.runId, stageId, "warn",
-        `Could not parse retrieval results: ${err instanceof Error ? err.message : String(err)}`);
+      await emitLog(run.runId, stageId, "info",
+        `Retrieved ${uniqueIds.length} reference assets from brand memory`);
+      await emitLog(run.runId, stageId, "info",
+        `Gemini z=${data.gemini_score.z_score.toFixed(3)}, Cohere z=${data.cohere_score.z_score.toFixed(3)}`);
+      await emitLog(run.runId, stageId, "info",
+        `Gate decision: ${data.gate_decision} (confidence: ${data.confidence.toFixed(3)})`);
+    } else {
+      await emitLog(run.runId, stageId, "warn", "No matching references found in brand memory");
     }
 
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
-    // Demo fallback
-    await emitLog(run.runId, stageId, "warn", "Brand memory retrieval failed - falling back to demo mode");
-    await emitLog(run.runId, stageId, "info", "[DEMO] Querying CLIP index...");
-    await new Promise(r => setTimeout(r, 800));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Querying E5 index...");
+    // Demo fallback — sidecar unavailable
+    await emitLog(run.runId, stageId, "warn", `Brand-engine retrieval failed: ${result.error}`);
+    await emitLog(run.runId, stageId, "info", "Falling back to demo mode...");
+
     await new Promise(r => setTimeout(r, 600));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Querying Cohere index...");
-    await new Promise(r => setTimeout(r, 600));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Fusing scores across 3 modalities...");
+    await emitLog(run.runId, stageId, "info", "[DEMO] Querying Gemini Embed 2 index...");
+    await new Promise(r => setTimeout(r, 500));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Querying Cohere v4 index...");
     await new Promise(r => setTimeout(r, 400));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Fusing dual-modal scores...");
+    await new Promise(r => setTimeout(r, 300));
     await emitLog(run.runId, stageId, "info", "[DEMO] Retrieved 5 reference assets (simulated)");
 
     retrievalContext.set(run.runId, "[DEMO] warm neutral tones, minimal composition, tactile materials");
@@ -420,90 +471,128 @@ async function executeDriftStage(run: Run): Promise<boolean> {
   const brandName = run.clientId.replace("client_", "");
   await emitLog(run.runId, stageId, "info", "Starting Brand Drift check...");
 
-  // Check if drift tool exists
-  const pythonPath = getPythonPath(BRAND_LINTER_VENV);
+  const imagePath = path.join(TEMP_GEN_PATH, "outputs", run.runId, "generated.png");
 
-  // Build args for image_analyzer.py with brand profile for RAG similarity
-  const profilePath = path.join(BRAND_LINTER_PATH, "data", "brand_profiles", `${brandName}.json`);
-  const analyzerArgs = [
-    "tools/image_analyzer.py",
-    "--image", path.join(TEMP_GEN_PATH, "outputs", run.runId, "generated.png"),
-    "--json", path.join(BRAND_LINTER_PATH, "reports", `${run.runId}_analysis.json`),
-  ];
+  // Call brand-engine sidecar /drift
+  type DriftResponse = {
+    grade: {
+      fusion: {
+        gemini_score: { raw_score: number; z_score: number };
+        cohere_score: { raw_score: number; z_score: number };
+        combined_z: number;
+        gate_decision: string;
+        confidence: number;
+      };
+      pixel: {
+        saturation_mean: number;
+        clutter_score: number;
+        whitespace_ratio: number;
+        palette_match: number | null;
+      } | null;
+      gate_decision: string;
+      hitl_required: boolean;
+    };
+    baseline_combined_z: number;
+    drift_delta: number;
+    drift_severity: string;
+    alert_triggered: boolean;
+  };
 
-  // Add --profile flag if brand profile exists (enables RAG similarity checking)
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(profilePath)) {
-      analyzerArgs.push("--profile", profilePath);
-      await emitLog(run.runId, stageId, "info", `Using brand profile: ${profilePath}`);
-    } else {
-      await emitLog(run.runId, stageId, "warn", `No brand profile found at ${profilePath} — running pixel-only analysis`);
-    }
-  } catch {
-    await emitLog(run.runId, stageId, "warn", "Could not check for brand profile — running pixel-only analysis");
-  }
-
-  const result = await runCommand(
+  const result = await callBrandEngine<DriftResponse>(
+    "/drift",
+    {
+      brand_slug: brandName,
+      image_path: imagePath,
+      index_tier: "core",
+    },
     run.runId,
     stageId,
-    pythonPath,
-    analyzerArgs,
-    BRAND_LINTER_PATH
   );
 
-  if (result.success) {
-    // Try to parse drift report and record metrics
-    await recordDriftMetrics(run, brandName, stageId);
+  if (result.ok) {
+    const { data } = result;
+    const { grade, drift_delta, drift_severity, alert_triggered } = data;
+    const fusion = grade.fusion;
+
+    await emitLog(run.runId, stageId, "info",
+      `Drift severity: ${drift_severity} (delta: ${drift_delta.toFixed(3)})`);
+    await emitLog(run.runId, stageId, "info",
+      `Gate: ${grade.gate_decision} | Gemini z=${fusion.gemini_score.z_score.toFixed(3)}, Cohere z=${fusion.cohere_score.z_score.toFixed(3)}`);
+
+    if (grade.pixel) {
+      await emitLog(run.runId, stageId, "info",
+        `Pixel: sat=${grade.pixel.saturation_mean.toFixed(2)}, clutter=${grade.pixel.clutter_score.toFixed(2)}, whitespace=${grade.pixel.whitespace_ratio.toFixed(2)}`);
+    }
+
+    // Record drift metrics to Supabase
+    await recordDriftMetrics(run, brandName, stageId, data);
+
+    if (alert_triggered) {
+      await emitLog(run.runId, stageId, "warn",
+        `Drift alert triggered: severity=${drift_severity}, delta=${drift_delta.toFixed(3)}`);
+    }
+
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
     // Demo fallback
-    await emitLog(run.runId, stageId, "warn", "Real drift analyzer failed - falling back to demo mode");
-    await emitLog(run.runId, stageId, "info", "[DEMO] Loading brand reference embeddings...");
-    await new Promise(r => setTimeout(r, 1000));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Computing similarity scores...");
-    await new Promise(r => setTimeout(r, 1200));
-    await emitLog(run.runId, stageId, "info", `[DEMO] Brand alignment score: 0.87 for ${brandName}`);
+    await emitLog(run.runId, stageId, "warn", `Brand-engine drift check failed: ${result.error}`);
+    await emitLog(run.runId, stageId, "info", "Falling back to demo mode...");
+
     await new Promise(r => setTimeout(r, 800));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Loading brand reference embeddings...");
+    await new Promise(r => setTimeout(r, 600));
+    await emitLog(run.runId, stageId, "info", "[DEMO] Running dual-fusion drift analysis...");
+    await new Promise(r => setTimeout(r, 500));
+    await emitLog(run.runId, stageId, "info", `[DEMO] Brand alignment score: 0.87 for ${brandName}`);
+    await new Promise(r => setTimeout(r, 400));
     await emitLog(run.runId, stageId, "info", "[DEMO] Drift check passed - within tolerance");
+
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   }
 }
 
-// Parse drift report JSON and record metrics + alerts
-async function recordDriftMetrics(run: Run, brandName: string, stageId: string): Promise<void> {
-  const fs = require("fs");
-  const reportPath = path.join(BRAND_LINTER_PATH, "reports", `${run.runId}_analysis.json`);
-
+// Record drift metrics from brand-engine response to Supabase
+async function recordDriftMetrics(
+  run: Run,
+  brandName: string,
+  stageId: string,
+  driftData: {
+    grade: {
+      fusion: {
+        gemini_score: { raw_score: number; z_score: number };
+        cohere_score: { raw_score: number; z_score: number };
+        combined_z: number;
+        gate_decision: string;
+      };
+    };
+    drift_delta: number;
+    drift_severity: string;
+    alert_triggered: boolean;
+  },
+): Promise<void> {
   try {
-    if (!fs.existsSync(reportPath)) {
-      await emitLog(run.runId, stageId, "warn", "No drift report JSON found — skipping metrics recording");
-      return;
-    }
+    const fusion = driftData.grade.fusion;
 
-    const reportData = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
-
-    // Record drift metric
+    // Record drift metric — map new dual-fusion fields to existing table columns.
+    // Old columns (clipZ, e5Z) are repurposed: clipZ → gemini, e5Z → unused.
     const metric = await addDriftMetric({
       runId: run.runId,
-      clipZ: reportData.clip_z ?? reportData.rag_similarity ?? undefined,
-      e5Z: reportData.e5_z ?? undefined,
-      cohereZ: reportData.cohere_z ?? undefined,
-      fusedZ: reportData.fused_z ?? reportData.rag_similarity ?? undefined,
-      clipRaw: reportData.clip_raw_score ?? undefined,
-      e5Raw: reportData.e5_raw ?? undefined,
-      cohereRaw: reportData.cohere_raw ?? undefined,
-      gateDecision: reportData.gate_decision ?? undefined,
+      clipZ: fusion.gemini_score.z_score,     // gemini z-score (was CLIP)
+      cohereZ: fusion.cohere_score.z_score,
+      fusedZ: fusion.combined_z,
+      clipRaw: fusion.gemini_score.raw_score,  // gemini raw (was CLIP raw)
+      cohereRaw: fusion.cohere_score.raw_score,
+      gateDecision: fusion.gate_decision,
     });
 
     await emitLog(run.runId, stageId, "info",
       `Drift metrics recorded: fused_z=${metric.fusedZ ?? "N/A"}, gate=${metric.gateDecision ?? "N/A"}`);
 
-    // Check for drift alert — trigger if fused_z is below threshold
+    // Check for drift alert
     const DRIFT_ALERT_THRESHOLD = 0.5;
-    const fusedZ = metric.fusedZ ?? metric.clipZ;
+    const fusedZ = metric.fusedZ;
     if (fusedZ !== undefined && fusedZ < DRIFT_ALERT_THRESHOLD) {
       const severity = fusedZ < 0.3 ? "critical" : fusedZ < 0.4 ? "error" : "warn";
       await addDriftAlert({
@@ -513,8 +602,6 @@ async function recordDriftMetrics(run: Run, brandName: string, stageId: string):
         message: `Brand drift detected for ${brandName}: fused_z=${fusedZ.toFixed(3)} (threshold: ${DRIFT_ALERT_THRESHOLD})`,
         fusedZ,
       });
-      await emitLog(run.runId, stageId, "warn",
-        `Drift alert triggered (${severity}): fused_z=${fusedZ.toFixed(3)}`);
     }
   } catch (err) {
     await emitLog(run.runId, stageId, "warn",

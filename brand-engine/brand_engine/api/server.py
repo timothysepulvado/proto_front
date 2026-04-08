@@ -22,11 +22,13 @@ from brand_engine.core.models import (
     BaselineResult,
     DriftReport,
     DriftRequest,
+    FusionResult,
     GradeRequest,
     GradeResult,
     HealthResponse,
     IngestRequest,
     IngestResult,
+    RetrieveRequest,
 )
 from brand_engine.core.pinecone_client import check_connectivity as check_pinecone
 from brand_engine.core.retriever import DualFusionRetriever, load_brand_profile
@@ -88,6 +90,36 @@ async def health():
         pinecone_connected=pinecone_ok,
         version=__version__,
     )
+
+
+@app.post("/retrieve", response_model=FusionResult)
+async def retrieve(request: RetrieveRequest):
+    """Retrieve brand context using a text query.
+
+    Runs dual-fusion retrieval (Gemini Embed 2 + Cohere v4) against
+    the brand's Pinecone indexes using the text query as the embedding
+    input. Returns top-K results with z-scores and gate decision.
+
+    Used by os-api runner.ts to build brand context for generation prompts.
+    """
+    try:
+        profile = load_brand_profile(request.brand_slug)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        retriever = _get_retriever()
+        result = retriever.retrieve(
+            image_path="",  # Not used when text_query is provided
+            profile=profile,
+            text_query=request.text_query,
+            index_tier=request.index_tier,
+            top_k=request.top_k,
+        )
+        return result
+    except Exception as e:
+        logger.error("Retrieve failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/grade", response_model=GradeResult)
