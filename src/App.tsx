@@ -271,7 +271,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
-  const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "insight">("memory");
+  const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "review" | "insight">("memory");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
@@ -353,7 +353,8 @@ export default function App() {
   const pillars = [
     { id: "memory" as const, label: "Brand Memory", description: "Ingest and index brand assets" },
     { id: "creative" as const, label: "Creative Studio", description: "Generate images and video" },
-    { id: "drift" as const, label: "Brand Drift", description: "Check brand compliance" },
+    { id: "drift" as const, label: "Brand Drift", description: "Brand compliance scoring and drift metrics" },
+    { id: "review" as const, label: "Review Gate", description: "Human-in-the-loop review and approval" },
     { id: "insight" as const, label: "Insight Loop", description: "Analytics and learning" },
   ];
 
@@ -798,8 +799,8 @@ export default function App() {
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
 
-                  {/* Brand Drift: show pending reviews */}
-                  {activePillar === "drift" && pendingReviewRuns.length > 0 ? (
+                  {/* Review Gate: show pending review queue */}
+                  {activePillar === "review" && pendingReviewRuns.length > 0 ? (
                     <div className="mt-3 space-y-2">
                       <div className="flex items-center justify-between">
                         <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
@@ -833,7 +834,7 @@ export default function App() {
                         </button>
                       ))}
                     </div>
-                  ) : activePillar === "drift" && pendingReviewRuns.length === 0 ? (
+                  ) : activePillar === "review" && pendingReviewRuns.length === 0 ? (
                     <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
                       <ShieldCheck size={10} className="mr-1.5" />
                       No pending reviews — all clear
