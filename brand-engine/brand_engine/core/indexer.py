@@ -6,6 +6,7 @@ Replaces CLIP+E5 with Gemini Embedding 2. Cohere ingestion preserved.
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -66,9 +67,13 @@ class BrandIndexer:
         if not images_path.exists():
             raise FileNotFoundError(f"Images directory not found: {images_dir}")
 
-        # Collect image files
+        # Collect image files — use os.walk with followlinks=True
+        # so symlinked directories (common in JK reference data) are traversed.
         image_files = sorted(
-            f for f in images_path.rglob("*") if f.suffix.lower() in IMAGE_EXTENSIONS
+            Path(os.path.join(root, fname))
+            for root, _dirs, files in os.walk(images_path, followlinks=True)
+            for fname in files
+            if Path(fname).suffix.lower() in IMAGE_EXTENSIONS
         )
 
         self._log("ingest", "info", f"Found {len(image_files)} images in {images_dir}")

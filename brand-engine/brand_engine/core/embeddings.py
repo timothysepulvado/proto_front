@@ -20,6 +20,10 @@ import cohere
 from google import genai
 from PIL import Image
 
+# Suppress DecompressionBomb warnings for large brand reference images
+# (some JK lifestyle shots are 100M+ pixels — valid, not malicious)
+Image.MAX_IMAGE_PIXELS = None
+
 from brand_engine.core.models import EmbeddingResult
 
 logger = logging.getLogger(__name__)

@@ -67,7 +67,7 @@ BDE's OOP class hierarchy + Brand_linter's production features → merged into `
 - [x] Create Gemini Embedding 2 Pinecone indexes (brand-dna tier, 3 brands)
 - [x] Write ADR documenting consolidation decision (`~/agent-vault/adr/002`)
 - [x] Verify embedding pipeline E2E (Gemini Embed 2 + Cohere v4 Bedrock → Pinecone)
-- [ ] Re-embed existing assets through brand-engine indexer
+- [x] Re-embed existing assets through brand-engine indexer (23 JK images → Gemini 768D + Cohere 1536D → Pinecone)
 - [ ] Verify end-to-end pipeline through brand-engine (full run)
 - [ ] Deprecate Brand_linter subprocess calls in runner
 - [ ] Archive BDE main and Brand_linter phase-3 branches
@@ -108,7 +108,7 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 1. ~~Wire worker/executors~~ ✅
 2. ~~Wire runner.ts to sidecar~~ ✅
 3. ~~Create Gemini Embed 2 Pinecone indexes~~ ✅ (brand-dna tier)
-4. Re-embed existing JK assets (23 images) through brand-engine indexer
+4. ~~Re-embed existing JK assets (23 images) through brand-engine indexer~~ ✅
 5. ~~ADR~~ ✅ (`~/agent-vault/adr/002`)
 
 ### Near-term — Pipeline Completion
