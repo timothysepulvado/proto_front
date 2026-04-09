@@ -8,7 +8,7 @@
 
 | Repo | Location | GitHub | Branch | Latest | Purpose |
 |------|----------|--------|--------|--------|---------|
-| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `ced83f3` | The product — HUD, runner, worker, brand-engine |
+| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `65fa72f` | The product — HUD, runner, worker, brand-engine |
 | **Brand_linter** | ~/Brand_linter/local_quick_setup | timothysepulvado/BDE | phase-3 | `74eebbd` | Legacy brand compliance CLI (being superseded by brand-engine) |
 | **BDE** | ~/BDE | timothysepulvado/BDE | main | `cbdc8b7` | Sidelined ML worker architecture (OOP absorbed into brand-engine) |
 | **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `921180a` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) |
@@ -24,7 +24,7 @@
 
 | Layer | Key Files | Status |
 |-------|-----------|--------|
-| HUD UI | `src/App.tsx`, `src/api.ts`, `src/lib/supabase.ts` | Working |
+| HUD UI | `src/App.tsx`, `src/api.ts`, `src/components/ReviewPanel.tsx`, `src/lib/supabase.ts` | Working — 5 pillar tabs, HITL Review Gate |
 | os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `supabase.ts` | Working — calls brand-engine sidecar via HTTP |
 | Worker | `worker/worker.py`, `executors/ingest.py`, `grading.py`, `prompt_evolver.py` | Working — imports brand_engine.core directly |
 | Brand Engine | `brand-engine/brand_engine/core/` (7 modules) + `api/server.py` + `cli/main.py` | **Wired — E2E verified** |
@@ -94,11 +94,11 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 | 3. Project Activation | ~40% | Campaign prompt propagation in runner |
 | 4. Runtime Environment | ~40% | Memory retrieval via brand-engine /retrieve |
 | 5. Generation | ~50% | Prompt evolution system built |
-| 6. Governance & Drift | ~65% | brand-engine grader wired (dual-fusion + pixel analysis) |
+| 6. Governance & Drift | ~70% | HITL Review Gate UI + ReviewPanel + 3 entry points |
 | 7. Asset Preparation | ~10% | — |
 | 8. Insight Loop | 0% | Not started |
 | 9. Governed Promotion | ~20% | RL trainer reads Supabase |
-| **Overall** | **~32%** | Up from 28% on April 7 |
+| **Overall** | **~33%** | Up from 32% earlier today |
 
 ---
 
@@ -111,8 +111,10 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 4. ~~Re-embed existing JK assets (23 images) through brand-engine indexer~~ ✅
 5. ~~ADR~~ ✅ (`~/agent-vault/adr/002`)
 
+### Done — HITL
+6. ~~HITL Review UI~~ ✅ (`22f350a` + `f78945b` + `65fa72f`) — ReviewPanel component, Review Gate pillar tab, nav notification badge, 3 entry points
+
 ### Near-term — Pipeline Completion
-6. HITL review UI in the HUD (currently no UI for approve/reject)
 7. Artifact writing to Supabase (generated assets → artifacts table)
 8. Campaign deliverable tracking (campaign_deliverables lifecycle)
 9. Alert generation logic for drift_alerts
