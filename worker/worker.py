@@ -111,15 +111,83 @@ class Worker:
         except Exception as e:
             print(f"[Worker] Error updating run status: {e}")
 
-    def _add_artifact(self, run_id: str, artifact: dict):
-        """Add an artifact to the artifacts table."""
+    def _upload_to_storage(self, client_id: str, run_id: str, artifact_id: str, local_path: str, file_name: str) -> tuple:
+        """Upload a local file to Supabase Storage and return (storage_path, public_url)."""
+        ext = os.path.splitext(file_name)[1]
+        storage_path = f"{client_id}/{run_id}/{artifact_id}{ext}"
+
+        if not os.path.exists(local_path):
+            print(f"[Worker] File not found, skipping upload: {local_path}")
+            return None, None
+
+        try:
+            with open(local_path, "rb") as f:
+                file_bytes = f.read()
+
+            self.supabase.storage.from_("artifacts").upload(
+                storage_path,
+                file_bytes,
+                {"content-type": self._get_mime_type(ext), "upsert": "true"},
+            )
+
+            public_url = self.supabase.storage.from_("artifacts").get_public_url(storage_path)
+            return storage_path, public_url
+        except Exception as e:
+            print(f"[Worker] Storage upload failed for {storage_path}: {e}")
+            return None, None
+
+    @staticmethod
+    def _get_mime_type(ext: str) -> str:
+        """Map file extension to MIME type."""
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".mp4": "video/mp4",
+            ".webm": "video/webm",
+            ".pdf": "application/pdf",
+            ".zip": "application/zip",
+        }
+        return mime_map.get(ext.lower(), "application/octet-stream")
+
+    def _add_artifact(self, run_id: str, artifact: dict, client_id: Optional[str] = None, campaign_id: Optional[str] = None):
+        """Add an artifact to the artifacts table with optional Storage upload."""
+        import uuid
+
+        artifact_id = str(uuid.uuid4())
+        local_path = artifact["path"]
+        file_name = artifact["name"]
+
+        # Attempt upload to Supabase Storage
+        storage_path = None
+        public_url = None
+        if client_id:
+            storage_path, public_url = self._upload_to_storage(
+                client_id, run_id, artifact_id, local_path, file_name
+            )
+
+        # Get file size
+        file_size = None
+        try:
+            if os.path.exists(local_path):
+                file_size = os.path.getsize(local_path)
+        except Exception:
+            pass
+
         try:
             self.supabase.table("artifacts").insert({
+                "id": artifact_id,
                 "run_id": run_id,
+                "client_id": client_id,
+                "campaign_id": campaign_id,
                 "type": artifact["type"],
-                "name": artifact["name"],
-                "path": artifact["path"],
-                "size": artifact.get("size"),
+                "name": file_name,
+                "path": public_url or local_path,
+                "storage_path": storage_path,
+                "stage": artifact.get("stage"),
+                "size": file_size,
+                "metadata": artifact.get("metadata"),
             }).execute()
         except Exception as e:
             print(f"[Worker] Error adding artifact: {e}")
@@ -259,9 +327,10 @@ class Worker:
                 hitl_required = result.get("hitl_required", False)
                 artifacts = result.get("artifacts", [])
 
-                # Add artifacts
+                # Add artifacts (with Storage upload)
+                campaign_id = run.get("campaign_id")
                 for artifact in artifacts:
-                    self._add_artifact(run_id, artifact)
+                    self._add_artifact(run_id, artifact, client_id=client_id, campaign_id=campaign_id)
 
                 # Update run status
                 self._update_run_status(run_id, status, error, hitl_required)

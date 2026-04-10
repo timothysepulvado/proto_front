@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-04-09
+
+### Added
+- **Supabase Storage integration** — generated images/videos uploaded to `artifacts` bucket, public URLs stored in artifacts table. Storage path convention: `{client_id}/{run_id}/{artifact_id}.{ext}` for cross-DB traceability.
+- **`os-api/src/storage.ts`** — upload utility with MIME detection, file size tracking, graceful fallback to local path on upload failure.
+- **`createArtifactWithUpload()`** helper in runner.ts — DRY wrapper across all 5 artifact creation sites. Records model, prompt, and stage metadata.
+- **Artifact preview in ReviewPanel** — inline `<img>` / `<video>` rendering when artifact path is a URL, plus prompt display from metadata.
+- **Migration 004** (`004_artifact_storage.sql`) — new columns on artifacts table: `client_id`, `campaign_id`, `stage`, `storage_path`, `metadata`. Storage bucket with RLS policies. Backfill of client_id from runs. Realtime enabled on artifacts.
+- Worker `_upload_to_storage()` method — Python-side Supabase Storage upload with same path convention.
+- Creative executor now returns `stage` and `metadata` (model, prompt) on artifact dicts.
+
+### Changed
+- `os-api/src/types.ts` — Artifact interface expanded with `clientId`, `campaignId`, `storagePath`, `stage`, `metadata`.
+- `os-api/src/db.ts` — DbArtifact type, mapper, and `addArtifact()` write all new columns.
+- `src/api.ts` — frontend Artifact + DbArtifact types synced with new schema.
+- `worker/worker.py` — `_add_artifact()` accepts `client_id`/`campaign_id`, uploads to Storage before insert.
+
 ## [0.5.1] - 2026-04-08
 
 ### Added

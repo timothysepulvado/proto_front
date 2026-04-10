@@ -384,6 +384,32 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
                     </div>
                   </button>
 
+                  {/* Artifact Preview */}
+                  {isExpanded && artifact.path.startsWith("http") && (
+                    <div className="px-4 pt-3">
+                      {artifact.type === "image" ? (
+                        <img
+                          src={artifact.path}
+                          alt={artifact.name}
+                          className="w-full max-h-64 object-contain rounded-lg border border-white/10 bg-black/30"
+                          loading="lazy"
+                        />
+                      ) : artifact.type === "video" ? (
+                        <video
+                          src={artifact.path}
+                          controls
+                          className="w-full max-h-64 rounded-lg border border-white/10 bg-black/30"
+                          preload="metadata"
+                        />
+                      ) : null}
+                      {artifact.metadata && typeof (artifact.metadata as Record<string, unknown>).prompt === "string" && (
+                        <p className="mt-2 text-[9px] font-mono text-white/30 leading-relaxed line-clamp-2">
+                          Prompt: {(artifact.metadata as Record<string, string>).prompt}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   {/* Expanded Review Controls */}
                   {isExpanded && (
                     <div className="px-4 pb-4 space-y-4 border-t border-white/5">

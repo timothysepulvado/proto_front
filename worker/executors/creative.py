@@ -93,6 +93,8 @@ class CreativeExecutor:
                         "type": "image",
                         "name": output_name,
                         "path": str(output_path),
+                        "stage": "generate_images",
+                        "metadata": {"model": "gemini-3-pro-image", "prompt": prompt},
                     }
                 ],
             }
@@ -172,6 +174,8 @@ class CreativeExecutor:
                         "type": "video",
                         "name": output_name,
                         "path": str(output_path),
+                        "stage": "generate_video",
+                        "metadata": {"model": "veo-3.1", "prompt": prompt},
                     }
                 ],
             }

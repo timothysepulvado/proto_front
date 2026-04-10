@@ -1,8 +1,9 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, StageStatus } from "./types.js";
+import type { Run, Artifact, StageStatus } from "./types.js";
 import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getCampaign } from "./db.js";
+import { uploadArtifact, getFileSize } from "./storage.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation
@@ -54,6 +55,51 @@ async function updateStageStatus(run: Run, stageId: string, status: StageStatus,
   );
   const updated = await updateRun(run.runId, { stages });
   return updated || run;
+}
+
+/**
+ * Create an artifact record with Supabase Storage upload.
+ * Uploads the local file, then writes the artifact row with the public URL.
+ * If upload fails, falls back to the local path (non-fatal).
+ */
+async function createArtifactWithUpload(opts: {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  type: Artifact["type"];
+  name: string;
+  localPath: string;
+  stage: string;
+  metadata?: Record<string, unknown>;
+}): Promise<Artifact> {
+  const artifactId = uuidv4();
+
+  // Attempt upload to Supabase Storage
+  const uploaded = await uploadArtifact(
+    opts.clientId,
+    opts.runId,
+    artifactId,
+    opts.localPath,
+    opts.name,
+  );
+
+  const artifact: Artifact = {
+    id: artifactId,
+    runId: opts.runId,
+    clientId: opts.clientId,
+    campaignId: opts.campaignId,
+    type: opts.type,
+    name: opts.name,
+    // Use public URL if uploaded, otherwise fall back to local path
+    path: uploaded?.publicUrl ?? opts.localPath,
+    storagePath: uploaded?.storagePath,
+    stage: opts.stage,
+    size: uploaded?.size ?? getFileSize(opts.localPath) ?? undefined,
+    metadata: opts.metadata,
+    createdAt: new Date().toISOString(),
+  };
+
+  return addArtifact(artifact);
 }
 
 async function runCommand(
@@ -370,14 +416,15 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   );
 
   if (result.success) {
-    // Add artifact
-    await addArtifact({
-      id: uuidv4(),
+    await createArtifactWithUpload({
       runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
       type: "image",
       name: "generated.png",
-      path: path.join(outputDir, "generated.png"),
-      createdAt: new Date().toISOString(),
+      localPath: path.join(outputDir, "generated.png"),
+      stage: stageId,
+      metadata: { model: "gemini-3-pro-image", prompt },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
@@ -392,13 +439,15 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
     await new Promise(r => setTimeout(r, 1500));
     await emitLog(run.runId, stageId, "info", "[DEMO] Image generated successfully");
 
-    await addArtifact({
-      id: uuidv4(),
+    await createArtifactWithUpload({
       runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
       type: "image",
       name: "generated.png",
-      path: path.join(outputDir, "generated.png"),
-      createdAt: new Date().toISOString(),
+      localPath: path.join(outputDir, "generated.png"),
+      stage: stageId,
+      metadata: { model: "demo", prompt },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
@@ -428,14 +477,17 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     TEMP_GEN_PATH
   );
 
+  const videoPrompt = `Brand campaign video for ${brandName}`;
   if (result.success) {
-    await addArtifact({
-      id: uuidv4(),
+    await createArtifactWithUpload({
       runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
       type: "video",
       name: "generated.mp4",
-      path: path.join(outputDir, "generated.mp4"),
-      createdAt: new Date().toISOString(),
+      localPath: path.join(outputDir, "generated.mp4"),
+      stage: stageId,
+      metadata: { model: "veo-3.1", prompt: videoPrompt },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
@@ -452,13 +504,15 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     await new Promise(r => setTimeout(r, 1500));
     await emitLog(run.runId, stageId, "info", "[DEMO] Video generated successfully");
 
-    await addArtifact({
-      id: uuidv4(),
+    await createArtifactWithUpload({
       runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
       type: "video",
       name: "generated.mp4",
-      path: path.join(outputDir, "generated.mp4"),
-      createdAt: new Date().toISOString(),
+      localPath: path.join(outputDir, "generated.mp4"),
+      stage: stageId,
+      metadata: { model: "demo", prompt: videoPrompt },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
@@ -629,13 +683,14 @@ async function executeExportStage(run: Run): Promise<boolean> {
   // Create a placeholder export artifact
   const exportPath = path.join(TEMP_GEN_PATH, "outputs", run.runId, "export_package.zip");
 
-  await addArtifact({
-    id: uuidv4(),
+  await createArtifactWithUpload({
     runId: run.runId,
+    clientId: run.clientId,
+    campaignId: run.campaignId,
     type: "package",
     name: "export_package.zip",
-    path: exportPath,
-    createdAt: new Date().toISOString(),
+    localPath: exportPath,
+    stage: stageId,
   });
 
   await emitLog(run.runId, stageId, "info", "Export package prepared (placeholder)");

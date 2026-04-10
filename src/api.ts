@@ -41,10 +41,15 @@ export interface RunLog {
 export interface Artifact {
   id: string;
   runId: string;
+  clientId?: string;
+  campaignId?: string;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
+  storagePath?: string;
+  stage?: string;
   size?: number;
+  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -87,10 +92,15 @@ interface DbRunLog {
 interface DbArtifact {
   id: string;
   run_id: string;
+  client_id: string | null;
+  campaign_id: string | null;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
+  storage_path: string | null;
+  stage: string | null;
   size: number | null;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -138,10 +148,15 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
   return {
     id: dbArtifact.id,
     runId: dbArtifact.run_id,
+    clientId: dbArtifact.client_id ?? undefined,
+    campaignId: dbArtifact.campaign_id ?? undefined,
     type: dbArtifact.type,
     name: dbArtifact.name,
     path: dbArtifact.path,
+    storagePath: dbArtifact.storage_path ?? undefined,
+    stage: dbArtifact.stage ?? undefined,
     size: dbArtifact.size ?? undefined,
+    metadata: dbArtifact.metadata ?? undefined,
     createdAt: dbArtifact.created_at,
   };
 }

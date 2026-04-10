@@ -76,10 +76,15 @@ export interface Client {
 export interface Artifact {
   id: string;
   runId: string;
+  clientId?: string;
+  campaignId?: string;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
+  storagePath?: string;
+  stage?: string;
   size?: number;
+  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 

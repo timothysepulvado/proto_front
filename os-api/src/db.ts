@@ -31,10 +31,15 @@ interface DbRunLog {
 interface DbArtifact {
   id: string;
   run_id: string;
+  client_id: string | null;
+  campaign_id: string | null;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
+  storage_path: string | null;
+  stage: string | null;
   size: number | null;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -84,10 +89,15 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
   return {
     id: dbArtifact.id,
     runId: dbArtifact.run_id,
+    clientId: dbArtifact.client_id ?? undefined,
+    campaignId: dbArtifact.campaign_id ?? undefined,
     type: dbArtifact.type,
     name: dbArtifact.name,
     path: dbArtifact.path,
+    storagePath: dbArtifact.storage_path ?? undefined,
+    stage: dbArtifact.stage ?? undefined,
     size: dbArtifact.size ?? undefined,
+    metadata: dbArtifact.metadata ?? undefined,
     createdAt: dbArtifact.created_at,
   };
 }
@@ -241,10 +251,15 @@ export async function addArtifact(artifact: Artifact): Promise<Artifact> {
     .insert({
       id: artifact.id,
       run_id: artifact.runId,
+      client_id: artifact.clientId ?? null,
+      campaign_id: artifact.campaignId ?? null,
       type: artifact.type,
       name: artifact.name,
       path: artifact.path,
+      storage_path: artifact.storagePath ?? null,
+      stage: artifact.stage ?? null,
       size: artifact.size ?? null,
+      metadata: artifact.metadata ?? null,
       created_at: artifact.createdAt,
     })
     .select()
