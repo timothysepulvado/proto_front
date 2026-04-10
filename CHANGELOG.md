@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-04-10
+
+### Added
+- **Drift alert surfacing + acknowledgment** — full read/display/ack pipeline from Supabase `drift_alerts` through API routes to live UI. Brand Drift pillar tab now renders real content instead of a generic placeholder.
+- **`DriftAlertPanel.tsx`** — new component with severity badges (critical/error/warn), unacknowledged-first sorting, inline resolution notes, acknowledge button with spinner, realtime subscription via `subscribeToDriftAlerts()`. Empty state shows "Brand alignment healthy" with shield icon.
+- **4 new drift API routes** — `GET /api/clients/:clientId/drift-alerts`, `GET /api/runs/:runId/drift-alerts`, `GET /api/runs/:runId/drift-metrics`, `POST /api/drift-alerts/:alertId/acknowledge`.
+- **4 new DB query functions** — `getDriftMetricsByRun()`, `getDriftAlertsByClient()`, `getDriftAlertsByRun()`, `acknowledgeDriftAlert()` with proper Db row types and mappers.
+- **Frontend drift operations** — `getDriftAlerts()`, `getDriftMetrics()`, `acknowledgeDriftAlert()`, `subscribeToDriftAlerts()` in `src/api.ts` with full `DriftAlert`/`DriftMetric` types and Db row mappers.
+
+### Changed
+- `os-api/src/types.ts` — `DriftAlert` type extended with `acknowledgedAt` and `resolutionNotes` fields (matching existing DB columns from migration 002).
+- `os-api/src/db.ts` — extracted `DbDriftMetric`/`DbDriftAlert` interfaces and `mapDbDriftMetricToDriftMetric`/`mapDbDriftAlertToDriftAlert` mappers. Refactored `addDriftMetric()` and `addDriftAlert()` to use shared mappers instead of inline object literals.
+- `src/App.tsx` — Brand Drift pillar tab now renders `DriftAlertPanel` when a client is selected.
+
 ## [0.6.0] - 2026-04-10
 
 ### Added

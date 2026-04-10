@@ -33,12 +33,13 @@ the real product — the client-facing tool that runs brand operations.
 | `src/api.ts` | Frontend Supabase client — types, queries, realtime subscriptions |
 | `src/components/ReviewPanel.tsx` | HITL review UI — artifact preview, grading, rejection categories |
 | `src/components/DeliverableTracker.tsx` | Campaign deliverable status with realtime updates |
+| `src/components/DriftAlertPanel.tsx` | Drift alert surfacing, severity badges, acknowledgment with realtime |
 | `src/lib/supabase.ts` | Supabase client config |
 | `hud.json` | Client data + UI config (source of truth) |
-| `os-api/src/index.ts` | Express API routes (runs, HITL, campaigns, deliverables, prompts) |
+| `os-api/src/index.ts` | Express API routes (runs, HITL, campaigns, deliverables, drift, prompts) |
 | `os-api/src/runner.ts` | Pipeline executor — calls brand-engine sidecar + Temp-gen |
 | `os-api/src/db.ts` | Supabase query layer — typed mappers for all tables |
-| `os-api/src/types.ts` | Shared types — Run, Artifact, Campaign, CampaignDeliverable, etc. |
+| `os-api/src/types.ts` | Shared types — Run, Artifact, Campaign, CampaignDeliverable, DriftAlert, DriftMetric, etc. |
 | `os-api/src/storage.ts` | Supabase Storage upload utility |
 | `supabase/migrations/` | 5 migrations (001-005) |
 | `worker/` | Python worker for HUD run execution |

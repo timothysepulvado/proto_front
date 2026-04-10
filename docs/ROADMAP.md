@@ -1,6 +1,6 @@
 # BrandStudios OS — Roadmap & State of Play
 
-> Last updated: 2026-04-08 | Maintainer: Brandy
+> Last updated: 2026-04-10 | Maintainer: Brandy
 
 ---
 
@@ -8,7 +8,7 @@
 
 | Repo | Location | GitHub | Branch | Latest | Purpose |
 |------|----------|--------|--------|--------|---------|
-| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `65fa72f` | The product — HUD, runner, worker, brand-engine |
+| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `78d4edf` | The product — HUD, runner, worker, brand-engine |
 | **Brand_linter** | ~/Brand_linter/local_quick_setup | timothysepulvado/BDE | phase-3 | `74eebbd` | Legacy brand compliance CLI (being superseded by brand-engine) |
 | **BDE** | ~/BDE | timothysepulvado/BDE | main | `cbdc8b7` | Sidelined ML worker architecture (OOP absorbed into brand-engine) |
 | **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `921180a` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) |
@@ -24,11 +24,11 @@
 
 | Layer | Key Files | Status |
 |-------|-----------|--------|
-| HUD UI | `src/App.tsx`, `src/api.ts`, `src/components/ReviewPanel.tsx`, `src/lib/supabase.ts` | Working — 5 pillar tabs, HITL Review Gate |
+| HUD UI | `src/App.tsx`, `src/api.ts`, `src/components/ReviewPanel.tsx`, `DriftAlertPanel.tsx`, `DeliverableTracker.tsx`, `src/lib/supabase.ts` | Working — 5 pillar tabs, Review Gate + Brand Drift + Creative Studio live |
 | os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `supabase.ts` | Working — calls brand-engine sidecar via HTTP |
 | Worker | `worker/worker.py`, `executors/ingest.py`, `grading.py`, `prompt_evolver.py` | Working — imports brand_engine.core directly |
 | Brand Engine | `brand-engine/brand_engine/core/` (7 modules) + `api/server.py` + `cli/main.py` | **Wired — E2E verified** |
-| Migrations | `supabase/migrations/001-003` | Applied |
+| Migrations | `supabase/migrations/001-005` | Applied |
 | Data | `hud.json` | Source of truth for UI |
 
 **Pipeline (current):** `ingest → retrieve → generate → drift → hitl → export`
@@ -87,18 +87,18 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 
 ## Architecture Coverage (vs Canonical 9-Phase Spec)
 
-| Phase | Coverage | Key Change (April 8) |
+| Phase | Coverage | Key Change (April 10) |
 |-------|----------|---------------------|
 | 1. Brand Onboarding | ~30% | Per-brand data dirs + brand profiles wired |
 | 2. Memory Formation | ~35% | Gemini Embed 2 + Cohere v4 pipeline verified E2E |
-| 3. Project Activation | ~40% | Campaign prompt propagation in runner |
+| 3. Project Activation | ~45% | Campaign deliverable lifecycle wired E2E |
 | 4. Runtime Environment | ~40% | Memory retrieval via brand-engine /retrieve |
-| 5. Generation | ~50% | Prompt evolution system built |
-| 6. Governance & Drift | ~70% | HITL Review Gate UI + ReviewPanel + 3 entry points |
-| 7. Asset Preparation | ~10% | — |
+| 5. Generation | ~55% | Deliverable-level generation + artifact storage pipeline |
+| 6. Governance & Drift | ~80% | Drift alert surfacing + ack UI, HITL Review Gate, deliverable tracking |
+| 7. Asset Preparation | ~15% | Supabase Storage artifact pipeline |
 | 8. Insight Loop | 0% | Not started |
 | 9. Governed Promotion | ~20% | RL trainer reads Supabase |
-| **Overall** | **~33%** | Up from 32% earlier today |
+| **Overall** | **~36%** | Up from 33% (v0.6.0) |
 
 ---
 
@@ -114,16 +114,19 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 ### Done — HITL
 6. ~~HITL Review UI~~ ✅ (`22f350a` + `f78945b` + `65fa72f`) — ReviewPanel component, Review Gate pillar tab, nav notification badge, 3 entry points
 
-### Near-term — Pipeline Completion
-7. Artifact writing to Supabase (generated assets → artifacts table)
-8. Campaign deliverable tracking (campaign_deliverables lifecycle)
-9. Alert generation logic for drift_alerts
+### Done — Pipeline Completion
+7. ~~Artifact writing to Supabase~~ ✅ (`c10eaec`) — Supabase Storage pipeline, migration 004, public URLs
+8. ~~Campaign deliverable tracking~~ ✅ (`3ddafbb`) — full per-asset lifecycle, DeliverableTracker component, 8 API routes
+9. ~~Drift alert surfacing + acknowledgment~~ ✅ — DriftAlertPanel, 4 drift API routes, realtime subscription, severity badges + ack flow
+
+### Next — Drift & Baselines
+10. Baseline calculation and versioning (brand_baselines table)
+11. End-to-end pipeline verification (full run through brand-engine)
 
 ### Medium-term — Phase Coverage
-10. Baseline calculation and versioning (brand_baselines table)
-11. Platform-specific asset formatting (Phase 7)
-12. Insight Loop telemetry (Phase 8)
-13. Governed promotion flow (Phase 9 — vector tier promotion)
+12. Platform-specific asset formatting (Phase 7)
+13. Insight Loop telemetry (Phase 8)
+14. Governed promotion flow (Phase 9 — vector tier promotion)
 
 ---
 

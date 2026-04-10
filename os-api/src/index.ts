@@ -30,6 +30,10 @@ import {
   createDeliverable,
   updateDeliverableStatus,
   incrementDeliverableRetry,
+  getDriftMetricsByRun,
+  getDriftAlertsByClient,
+  getDriftAlertsByRun,
+  acknowledgeDriftAlert,
 } from "./db.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -407,6 +411,57 @@ app.post("/api/runs/:runId/export", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("POST /api/runs/:runId/export error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Drift Routes ============
+
+// GET /api/clients/:clientId/drift-alerts - Get drift alerts for a client
+app.get("/api/clients/:clientId/drift-alerts", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const alerts = await getDriftAlertsByClient(clientId);
+    res.json(alerts);
+  } catch (err) {
+    console.error("GET /api/clients/:clientId/drift-alerts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/drift-alerts - Get drift alerts for a run
+app.get("/api/runs/:runId/drift-alerts", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const alerts = await getDriftAlertsByRun(runId);
+    res.json(alerts);
+  } catch (err) {
+    console.error("GET /api/runs/:runId/drift-alerts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/drift-metrics - Get drift metrics for a run
+app.get("/api/runs/:runId/drift-metrics", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const metrics = await getDriftMetricsByRun(runId);
+    res.json(metrics);
+  } catch (err) {
+    console.error("GET /api/runs/:runId/drift-metrics error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/drift-alerts/:alertId/acknowledge - Acknowledge a drift alert
+app.post("/api/drift-alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
+  try {
+    const alertId = getParam(req, "alertId");
+    const { resolutionNotes } = req.body as { resolutionNotes?: string };
+    const alert = await acknowledgeDriftAlert(alertId, resolutionNotes);
+    res.json(alert);
+  } catch (err) {
+    console.error("POST /api/drift-alerts/:alertId/acknowledge error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

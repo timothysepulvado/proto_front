@@ -64,6 +64,8 @@ export interface DriftAlert {
   message: string;
   fusedZ?: number;
   acknowledged?: boolean;
+  acknowledgedAt?: string;
+  resolutionNotes?: string;
   createdAt?: string;
 }
 

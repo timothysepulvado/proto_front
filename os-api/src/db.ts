@@ -417,6 +417,70 @@ export async function getHitlDecisionsByRun(runId: string): Promise<HitlDecision
   return (data as DbHitlDecision[]).map(mapDbHitlDecisionToHitlDecision);
 }
 
+// ============ Drift DB Row Types ============
+
+interface DbDriftMetric {
+  id: string;
+  run_id: string;
+  artifact_id: string | null;
+  clip_z: number | null;
+  e5_z: number | null;
+  cohere_z: number | null;
+  fused_z: number | null;
+  clip_raw: number | null;
+  e5_raw: number | null;
+  cohere_raw: number | null;
+  gate_decision: string | null;
+  created_at: string;
+}
+
+interface DbDriftAlert {
+  id: string;
+  client_id: string;
+  run_id: string;
+  severity: "warn" | "error" | "critical";
+  message: string;
+  fused_z: number | null;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  resolution_notes: string | null;
+  created_at: string;
+}
+
+// ============ Drift Mappers ============
+
+function mapDbDriftMetricToDriftMetric(row: DbDriftMetric): DriftMetric {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    artifactId: row.artifact_id ?? undefined,
+    clipZ: row.clip_z ?? undefined,
+    e5Z: row.e5_z ?? undefined,
+    cohereZ: row.cohere_z ?? undefined,
+    fusedZ: row.fused_z ?? undefined,
+    clipRaw: row.clip_raw ?? undefined,
+    e5Raw: row.e5_raw ?? undefined,
+    cohereRaw: row.cohere_raw ?? undefined,
+    gateDecision: row.gate_decision ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+function mapDbDriftAlertToDriftAlert(row: DbDriftAlert): DriftAlert {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    runId: row.run_id,
+    severity: row.severity,
+    message: row.message,
+    fusedZ: row.fused_z ?? undefined,
+    acknowledged: row.acknowledged,
+    acknowledgedAt: row.acknowledged_at ?? undefined,
+    resolutionNotes: row.resolution_notes ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
 // ============ Drift Metric Operations ============
 
 export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> {
@@ -441,20 +505,21 @@ export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> 
     throw new Error(`Failed to add drift metric: ${error.message}`);
   }
 
-  return {
-    id: data.id,
-    runId: data.run_id,
-    artifactId: data.artifact_id ?? undefined,
-    clipZ: data.clip_z ?? undefined,
-    e5Z: data.e5_z ?? undefined,
-    cohereZ: data.cohere_z ?? undefined,
-    fusedZ: data.fused_z ?? undefined,
-    clipRaw: data.clip_raw ?? undefined,
-    e5Raw: data.e5_raw ?? undefined,
-    cohereRaw: data.cohere_raw ?? undefined,
-    gateDecision: data.gate_decision ?? undefined,
-    createdAt: data.created_at,
-  };
+  return mapDbDriftMetricToDriftMetric(data as DbDriftMetric);
+}
+
+export async function getDriftMetricsByRun(runId: string): Promise<DriftMetric[]> {
+  const { data, error } = await supabase
+    .from("drift_metrics")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to get drift metrics: ${error.message}`);
+  }
+
+  return (data as DbDriftMetric[]).map(mapDbDriftMetricToDriftMetric);
 }
 
 // ============ Drift Alert Operations ============
@@ -477,16 +542,59 @@ export async function addDriftAlert(alert: DriftAlert): Promise<DriftAlert> {
     throw new Error(`Failed to add drift alert: ${error.message}`);
   }
 
-  return {
-    id: data.id,
-    clientId: data.client_id,
-    runId: data.run_id,
-    severity: data.severity,
-    message: data.message,
-    fusedZ: data.fused_z ?? undefined,
-    acknowledged: data.acknowledged,
-    createdAt: data.created_at,
+  return mapDbDriftAlertToDriftAlert(data as DbDriftAlert);
+}
+
+export async function getDriftAlertsByClient(clientId: string): Promise<DriftAlert[]> {
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("acknowledged", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to get drift alerts by client: ${error.message}`);
+  }
+
+  return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
+}
+
+export async function getDriftAlertsByRun(runId: string): Promise<DriftAlert[]> {
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to get drift alerts by run: ${error.message}`);
+  }
+
+  return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
+}
+
+export async function acknowledgeDriftAlert(alertId: string, resolutionNotes?: string): Promise<DriftAlert> {
+  const updateData: Record<string, unknown> = {
+    acknowledged: true,
+    acknowledged_at: new Date().toISOString(),
   };
+  if (resolutionNotes !== undefined) {
+    updateData.resolution_notes = resolutionNotes;
+  }
+
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .update(updateData)
+    .eq("id", alertId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to acknowledge drift alert: ${error.message}`);
+  }
+
+  return mapDbDriftAlertToDriftAlert(data as DbDriftAlert);
 }
 
 // ============ Campaign & Deliverable DB Row Types ============

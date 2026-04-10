@@ -837,6 +837,170 @@ export async function healthCheck(): Promise<boolean> {
   }
 }
 
+// ============ Drift Alert & Metric Operations ============
+
+export interface DriftAlert {
+  id: string;
+  clientId: string;
+  runId: string;
+  severity: "warn" | "error" | "critical";
+  message: string;
+  fusedZ?: number;
+  acknowledged: boolean;
+  acknowledgedAt?: string;
+  resolutionNotes?: string;
+  createdAt: string;
+}
+
+export interface DriftMetric {
+  id: string;
+  runId: string;
+  artifactId?: string;
+  clipZ?: number;
+  e5Z?: number;
+  cohereZ?: number;
+  fusedZ?: number;
+  clipRaw?: number;
+  e5Raw?: number;
+  cohereRaw?: number;
+  gateDecision?: string;
+  createdAt: string;
+}
+
+interface DbDriftAlert {
+  id: string;
+  client_id: string;
+  run_id: string;
+  severity: "warn" | "error" | "critical";
+  message: string;
+  fused_z: number | null;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  resolution_notes: string | null;
+  created_at: string;
+}
+
+interface DbDriftMetric {
+  id: string;
+  run_id: string;
+  artifact_id: string | null;
+  clip_z: number | null;
+  e5_z: number | null;
+  cohere_z: number | null;
+  fused_z: number | null;
+  clip_raw: number | null;
+  e5_raw: number | null;
+  cohere_raw: number | null;
+  gate_decision: string | null;
+  created_at: string;
+}
+
+function mapDbDriftAlertToDriftAlert(d: DbDriftAlert): DriftAlert {
+  return {
+    id: d.id,
+    clientId: d.client_id,
+    runId: d.run_id,
+    severity: d.severity,
+    message: d.message,
+    fusedZ: d.fused_z ?? undefined,
+    acknowledged: d.acknowledged,
+    acknowledgedAt: d.acknowledged_at ?? undefined,
+    resolutionNotes: d.resolution_notes ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+function mapDbDriftMetricToDriftMetric(d: DbDriftMetric): DriftMetric {
+  return {
+    id: d.id,
+    runId: d.run_id,
+    artifactId: d.artifact_id ?? undefined,
+    clipZ: d.clip_z ?? undefined,
+    e5Z: d.e5_z ?? undefined,
+    cohereZ: d.cohere_z ?? undefined,
+    fusedZ: d.fused_z ?? undefined,
+    clipRaw: d.clip_raw ?? undefined,
+    e5Raw: d.e5_raw ?? undefined,
+    cohereRaw: d.cohere_raw ?? undefined,
+    gateDecision: d.gate_decision ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+// Get drift alerts for a client (unacknowledged first)
+export async function getDriftAlerts(clientId: string): Promise<DriftAlert[]> {
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("acknowledged", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get drift alerts: ${error.message}`);
+  return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
+}
+
+// Get drift metrics for a run
+export async function getDriftMetrics(runId: string): Promise<DriftMetric[]> {
+  const { data, error } = await supabase
+    .from("drift_metrics")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get drift metrics: ${error.message}`);
+  return (data as DbDriftMetric[]).map(mapDbDriftMetricToDriftMetric);
+}
+
+// Acknowledge a drift alert
+export async function acknowledgeDriftAlert(alertId: string, resolutionNotes?: string): Promise<DriftAlert> {
+  const updateData: Record<string, unknown> = {
+    acknowledged: true,
+    acknowledged_at: new Date().toISOString(),
+  };
+  if (resolutionNotes !== undefined) {
+    updateData.resolution_notes = resolutionNotes;
+  }
+
+  const { data, error } = await supabase
+    .from("drift_alerts")
+    .update(updateData)
+    .eq("id", alertId)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to acknowledge drift alert: ${error.message}`);
+  return mapDbDriftAlertToDriftAlert(data as DbDriftAlert);
+}
+
+// Subscribe to drift alert changes for a client (realtime)
+export function subscribeToDriftAlerts(
+  clientId: string,
+  onUpdate: (alert: DriftAlert) => void,
+): () => void {
+  const channel = supabase
+    .channel(`drift_alerts:${clientId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "drift_alerts",
+        filter: `client_id=eq.${clientId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(mapDbDriftAlertToDriftAlert(payload.new as DbDriftAlert));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // ============ Campaign Deliverable Operations ============
 
 export type DeliverableStatus = "pending" | "generating" | "reviewing" | "approved" | "rejected" | "regenerating";
