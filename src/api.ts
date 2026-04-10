@@ -17,6 +17,7 @@ export interface RunStage {
 export interface Run {
   runId: string;
   clientId: string;
+  campaignId?: string;
   mode: RunMode;
   status: RunStatus;
   stages: RunStage[];
@@ -43,6 +44,7 @@ export interface Artifact {
   runId: string;
   clientId?: string;
   campaignId?: string;
+  deliverableId?: string;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
@@ -68,6 +70,7 @@ export interface Client {
 interface DbRun {
   id: string;
   client_id: string;
+  campaign_id: string | null;
   mode: RunMode;
   status: RunStatus;
   stages: RunStage[];
@@ -94,6 +97,7 @@ interface DbArtifact {
   run_id: string;
   client_id: string | null;
   campaign_id: string | null;
+  deliverable_id: string | null;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
@@ -120,6 +124,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
   return {
     runId: dbRun.id,
     clientId: dbRun.client_id,
+    campaignId: dbRun.campaign_id ?? undefined,
     mode: dbRun.mode,
     status: dbRun.status,
     stages: dbRun.stages,
@@ -150,6 +155,7 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
     runId: dbArtifact.run_id,
     clientId: dbArtifact.client_id ?? undefined,
     campaignId: dbArtifact.campaign_id ?? undefined,
+    deliverableId: dbArtifact.deliverable_id ?? undefined,
     type: dbArtifact.type,
     name: dbArtifact.name,
     path: dbArtifact.path,
@@ -829,4 +835,146 @@ export async function healthCheck(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ============ Campaign Deliverable Operations ============
+
+export type DeliverableStatus = "pending" | "generating" | "reviewing" | "approved" | "rejected" | "regenerating";
+
+export interface CampaignDeliverable {
+  id: string;
+  campaignId: string;
+  description?: string;
+  aiModel?: string;
+  currentPrompt?: string;
+  originalPrompt?: string;
+  status: DeliverableStatus;
+  retryCount: number;
+  rejectionReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Campaign {
+  id: string;
+  clientId: string;
+  name: string;
+  prompt?: string;
+  deliverables?: unknown;
+  platforms?: string[];
+  mode?: string;
+  maxRetries: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DbCampaignDeliverable {
+  id: string;
+  campaign_id: string;
+  description: string | null;
+  ai_model: string | null;
+  current_prompt: string | null;
+  original_prompt: string | null;
+  status: string;
+  retry_count: number;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbCampaign {
+  id: string;
+  client_id: string;
+  name: string;
+  prompt: string | null;
+  deliverables: unknown | null;
+  platforms: string[] | null;
+  mode: string | null;
+  max_retries: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliverable {
+  return {
+    id: db.id,
+    campaignId: db.campaign_id,
+    description: db.description ?? undefined,
+    aiModel: db.ai_model ?? undefined,
+    currentPrompt: db.current_prompt ?? undefined,
+    originalPrompt: db.original_prompt ?? undefined,
+    status: db.status as DeliverableStatus,
+    retryCount: db.retry_count,
+    rejectionReason: db.rejection_reason ?? undefined,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
+  return {
+    id: db.id,
+    clientId: db.client_id,
+    name: db.name,
+    prompt: db.prompt ?? undefined,
+    deliverables: db.deliverables ?? undefined,
+    platforms: db.platforms ?? undefined,
+    mode: db.mode ?? undefined,
+    maxRetries: db.max_retries,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+// Get deliverables for a campaign
+export async function getCampaignDeliverables(campaignId: string): Promise<CampaignDeliverable[]> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("created_at");
+
+  if (error) throw new Error(`Failed to get campaign deliverables: ${error.message}`);
+  return (data as DbCampaignDeliverable[]).map(mapDbDeliverableToDeliverable);
+}
+
+// Get campaign by ID
+export async function getCampaign(campaignId: string): Promise<Campaign | null> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to get campaign: ${error.message}`);
+  if (!data) return null;
+  return mapDbCampaignToCampaign(data as DbCampaign);
+}
+
+// Subscribe to deliverable updates for a campaign (realtime)
+export function subscribeToCampaignDeliverables(
+  campaignId: string,
+  onUpdate: (deliverable: CampaignDeliverable) => void,
+): () => void {
+  const channel = supabase
+    .channel(`campaign_deliverables:${campaignId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "campaign_deliverables",
+        filter: `campaign_id=eq.${campaignId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(mapDbDeliverableToDeliverable(payload.new as DbCampaignDeliverable));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
 }

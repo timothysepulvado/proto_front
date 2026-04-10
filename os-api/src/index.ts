@@ -22,6 +22,14 @@ import {
   addPromptScore,
   getPromptScores,
   getPromptLineage,
+  getCampaign,
+  getCampaignsByClient,
+  createCampaign,
+  getDeliverablesByCampaign,
+  getDeliverable,
+  createDeliverable,
+  updateDeliverableStatus,
+  incrementDeliverableRetry,
 } from "./db.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -271,6 +279,20 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
       completedAt: new Date().toISOString(),
     });
 
+    // HITL cascade: approve all reviewing deliverables for this campaign
+    if (run.campaignId) {
+      try {
+        const deliverables = await getDeliverablesByCampaign(run.campaignId);
+        for (const d of deliverables) {
+          if (d.status === "reviewing") {
+            await updateDeliverableStatus(d.id, "reviewing", "approved");
+          }
+        }
+      } catch (err) {
+        console.error("Deliverable approve cascade error:", err);
+      }
+    }
+
     res.json({ ...updated, decision });
   } catch (err) {
     console.error("POST /api/runs/:runId/review/approve error:", err);
@@ -309,6 +331,34 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
       status: "blocked",
       hitlNotes: notes || "Rejected",
     });
+
+    // HITL cascade: reject deliverables on this campaign
+    const { deliverableId: targetDeliverableId } = req.body as { deliverableId?: string };
+    if (run.campaignId) {
+      try {
+        if (targetDeliverableId) {
+          // Reject specific deliverable
+          const d = await getDeliverable(targetDeliverableId);
+          if (d && d.status === "reviewing") {
+            await updateDeliverableStatus(d.id, "reviewing", "rejected", {
+              rejectionReason: notes || "Rejected",
+            });
+          }
+        } else {
+          // Reject all reviewing deliverables
+          const deliverables = await getDeliverablesByCampaign(run.campaignId);
+          for (const d of deliverables) {
+            if (d.status === "reviewing") {
+              await updateDeliverableStatus(d.id, "reviewing", "rejected", {
+                rejectionReason: notes || "Rejected",
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Deliverable reject cascade error:", err);
+      }
+    }
 
     res.json({ ...updated, decision });
   } catch (err) {
@@ -458,6 +508,188 @@ app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) =>
     res.json(lineage);
   } catch (err) {
     console.error("GET /api/prompts/:promptId/lineage error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Campaign Routes ============
+
+// GET /api/clients/:clientId/campaigns - List campaigns for client
+app.get("/api/clients/:clientId/campaigns", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const campaigns = await getCampaignsByClient(clientId);
+    res.json(campaigns);
+  } catch (err) {
+    console.error("GET /api/clients/:clientId/campaigns error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId - Campaign detail with deliverables
+app.get("/api/campaigns/:campaignId", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const campaign = await getCampaign(campaignId);
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    const deliverables = await getDeliverablesByCampaign(campaignId);
+    res.json({ ...campaign, deliverablesList: deliverables });
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/clients/:clientId/campaigns - Create campaign
+app.post("/api/clients/:clientId/campaigns", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const { name, prompt, platforms, mode, maxRetries } = req.body;
+    if (!name) {
+      res.status(400).json({ error: "name is required" });
+      return;
+    }
+    const campaign = await createCampaign({
+      clientId,
+      name,
+      prompt,
+      platforms,
+      mode,
+      maxRetries,
+    });
+    res.status(201).json(campaign);
+  } catch (err) {
+    console.error("POST /api/clients/:clientId/campaigns error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Deliverable Routes ============
+
+// GET /api/campaigns/:campaignId/deliverables - List deliverables
+app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const deliverables = await getDeliverablesByCampaign(campaignId);
+    res.json(deliverables);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/deliverables error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/campaigns/:campaignId/deliverables - Create deliverable
+app.post("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const { description, aiModel, originalPrompt } = req.body;
+    const deliverable = await createDeliverable({
+      campaignId,
+      description,
+      aiModel,
+      originalPrompt,
+    });
+    res.status(201).json(deliverable);
+  } catch (err) {
+    console.error("POST /api/campaigns/:campaignId/deliverables error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/deliverables/:deliverableId - Deliverable detail with linked artifacts
+app.get("/api/deliverables/:deliverableId", async (req: Request, res: Response) => {
+  try {
+    const deliverableId = getParam(req, "deliverableId");
+    const deliverable = await getDeliverable(deliverableId);
+    if (!deliverable) {
+      res.status(404).json({ error: "Deliverable not found" });
+      return;
+    }
+    res.json(deliverable);
+  } catch (err) {
+    console.error("GET /api/deliverables/:deliverableId error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/deliverables/:deliverableId/status - Transition deliverable status
+app.patch("/api/deliverables/:deliverableId/status", async (req: Request, res: Response) => {
+  try {
+    const deliverableId = getParam(req, "deliverableId");
+    const { status, rejectionReason, currentPrompt } = req.body;
+
+    if (!status) {
+      res.status(400).json({ error: "status is required" });
+      return;
+    }
+
+    const deliverable = await getDeliverable(deliverableId);
+    if (!deliverable) {
+      res.status(404).json({ error: "Deliverable not found" });
+      return;
+    }
+
+    const updated = await updateDeliverableStatus(
+      deliverableId,
+      deliverable.status,
+      status,
+      { rejectionReason, currentPrompt },
+    );
+    res.json(updated);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Internal server error";
+    if (msg.startsWith("Invalid deliverable transition")) {
+      res.status(400).json({ error: msg });
+    } else {
+      console.error("PATCH /api/deliverables/:deliverableId/status error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+});
+
+// POST /api/deliverables/:deliverableId/regenerate - Trigger regeneration
+app.post("/api/deliverables/:deliverableId/regenerate", async (req: Request, res: Response) => {
+  try {
+    const deliverableId = getParam(req, "deliverableId");
+    const { updatedPrompt } = req.body as { updatedPrompt?: string };
+
+    const deliverable = await getDeliverable(deliverableId);
+    if (!deliverable) {
+      res.status(404).json({ error: "Deliverable not found" });
+      return;
+    }
+
+    if (deliverable.status !== "rejected") {
+      res.status(400).json({ error: "Deliverable must be rejected before regeneration" });
+      return;
+    }
+
+    // Check max retries against campaign
+    const campaign = await getCampaign(deliverable.campaignId);
+    if (campaign && deliverable.retryCount >= campaign.maxRetries) {
+      res.status(400).json({
+        error: `Max retries (${campaign.maxRetries}) reached for this deliverable`,
+      });
+      return;
+    }
+
+    // Update prompt if provided, then increment retry
+    if (updatedPrompt) {
+      await updateDeliverableStatus(deliverableId, "rejected", "regenerating", {
+        currentPrompt: updatedPrompt,
+      });
+    } else {
+      await incrementDeliverableRetry(deliverableId);
+    }
+
+    // Re-fetch to return updated state
+    const updated = await getDeliverable(deliverableId);
+    res.json(updated);
+  } catch (err) {
+    console.error("POST /api/deliverables/:deliverableId/regenerate error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

@@ -4,6 +4,18 @@ export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "co
 
 export type StageStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
+export type DeliverableStatus = "pending" | "generating" | "reviewing" | "approved" | "rejected" | "regenerating";
+
+// Valid status transitions for deliverables — enforced by updateDeliverableStatus
+export const VALID_DELIVERABLE_TRANSITIONS: Record<DeliverableStatus, DeliverableStatus[]> = {
+  pending: ["generating"],
+  generating: ["reviewing"],
+  reviewing: ["approved", "rejected"],
+  approved: [],
+  rejected: ["regenerating"],
+  regenerating: ["generating"],
+};
+
 export interface RunStage {
   id: string;
   name: string;
@@ -78,6 +90,7 @@ export interface Artifact {
   runId: string;
   clientId?: string;
   campaignId?: string;
+  deliverableId?: string;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
@@ -86,6 +99,35 @@ export interface Artifact {
   size?: number;
   metadata?: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface CampaignDeliverable {
+  id: string;
+  campaignId: string;
+  description?: string;
+  aiModel?: string;
+  currentPrompt?: string;
+  originalPrompt?: string;
+  status: DeliverableStatus;
+  retryCount: number;
+  rejectionReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Campaign {
+  id: string;
+  clientId: string;
+  name: string;
+  prompt?: string;
+  deliverables?: unknown;
+  platforms?: string[];
+  mode?: string;
+  maxRetries: number;
+  referenceImages?: string[];
+  guardrails?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface HitlDecision {
@@ -134,6 +176,7 @@ export interface PromptScore {
 export interface RunCreatePayload {
   mode: RunMode;
   campaignId?: string;
+  deliverableIds?: string[];
   inputs?: Record<string, unknown>;
 }
 

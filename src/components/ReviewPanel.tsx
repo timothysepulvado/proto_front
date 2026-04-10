@@ -19,10 +19,12 @@ import {
   getHitlDecisions,
   submitBatchHitlDecisions,
   approveReview,
+  getCampaignDeliverables,
   type Artifact,
   type RejectionCategory,
   type HitlDecision,
   type HitlDecisionType,
+  type CampaignDeliverable,
 } from "../api";
 import noiseTexture from "../assets/noise.svg";
 
@@ -95,6 +97,7 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
   const [categories, setCategories] = useState<RejectionCategory[]>([]);
   const [existingDecisions, setExistingDecisions] = useState<HitlDecision[]>([]);
   const [decisions, setDecisions] = useState<Map<string, ArtifactDecision>>(new Map());
+  const [deliverableMap, setDeliverableMap] = useState<Map<string, CampaignDeliverable>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -113,6 +116,27 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
         setArtifacts(arts);
         setCategories(cats);
         setExistingDecisions(existing);
+
+        // Load deliverable data if any artifacts have deliverableId
+        const campaignIds = new Set(
+          arts.filter((a) => a.deliverableId).map((a) => a.campaignId).filter(Boolean) as string[]
+        );
+        if (campaignIds.size > 0) {
+          try {
+            const allDeliverables = await Promise.all(
+              Array.from(campaignIds).map((cId) => getCampaignDeliverables(cId))
+            );
+            const dMap = new Map<string, CampaignDeliverable>();
+            for (const batch of allDeliverables) {
+              for (const d of batch) {
+                dMap.set(d.id, d);
+              }
+            }
+            setDeliverableMap(dMap);
+          } catch {
+            // Non-fatal — deliverable context is optional
+          }
+        }
 
         // Pre-populate decisions map
         const map = new Map<string, ArtifactDecision>();
@@ -341,6 +365,30 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
                           : "bg-white/[0.02] border-white/5 hover:border-white/10"
                   }`}
                 >
+                  {/* Deliverable context badge */}
+                  {artifact.deliverableId && deliverableMap.has(artifact.deliverableId) && (() => {
+                    const del = deliverableMap.get(artifact.deliverableId!)!;
+                    const statusColor =
+                      del.status === "approved" ? "text-emerald-400 border-emerald-500/30" :
+                      del.status === "rejected" ? "text-red-400 border-red-500/30" :
+                      del.status === "reviewing" ? "text-amber-400 border-amber-500/30" :
+                      del.status === "generating" ? "text-cyan-400 border-cyan-500/30" :
+                      "text-white/30 border-white/10";
+                    return (
+                      <div className="px-4 pt-3 pb-1 flex items-center space-x-2">
+                        <span className="text-[8px] font-mono text-white/40 uppercase tracking-wider">
+                          Deliverable:
+                        </span>
+                        <span className="text-[8px] font-mono text-white/60 truncate max-w-[200px]">
+                          {del.description || del.id.slice(0, 8)}
+                        </span>
+                        <span className={`text-[7px] font-mono uppercase px-1.5 py-0.5 rounded border ${statusColor}`}>
+                          {del.status}
+                        </span>
+                      </div>
+                    );
+                  })()}
+
                   {/* Artifact Header */}
                   <button
                     onClick={() => setExpandedArtifact(isExpanded ? null : artifact.id)}

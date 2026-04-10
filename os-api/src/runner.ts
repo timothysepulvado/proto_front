@@ -1,8 +1,8 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, Artifact, StageStatus } from "./types.js";
-import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getCampaign } from "./db.js";
+import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable } from "./types.js";
+import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getCampaign, getPendingDeliverables, updateDeliverableStatus } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -66,6 +66,7 @@ async function createArtifactWithUpload(opts: {
   runId: string;
   clientId: string;
   campaignId?: string;
+  deliverableId?: string;
   type: Artifact["type"];
   name: string;
   localPath: string;
@@ -88,6 +89,7 @@ async function createArtifactWithUpload(opts: {
     runId: opts.runId,
     clientId: opts.clientId,
     campaignId: opts.campaignId,
+    deliverableId: opts.deliverableId,
     type: opts.type,
     name: opts.name,
     // Use public URL if uploaded, otherwise fall back to local path
@@ -369,11 +371,112 @@ async function executeRetrieveStage(run: Run): Promise<boolean> {
   }
 }
 
+/**
+ * Generate a single deliverable — transitions through generating → reviewing,
+ * creates artifact linked to the deliverable.
+ */
+async function executeDeliverableGeneration(
+  run: Run,
+  deliverable: CampaignDeliverable,
+  campaign: Campaign,
+  stageId: string,
+): Promise<void> {
+  const brandName = run.clientId.replace("client_", "");
+
+  await emitLog(run.runId, stageId, "info",
+    `Generating deliverable: ${deliverable.description ?? deliverable.id.slice(0, 8)}`);
+
+  // Transition to generating
+  await updateDeliverableStatus(deliverable.id, deliverable.status, "generating");
+
+  // Build prompt from deliverable → campaign fallback
+  let prompt = deliverable.currentPrompt ?? deliverable.originalPrompt ?? campaign.prompt ?? `Brand campaign image for ${brandName}`;
+
+  // Enrich with brand context
+  const brandContext = retrievalContext.get(run.runId);
+  if (brandContext) {
+    prompt = `${prompt}. Brand context: ${brandContext}`;
+  }
+
+  const pythonPath = getPythonPath(TEMP_GEN_VENV);
+  const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
+  const fileName = `deliverable_${deliverable.id.slice(0, 8)}.png`;
+
+  const result = await runCommand(
+    run.runId,
+    stageId,
+    pythonPath,
+    [
+      "main.py",
+      "nano",
+      "generate",
+      "--prompt", prompt,
+      "--output", path.join(outputDir, fileName),
+    ],
+    TEMP_GEN_PATH,
+  );
+
+  if (result.success) {
+    await createArtifactWithUpload({
+      runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      deliverableId: deliverable.id,
+      type: "image",
+      name: fileName,
+      localPath: path.join(outputDir, fileName),
+      stage: stageId,
+      metadata: { model: deliverable.aiModel ?? "gemini-3-pro-image", prompt },
+    });
+  } else {
+    // Demo fallback — still create artifact and transition
+    await emitLog(run.runId, stageId, "warn",
+      `[DEMO] Deliverable generation fallback for ${deliverable.id.slice(0, 8)}`);
+    await new Promise(r => setTimeout(r, 1500));
+    await createArtifactWithUpload({
+      runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      deliverableId: deliverable.id,
+      type: "image",
+      name: fileName,
+      localPath: path.join(outputDir, fileName),
+      stage: stageId,
+      metadata: { model: "demo", prompt },
+    });
+  }
+
+  // Transition to reviewing
+  await updateDeliverableStatus(deliverable.id, "generating", "reviewing");
+  await emitLog(run.runId, stageId, "info",
+    `Deliverable ${deliverable.id.slice(0, 8)} → reviewing`);
+}
+
 async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_images";
   run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
   await emitLog(run.runId, stageId, "info", "Starting image generation with Temp-gen...");
+
+  // Campaign deliverable branch — generate per-deliverable
+  if (run.campaignId) {
+    const campaign = await getCampaign(run.campaignId);
+    if (campaign) {
+      const deliverables = await getPendingDeliverables(run.campaignId);
+      if (deliverables.length > 0) {
+        await emitLog(run.runId, stageId, "info",
+          `Processing ${deliverables.length} deliverable(s) for campaign "${campaign.name}"`);
+        for (const d of deliverables) {
+          await executeDeliverableGeneration(run, d, campaign, stageId);
+        }
+        // Clean up retrieval context after all deliverables
+        retrievalContext.delete(run.runId);
+        run = await updateStageStatus(run, stageId, "completed");
+        return true;
+      }
+    }
+    // Fall through to existing non-deliverable flow
+  }
 
   const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
@@ -384,7 +487,7 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
     try {
       const campaign = await getCampaign(run.campaignId);
       if (campaign?.prompt) {
-        prompt = campaign.prompt as string;
+        prompt = campaign.prompt;
         await emitLog(run.runId, stageId, "info", `Using campaign prompt: "${prompt.substring(0, 80)}..."`);
       }
     } catch {
@@ -460,8 +563,66 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
   const brandName = run.clientId.replace("client_", "");
   await emitLog(run.runId, stageId, "info", "Starting video generation with Temp-gen...");
 
+  // Campaign deliverable branch for video
+  if (run.campaignId) {
+    const campaign = await getCampaign(run.campaignId);
+    if (campaign) {
+      const deliverables = await getPendingDeliverables(run.campaignId);
+      if (deliverables.length > 0) {
+        await emitLog(run.runId, stageId, "info",
+          `Processing ${deliverables.length} video deliverable(s) for campaign "${campaign.name}"`);
+        for (const d of deliverables) {
+          // Video deliverables follow same flow but with video type
+          await emitLog(run.runId, stageId, "info",
+            `Generating video deliverable: ${d.description ?? d.id.slice(0, 8)}`);
+          await updateDeliverableStatus(d.id, d.status, "generating");
+
+          const prompt = d.currentPrompt ?? d.originalPrompt ?? campaign.prompt ?? `Brand campaign video for ${brandName}`;
+          const fileName = `deliverable_${d.id.slice(0, 8)}.mp4`;
+          const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
+
+          const result = await runCommand(
+            run.runId, stageId, getPythonPath(TEMP_GEN_VENV),
+            ["main.py", "veo", "generate", "--prompt", prompt, "--output", path.join(outputDir, fileName)],
+            TEMP_GEN_PATH,
+          );
+
+          if (!result.success) {
+            await emitLog(run.runId, stageId, "warn", `[DEMO] Video deliverable fallback for ${d.id.slice(0, 8)}`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+
+          await createArtifactWithUpload({
+            runId: run.runId, clientId: run.clientId, campaignId: run.campaignId,
+            deliverableId: d.id, type: "video", name: fileName,
+            localPath: path.join(outputDir, fileName), stage: stageId,
+            metadata: { model: result.success ? "veo-3.1" : "demo", prompt },
+          });
+
+          await updateDeliverableStatus(d.id, "generating", "reviewing");
+        }
+        run = await updateStageStatus(run, stageId, "completed");
+        return true;
+      }
+    }
+  }
+
   const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
+
+  // Use campaign prompt if available
+  let videoPrompt = `Brand campaign video for ${brandName}`;
+  if (run.campaignId) {
+    try {
+      const campaign = await getCampaign(run.campaignId);
+      if (campaign?.prompt) {
+        videoPrompt = campaign.prompt;
+        await emitLog(run.runId, stageId, "info", `Using campaign prompt for video: "${videoPrompt.substring(0, 80)}..."`);
+      }
+    } catch {
+      await emitLog(run.runId, stageId, "warn", "Failed to load campaign prompt — using default");
+    }
+  }
 
   const result = await runCommand(
     run.runId,
@@ -471,13 +632,12 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
       "main.py",
       "veo",
       "generate",
-      "--prompt", `Brand campaign video for ${brandName}`,
+      "--prompt", videoPrompt,
       "--output", path.join(outputDir, "generated.mp4"),
     ],
     TEMP_GEN_PATH
   );
 
-  const videoPrompt = `Brand campaign video for ${brandName}`;
   if (result.success) {
     await createArtifactWithUpload({
       runId: run.runId,

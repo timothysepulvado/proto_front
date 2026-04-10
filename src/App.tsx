@@ -22,6 +22,7 @@ import type { HudRoot } from "./types/hud";
 import desktopBg from "./assets/desktop-bg.png";
 import noiseTexture from "./assets/noise.svg";
 import ReviewPanel from "./components/ReviewPanel";
+import DeliverableTracker from "./components/DeliverableTracker";
 import {
   createRun,
   cancelRun,
@@ -838,6 +839,12 @@ export default function App() {
                     <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
                       <ShieldCheck size={10} className="mr-1.5" />
                       No pending reviews — all clear
+                    </p>
+                  ) : activePillar === "creative" && currentRun?.campaignId ? (
+                    <DeliverableTracker campaignId={currentRun.campaignId} />
+                  ) : activePillar === "creative" ? (
+                    <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
+                      No active campaign — start a campaign run to track deliverables
                     </p>
                   ) : (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">

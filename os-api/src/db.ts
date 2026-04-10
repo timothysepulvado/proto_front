@@ -1,5 +1,6 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, PromptTemplate, PromptScore, RunStatus, RunStage } from "./types.js";
+import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, PromptTemplate, PromptScore, RunStatus, RunStage, Campaign, CampaignDeliverable, DeliverableStatus } from "./types.js";
+import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -33,6 +34,7 @@ interface DbArtifact {
   run_id: string;
   client_id: string | null;
   campaign_id: string | null;
+  deliverable_id: string | null;
   type: "image" | "video" | "report" | "package";
   name: string;
   path: string;
@@ -91,6 +93,7 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
     runId: dbArtifact.run_id,
     clientId: dbArtifact.client_id ?? undefined,
     campaignId: dbArtifact.campaign_id ?? undefined,
+    deliverableId: dbArtifact.deliverable_id ?? undefined,
     type: dbArtifact.type,
     name: dbArtifact.name,
     path: dbArtifact.path,
@@ -253,6 +256,7 @@ export async function addArtifact(artifact: Artifact): Promise<Artifact> {
       run_id: artifact.runId,
       client_id: artifact.clientId ?? null,
       campaign_id: artifact.campaignId ?? null,
+      deliverable_id: artifact.deliverableId ?? null,
       type: artifact.type,
       name: artifact.name,
       path: artifact.path,
@@ -485,9 +489,78 @@ export async function addDriftAlert(alert: DriftAlert): Promise<DriftAlert> {
   };
 }
 
+// ============ Campaign & Deliverable DB Row Types ============
+
+interface DbCampaign {
+  id: string;
+  client_id: string;
+  name: string;
+  prompt: string | null;
+  deliverables: unknown | null;
+  platforms: unknown | null;
+  mode: string | null;
+  max_retries: number | null;
+  reference_images: string[] | null;
+  guardrails: Record<string, unknown> | null;
+  status: string | null;
+  total_deliverables: number | null;
+  approved_count: number | null;
+  failed_count: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbCampaignDeliverable {
+  id: string;
+  campaign_id: string;
+  description: string | null;
+  ai_model: string | null;
+  current_prompt: string | null;
+  original_prompt: string | null;
+  status: string;
+  retry_count: number;
+  rejection_reasons: string[] | null;
+  custom_rejection_note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
+  return {
+    id: db.id,
+    clientId: db.client_id,
+    name: db.name,
+    prompt: db.prompt ?? undefined,
+    deliverables: db.deliverables ?? undefined,
+    platforms: Array.isArray(db.platforms) ? db.platforms as string[] : undefined,
+    mode: db.mode ?? undefined,
+    maxRetries: db.max_retries ?? 3,
+    referenceImages: db.reference_images ?? undefined,
+    guardrails: db.guardrails ?? undefined,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliverable {
+  return {
+    id: db.id,
+    campaignId: db.campaign_id,
+    description: db.description ?? undefined,
+    aiModel: db.ai_model ?? undefined,
+    currentPrompt: db.current_prompt ?? undefined,
+    originalPrompt: db.original_prompt ?? undefined,
+    status: db.status as DeliverableStatus,
+    retryCount: db.retry_count,
+    rejectionReason: db.custom_rejection_note ?? undefined,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
 // ============ Campaign Operations ============
 
-export async function getCampaign(campaignId: string): Promise<Record<string, unknown> | null> {
+export async function getCampaign(campaignId: string): Promise<Campaign | null> {
   const { data, error } = await supabase
     .from("campaigns")
     .select("*")
@@ -498,7 +571,179 @@ export async function getCampaign(campaignId: string): Promise<Record<string, un
     throw new Error(`Failed to get campaign: ${error.message}`);
   }
 
-  return data;
+  if (!data) return null;
+  return mapDbCampaignToCampaign(data as DbCampaign);
+}
+
+export async function getCampaignsByClient(clientId: string): Promise<Campaign[]> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to get campaigns by client: ${error.message}`);
+  }
+
+  return (data as DbCampaign[]).map(mapDbCampaignToCampaign);
+}
+
+export async function createCampaign(campaign: {
+  clientId: string;
+  name: string;
+  prompt?: string;
+  platforms?: string[];
+  mode?: string;
+  maxRetries?: number;
+}): Promise<Campaign> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .insert({
+      client_id: campaign.clientId,
+      name: campaign.name,
+      prompt: campaign.prompt ?? null,
+      platforms: campaign.platforms ?? null,
+      mode: campaign.mode ?? "full",
+      max_retries: campaign.maxRetries ?? 3,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create campaign: ${error.message}`);
+  }
+
+  return mapDbCampaignToCampaign(data as DbCampaign);
+}
+
+// ============ Deliverable Operations ============
+
+export async function getDeliverablesByCampaign(campaignId: string): Promise<CampaignDeliverable[]> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to get deliverables: ${error.message}`);
+  }
+
+  return (data as DbCampaignDeliverable[]).map(mapDbDeliverableToDeliverable);
+}
+
+export async function getPendingDeliverables(campaignId: string): Promise<CampaignDeliverable[]> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .in("status", ["pending", "regenerating"])
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw new Error(`Failed to get pending deliverables: ${error.message}`);
+  }
+
+  return (data as DbCampaignDeliverable[]).map(mapDbDeliverableToDeliverable);
+}
+
+export async function getDeliverable(deliverableId: string): Promise<CampaignDeliverable | null> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("*")
+    .eq("id", deliverableId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get deliverable: ${error.message}`);
+  }
+
+  if (!data) return null;
+  return mapDbDeliverableToDeliverable(data as DbCampaignDeliverable);
+}
+
+export async function createDeliverable(deliverable: {
+  campaignId: string;
+  description?: string;
+  aiModel?: string;
+  originalPrompt?: string;
+}): Promise<CampaignDeliverable> {
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .insert({
+      campaign_id: deliverable.campaignId,
+      description: deliverable.description ?? null,
+      ai_model: deliverable.aiModel ?? null,
+      original_prompt: deliverable.originalPrompt ?? null,
+      current_prompt: deliverable.originalPrompt ?? null,
+      status: "pending",
+      retry_count: 0,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to create deliverable: ${error.message}`);
+  }
+
+  return mapDbDeliverableToDeliverable(data as DbCampaignDeliverable);
+}
+
+export async function updateDeliverableStatus(
+  deliverableId: string,
+  currentStatus: DeliverableStatus,
+  newStatus: DeliverableStatus,
+  extras?: { rejectionReason?: string; currentPrompt?: string },
+): Promise<CampaignDeliverable> {
+  // Validate transition
+  const allowed = VALID_DELIVERABLE_TRANSITIONS[currentStatus];
+  if (!allowed.includes(newStatus)) {
+    throw new Error(`Invalid deliverable transition: ${currentStatus} → ${newStatus}`);
+  }
+
+  const updateData: Record<string, unknown> = { status: newStatus };
+  if (extras?.rejectionReason !== undefined) updateData.custom_rejection_note = extras.rejectionReason;
+  if (extras?.currentPrompt !== undefined) updateData.current_prompt = extras.currentPrompt;
+
+  // Use .eq('status', currentStatus) for race-condition safety
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .update(updateData)
+    .eq("id", deliverableId)
+    .eq("status", currentStatus)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update deliverable status: ${error.message}`);
+  }
+
+  return mapDbDeliverableToDeliverable(data as DbCampaignDeliverable);
+}
+
+export async function incrementDeliverableRetry(deliverableId: string): Promise<CampaignDeliverable> {
+  // First get current state
+  const deliverable = await getDeliverable(deliverableId);
+  if (!deliverable) {
+    throw new Error(`Deliverable ${deliverableId} not found`);
+  }
+
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .update({
+      retry_count: deliverable.retryCount + 1,
+      status: "regenerating",
+    })
+    .eq("id", deliverableId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to increment deliverable retry: ${error.message}`);
+  }
+
+  return mapDbDeliverableToDeliverable(data as DbCampaignDeliverable);
 }
 
 // ============ Prompt Template Operations ============
