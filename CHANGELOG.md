@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-04-10
+
+### Added
+- **Campaign deliverable tracking** — full per-asset lifecycle wired through generation + HITL pipeline. Status machine: `pending → generating → reviewing → approved/rejected → regenerating`.
+- **`DeliverableTracker.tsx`** — new component with live status badges, retry counts, and Supabase Realtime subscription. Renders in Creative Studio pillar when a campaign run is active.
+- **8 new API routes** — campaign CRUD (`GET/POST /api/clients/:clientId/campaigns`, `GET /api/campaigns/:campaignId`), deliverable CRUD + lifecycle (`GET/POST /api/campaigns/:campaignId/deliverables`, `GET /api/deliverables/:deliverableId`, `PATCH /api/deliverables/:deliverableId/status`, `POST /api/deliverables/:deliverableId/regenerate`).
+- **`executeDeliverableGeneration()`** in runner.ts — per-deliverable prompt building from deliverable → campaign fallback, artifact linking via `deliverable_id`, status transitions with optimistic lock.
+- **HITL cascade** — approve route batch-updates all `reviewing` deliverables to `approved`; reject route targets specific deliverable or all, with rejection reason stored.
+- **Migration 005** (`005_deliverable_tracking.sql`) — `artifacts.deliverable_id` FK, status index on `campaign_deliverables`, `updated_at` trigger, extended `deliverable_status` enum with `reviewing/rejected/regenerating`.
+- **Realtime subscription** — `subscribeToCampaignDeliverables()` in frontend api.ts for live deliverable status updates.
+- **ReviewPanel deliverable context** — shows deliverable description + status badge above artifact cards when artifact has `deliverableId`.
+
+### Changed
+- `os-api/src/types.ts` — added `DeliverableStatus` type, `VALID_DELIVERABLE_TRANSITIONS` map, `Campaign` and `CampaignDeliverable` interfaces, `Artifact.deliverableId`, `RunCreatePayload.deliverableIds`.
+- `os-api/src/db.ts` — 8 new functions, `getCampaign()` now returns typed `Campaign` (was `Record<string, unknown>`), `DbArtifact`/`addArtifact()` include `deliverable_id`. DB row types aligned with live Supabase schema.
+- `os-api/src/runner.ts` — image and video stages branch on `run.campaignId` + pending deliverables. Video stage now supports campaign prompt (was hardcoded).
+- `src/api.ts` — `Run.campaignId` wired through `DbRun` mapper, `Artifact.deliverableId` wired, new types + query functions.
+- `src/App.tsx` — imports and renders `DeliverableTracker` in Creative Studio pillar.
+
 ## [0.5.3] - 2026-04-09
 
 ### Added
