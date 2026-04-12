@@ -69,6 +69,22 @@ export interface DriftAlert {
   createdAt?: string;
 }
 
+export interface BrandBaseline {
+  id?: string;
+  clientId: string;
+  version: number;
+  isActive: boolean;
+  geminiBaselineZ?: number;
+  cohereBaselineZ?: number;
+  fusedBaselineZ?: number;
+  geminiBaselineRaw?: number;
+  cohereBaselineRaw?: number;
+  geminiStddev?: number;
+  cohereStddev?: number;
+  sampleCount?: number;
+  createdAt?: string;
+}
+
 export interface RunLog {
   id: number;
   runId: string;

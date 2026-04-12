@@ -157,6 +157,12 @@ class DriftRequest(BaseModel):
     brand_slug: str
     text_query: Optional[str] = None
     index_tier: str = Field(default="core")
+    # Baseline stats passed from os-api (read from brand_baselines table)
+    baseline_fused_z: Optional[float] = Field(default=None, description="Fused baseline z-score from brand_baselines")
+    baseline_gemini_raw: Optional[float] = Field(default=None, description="Gemini baseline raw similarity mean")
+    baseline_gemini_stddev: Optional[float] = Field(default=None, description="Gemini baseline raw similarity stddev")
+    baseline_cohere_raw: Optional[float] = Field(default=None, description="Cohere baseline raw similarity mean")
+    baseline_cohere_stddev: Optional[float] = Field(default=None, description="Cohere baseline raw similarity stddev")
 
 
 class HealthResponse(BaseModel):

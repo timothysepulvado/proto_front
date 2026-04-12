@@ -52,6 +52,7 @@ class BrandGrader:
         text_query: Optional[str] = None,
         include_pixel_analysis: bool = True,
         index_tier: str = "brand-dna",
+        baseline_stats: Optional[dict] = None,
     ) -> GradeResult:
         """Grade an image against a brand profile.
 
@@ -61,6 +62,8 @@ class BrandGrader:
             text_query: Optional text query for semantic matching.
             include_pixel_analysis: Whether to run pixel analysis.
             index_tier: Pinecone index tier to query.
+            baseline_stats: Optional dict with baseline mean/stddev per model
+                           from brand_baselines table.
 
         Returns:
             GradeResult with fusion scores, pixel analysis, and gate decision.
@@ -75,6 +78,7 @@ class BrandGrader:
             profile=profile,
             text_query=text_query,
             index_tier=index_tier,
+            baseline_stats=baseline_stats,
         )
 
         self._log(

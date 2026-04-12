@@ -24,6 +24,7 @@ import noiseTexture from "./assets/noise.svg";
 import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
 import DriftAlertPanel from "./components/DriftAlertPanel";
+import BaselinePanel from "./components/BaselinePanel";
 import {
   createRun,
   cancelRun,
@@ -848,7 +849,10 @@ export default function App() {
                       No active campaign — start a campaign run to track deliverables
                     </p>
                   ) : activePillar === "drift" && activeClient ? (
-                    <DriftAlertPanel clientId={activeClient} currentRunId={currentRun?.runId} />
+                    <>
+                      <BaselinePanel clientId={activeClient} />
+                      <DriftAlertPanel clientId={activeClient} currentRunId={currentRun?.runId} />
+                    </>
                   ) : activePillar === "drift" ? (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
                       Select a client to view drift alerts

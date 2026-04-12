@@ -51,6 +51,7 @@ class DualFusionRetriever:
         text_query: Optional[str] = None,
         index_tier: str = "brand-dna",
         top_k: int = DEFAULT_TOP_K,
+        baseline_stats: Optional[dict] = None,
     ) -> FusionResult:
         """Run dual-fusion retrieval against a brand's Pinecone indexes.
 
@@ -60,6 +61,8 @@ class DualFusionRetriever:
             text_query: Optional text to match semantically.
             index_tier: Which index tier to query (brand-dna, core, campaign).
             top_k: Number of results per query.
+            baseline_stats: Optional dict with baseline_gemini_raw, baseline_gemini_stddev,
+                           baseline_cohere_raw, baseline_cohere_stddev from brand_baselines table.
 
         Returns:
             FusionResult with per-model scores and combined gate decision.
@@ -90,9 +93,15 @@ class DualFusionRetriever:
             cohere_index_name, embeddings.cohere_1536, "cohere", top_k
         )
 
-        # Z-score normalization (using baseline if available, else raw)
-        gemini_z = self._normalize_z(gemini_score.raw_score, profile, "gemini")
-        cohere_z = self._normalize_z(cohere_score.raw_score, profile, "cohere")
+        # Extract per-model baseline stats if provided
+        gemini_mean = baseline_stats.get("baseline_gemini_raw") if baseline_stats else None
+        gemini_std = baseline_stats.get("baseline_gemini_stddev") if baseline_stats else None
+        cohere_mean = baseline_stats.get("baseline_cohere_raw") if baseline_stats else None
+        cohere_std = baseline_stats.get("baseline_cohere_stddev") if baseline_stats else None
+
+        # Z-score normalization (using baseline if available, else defaults)
+        gemini_z = self._normalize_z(gemini_score.raw_score, profile, "gemini", gemini_mean, gemini_std)
+        cohere_z = self._normalize_z(cohere_score.raw_score, profile, "cohere", cohere_mean, cohere_std)
 
         gemini_score.z_score = gemini_z
         cohere_score.z_score = cohere_z
@@ -159,22 +168,21 @@ class DualFusionRetriever:
         raw_score: float,
         profile: BrandProfile,
         model_name: str,
+        baseline_mean: Optional[float] = None,
+        baseline_std: Optional[float] = None,
     ) -> float:
         """Normalize a raw cosine similarity to a z-score using brand baseline.
 
-        If no baseline exists, returns the raw score shifted to approximate z-scale.
+        Uses provided baseline stats from brand_baselines table when available.
+        Falls back to approximate z-scale centering if no baseline exists.
         """
-        # Look for baseline in profile indexes metadata
-        # In production, baseline stats come from brand_baselines table
-        # For now, use a simple centering: z = (raw - 0.5) / 0.15
-        # This maps typical cosine similarities (~0.3-0.8) to roughly z-scale
-        baseline_mean = 0.5
-        baseline_std = 0.15
+        mean = baseline_mean if baseline_mean is not None else 0.5
+        std = baseline_std if baseline_std is not None else 0.15
 
-        if baseline_std == 0:
+        if std == 0:
             return 0.0
 
-        return (raw_score - baseline_mean) / baseline_std
+        return (raw_score - mean) / std
 
     def _gate(self, combined_z: float, thresholds: BrandThresholds) -> str:
         """Apply gate decision based on combined z-score and thresholds."""

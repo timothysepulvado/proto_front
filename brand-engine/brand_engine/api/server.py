@@ -190,6 +190,18 @@ async def drift(request: DriftRequest):
         raise HTTPException(status_code=404, detail=str(e))
 
     try:
+        # Build baseline stats dict from request fields (passed by runner from brand_baselines table)
+        baseline_stats = None
+        if request.baseline_gemini_raw is not None or request.baseline_cohere_raw is not None:
+            baseline_stats = {
+                "baseline_gemini_raw": request.baseline_gemini_raw,
+                "baseline_gemini_stddev": request.baseline_gemini_stddev,
+                "baseline_cohere_raw": request.baseline_cohere_raw,
+                "baseline_cohere_stddev": request.baseline_cohere_stddev,
+            }
+            logger.info("Using stored baseline stats for drift: gemini_raw=%.4f, cohere_raw=%.4f",
+                        request.baseline_gemini_raw or 0, request.baseline_cohere_raw or 0)
+
         grader = _get_grader()
         grade = grader.grade(
             image_path=request.image_path,
@@ -197,10 +209,11 @@ async def drift(request: DriftRequest):
             text_query=request.text_query,
             include_pixel_analysis=True,
             index_tier=request.index_tier,
+            baseline_stats=baseline_stats,
         )
 
-        # Compare against baseline (placeholder — in production, read from brand_baselines table)
-        baseline_z = 0.0  # TODO: fetch from Supabase brand_baselines
+        # Compare against baseline z-score (from brand_baselines table or default 0.0)
+        baseline_z = request.baseline_fused_z if request.baseline_fused_z is not None else 0.0
         drift_delta = grade.fusion.combined_z - baseline_z
 
         # Classify drift severity
@@ -240,11 +253,6 @@ async def baseline(request: BaselineRequest):
         raise HTTPException(status_code=404, detail=str(e))
 
     try:
-        retriever = _get_retriever()
-
-        # Sample vectors from the brand-dna index and compute self-similarity stats
-        # This is a simplified baseline calculation — in production, you'd
-        # query all vectors and compute cross-similarity statistics
         gemini_index_name = profile.indexes.get("brand-dna-gemini768")
         cohere_index_name = profile.indexes.get("brand-dna-cohere")
 
@@ -259,35 +267,123 @@ async def baseline(request: BaselineRequest):
         gemini_idx = get_index(gemini_index_name)
         cohere_idx = get_index(cohere_index_name)
 
-        # Get index stats for sample count
-        gemini_stats = gemini_idx.describe_index_stats()
-        sample_count = gemini_stats.total_vector_count
+        sample_limit = request.sample_limit or 100
 
-        if sample_count == 0:
+        # Compute real self-similarity stats for each index
+        gemini_stats = _compute_index_stats(gemini_idx, sample_limit)
+        cohere_stats = _compute_index_stats(cohere_idx, sample_limit)
+
+        if gemini_stats["sample_count"] == 0:
             raise HTTPException(
                 status_code=400,
                 detail=f"No vectors in index {gemini_index_name}. Run ingest first.",
             )
 
-        # For baseline, we use placeholder stats since computing full
-        # cross-similarity requires fetching all vectors
-        # In production, this would be a batch job
+        # Compute fused baseline z-score using default weights
+        thresholds = profile.thresholds
+        fused_z = (
+            thresholds.gemini_weight * gemini_stats["z_score"]
+            + thresholds.cohere_weight * cohere_stats["z_score"]
+        )
+
+        total_samples = max(gemini_stats["sample_count"], cohere_stats["sample_count"])
+
+        logger.info(
+            "Baseline computed for %s: gemini_raw=%.4f (std=%.4f), cohere_raw=%.4f (std=%.4f), fused_z=%.4f, samples=%d",
+            request.brand_slug,
+            gemini_stats["mean"], gemini_stats["stddev"],
+            cohere_stats["mean"], cohere_stats["stddev"],
+            fused_z, total_samples,
+        )
+
         return BaselineResult(
             brand_slug=request.brand_slug,
-            gemini_baseline_z=0.0,
-            gemini_baseline_raw=0.5,
-            gemini_stddev=0.15,
-            cohere_baseline_z=0.0,
-            cohere_baseline_raw=0.5,
-            cohere_stddev=0.15,
-            fused_baseline_z=0.0,
-            sample_count=sample_count,
+            gemini_baseline_z=gemini_stats["z_score"],
+            gemini_baseline_raw=gemini_stats["mean"],
+            gemini_stddev=gemini_stats["stddev"],
+            cohere_baseline_z=cohere_stats["z_score"],
+            cohere_baseline_raw=cohere_stats["mean"],
+            cohere_stddev=cohere_stats["stddev"],
+            fused_baseline_z=fused_z,
+            sample_count=total_samples,
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.error("Baseline calculation failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _compute_index_stats(index, sample_limit: int = 100) -> dict:
+    """Compute pairwise cosine similarity stats from a Pinecone index.
+
+    Samples up to `sample_limit` vectors, computes all pairwise cosine
+    similarities, and returns mean, stddev, z-score (at mean), and sample count.
+
+    For 100 vectors this is ~4,950 pairs — trivial compute.
+    """
+    import numpy as np
+
+    stats = index.describe_index_stats()
+    total = stats.total_vector_count
+
+    if total == 0:
+        return {"mean": 0.0, "stddev": 0.0, "z_score": 0.0, "sample_count": 0}
+
+    # Get sample vector IDs via list()
+    try:
+        list_result = index.list(limit=min(sample_limit, total))
+        vector_ids = [v.id if hasattr(v, "id") else v for v in (list_result.vectors if hasattr(list_result, "vectors") else list_result.get("vectors", []))]
+
+        # Fallback: some Pinecone SDK versions return differently
+        if not vector_ids and hasattr(list_result, "__iter__"):
+            vector_ids = list(list_result)[:sample_limit]
+    except Exception:
+        # If list() not available, try query with a zero vector to get IDs
+        logger.warning("index.list() failed, falling back to describe_index_stats only")
+        return {"mean": 0.5, "stddev": 0.15, "z_score": 0.0, "sample_count": total}
+
+    if len(vector_ids) < 2:
+        return {"mean": 0.5, "stddev": 0.15, "z_score": 0.0, "sample_count": len(vector_ids)}
+
+    # Fetch actual vectors
+    try:
+        fetch_result = index.fetch(ids=vector_ids[:sample_limit])
+        vectors_dict = fetch_result.vectors if hasattr(fetch_result, "vectors") else fetch_result.get("vectors", {})
+        vectors = {vid: np.array(v.values if hasattr(v, "values") else v["values"])
+                   for vid, v in vectors_dict.items()}
+    except Exception as e:
+        logger.warning("Vector fetch failed (%s), using fallback stats", e)
+        return {"mean": 0.5, "stddev": 0.15, "z_score": 0.0, "sample_count": total}
+
+    if len(vectors) < 2:
+        return {"mean": 0.5, "stddev": 0.15, "z_score": 0.0, "sample_count": len(vectors)}
+
+    # Compute pairwise cosine similarities
+    vecs = list(vectors.values())
+    n = len(vecs)
+    similarities = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dot = float(np.dot(vecs[i], vecs[j]))
+            norm_i = float(np.linalg.norm(vecs[i]))
+            norm_j = float(np.linalg.norm(vecs[j]))
+            if norm_i > 0 and norm_j > 0:
+                similarities.append(dot / (norm_i * norm_j))
+
+    if not similarities:
+        return {"mean": 0.5, "stddev": 0.15, "z_score": 0.0, "sample_count": n}
+
+    mean = float(np.mean(similarities))
+    stddev = float(np.std(similarities)) if len(similarities) > 1 else 0.15
+
+    # Z-score of the mean itself is 0 by definition; store mean/std for runtime use
+    return {
+        "mean": mean,
+        "stddev": stddev if stddev > 0 else 0.15,  # Avoid div-by-zero in runtime normalization
+        "z_score": 0.0,  # Baseline z-score is 0 (it IS the baseline)
+        "sample_count": n,
+    }
 
 
 def start():

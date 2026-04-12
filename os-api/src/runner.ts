@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
 import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable } from "./types.js";
-import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getCampaign, getPendingDeliverables, updateDeliverableStatus } from "./db.js";
+import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getActiveBaseline, getCampaign, getPendingDeliverables, updateDeliverableStatus } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -685,6 +685,16 @@ async function executeDriftStage(run: Run): Promise<boolean> {
   const brandName = run.clientId.replace("client_", "");
   await emitLog(run.runId, stageId, "info", "Starting Brand Drift check...");
 
+  // Fetch active baseline from Supabase to pass to brand-engine
+  const baseline = await getActiveBaseline(run.clientId);
+  if (baseline) {
+    await emitLog(run.runId, stageId, "info",
+      `Using baseline v${baseline.version} (fused_z=${baseline.fusedBaselineZ?.toFixed(3) ?? "N/A"})`);
+  } else {
+    await emitLog(run.runId, stageId, "warn",
+      "No baseline found - drift will use default thresholds");
+  }
+
   const imagePath = path.join(TEMP_GEN_PATH, "outputs", run.runId, "generated.png");
 
   // Call brand-engine sidecar /drift
@@ -718,6 +728,13 @@ async function executeDriftStage(run: Run): Promise<boolean> {
       brand_slug: brandName,
       image_path: imagePath,
       index_tier: "core",
+      ...(baseline ? {
+        baseline_fused_z: baseline.fusedBaselineZ,
+        baseline_gemini_raw: baseline.geminiBaselineRaw,
+        baseline_gemini_stddev: baseline.geminiStddev,
+        baseline_cohere_raw: baseline.cohereBaselineRaw,
+        baseline_cohere_stddev: baseline.cohereStddev,
+      } : {}),
     },
     run.runId,
     stageId,

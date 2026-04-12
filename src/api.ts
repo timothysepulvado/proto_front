@@ -1001,6 +1001,130 @@ export function subscribeToDriftAlerts(
   };
 }
 
+// ============ Brand Baseline Operations ============
+
+const OS_API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
+
+export interface BrandBaseline {
+  id: string;
+  clientId: string;
+  version: number;
+  isActive: boolean;
+  geminiBaselineZ?: number;
+  cohereBaselineZ?: number;
+  fusedBaselineZ?: number;
+  geminiBaselineRaw?: number;
+  cohereBaselineRaw?: number;
+  geminiStddev?: number;
+  cohereStddev?: number;
+  sampleCount?: number;
+  createdAt: string;
+}
+
+interface DbBrandBaseline {
+  id: string;
+  client_id: string;
+  version: number;
+  is_active: boolean;
+  clip_baseline_z: number | null;
+  cohere_baseline_z: number | null;
+  fused_baseline_z: number | null;
+  clip_baseline_raw: number | null;
+  cohere_baseline_raw: number | null;
+  clip_stddev: number | null;
+  cohere_stddev: number | null;
+  sample_count: number | null;
+  created_at: string;
+}
+
+function mapDbBaselineToBaseline(d: DbBrandBaseline): BrandBaseline {
+  return {
+    id: d.id,
+    clientId: d.client_id,
+    version: d.version,
+    isActive: d.is_active,
+    geminiBaselineZ: d.clip_baseline_z ?? undefined,     // clip_* → gemini
+    cohereBaselineZ: d.cohere_baseline_z ?? undefined,
+    fusedBaselineZ: d.fused_baseline_z ?? undefined,
+    geminiBaselineRaw: d.clip_baseline_raw ?? undefined,  // clip_* → gemini raw
+    cohereBaselineRaw: d.cohere_baseline_raw ?? undefined,
+    geminiStddev: d.clip_stddev ?? undefined,             // clip_stddev → gemini stddev
+    cohereStddev: d.cohere_stddev ?? undefined,
+    sampleCount: d.sample_count ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+// Get active baseline for a client (direct from Supabase)
+export async function getActiveBaseline(clientId: string): Promise<BrandBaseline | null> {
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1);
+
+  if (error) throw new Error(`Failed to get active baseline: ${error.message}`);
+  if (!data || data.length === 0) return null;
+  return mapDbBaselineToBaseline(data[0] as DbBrandBaseline);
+}
+
+// Get baseline version history for a client
+export async function getBaselineHistory(clientId: string): Promise<BrandBaseline[]> {
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("version", { ascending: false });
+
+  if (error) throw new Error(`Failed to get baseline history: ${error.message}`);
+  return (data as DbBrandBaseline[]).map(mapDbBaselineToBaseline);
+}
+
+// Calculate a new baseline (calls os-api → brand-engine → writes to Supabase)
+export async function calculateBaseline(clientId: string): Promise<BrandBaseline> {
+  const response = await fetch(`${OS_API_URL}/api/clients/${clientId}/baseline/calculate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// Subscribe to baseline changes for a client (realtime)
+export function subscribeToBaselines(
+  clientId: string,
+  onUpdate: (baseline: BrandBaseline) => void,
+): () => void {
+  const channel = supabase
+    .channel(`brand_baselines:${clientId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "brand_baselines",
+        filter: `client_id=eq.${clientId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onUpdate(mapDbBaselineToBaseline(payload.new as DbBrandBaseline));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // ============ Campaign Deliverable Operations ============
 
 export type DeliverableStatus = "pending" | "generating" | "reviewing" | "approved" | "rejected" | "regenerating";

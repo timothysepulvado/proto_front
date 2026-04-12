@@ -34,6 +34,9 @@ import {
   getDriftAlertsByClient,
   getDriftAlertsByRun,
   acknowledgeDriftAlert,
+  getActiveBaseline,
+  createBaseline,
+  deactivateBaselines,
 } from "./db.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -745,6 +748,75 @@ app.post("/api/deliverables/:deliverableId/regenerate", async (req: Request, res
     res.json(updated);
   } catch (err) {
     console.error("POST /api/deliverables/:deliverableId/regenerate error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Baseline Routes ============
+
+// POST /api/clients/:clientId/baseline/calculate - Calculate and store a new baseline
+app.post("/api/clients/:clientId/baseline/calculate", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+
+    const client = await getClient(clientId);
+    if (!client) {
+      res.status(404).json({ error: "Client not found" });
+      return;
+    }
+
+    const brandSlug = clientId.replace("client_", "");
+    const brandEngineUrl = process.env.BRAND_ENGINE_URL || "http://localhost:8100";
+    const sampleLimit = req.body?.sampleLimit ?? 100;
+
+    // Call brand-engine /baseline to compute real stats
+    const engineResponse = await fetch(`${brandEngineUrl}/baseline`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brand_slug: brandSlug, sample_limit: sampleLimit }),
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!engineResponse.ok) {
+      const text = await engineResponse.text();
+      res.status(502).json({ error: `Brand engine error: ${text}` });
+      return;
+    }
+
+    const engineResult = await engineResponse.json() as {
+      gemini_baseline_z: number;
+      gemini_baseline_raw: number;
+      gemini_stddev: number;
+      cohere_baseline_z: number;
+      cohere_baseline_raw: number;
+      cohere_stddev: number;
+      fused_baseline_z: number;
+      sample_count: number;
+    };
+
+    // Create new baseline in Supabase
+    const newBaseline = await createBaseline({
+      clientId,
+      version: 0, // auto-incremented by createBaseline
+      isActive: true,
+      geminiBaselineZ: engineResult.gemini_baseline_z,
+      cohereBaselineZ: engineResult.cohere_baseline_z,
+      fusedBaselineZ: engineResult.fused_baseline_z,
+      geminiBaselineRaw: engineResult.gemini_baseline_raw,
+      cohereBaselineRaw: engineResult.cohere_baseline_raw,
+      geminiStddev: engineResult.gemini_stddev,
+      cohereStddev: engineResult.cohere_stddev,
+      sampleCount: engineResult.sample_count,
+    });
+
+    // Deactivate all previous baselines for this client
+    if (newBaseline.id) {
+      await deactivateBaselines(clientId, newBaseline.id);
+    }
+
+    res.status(201).json(newBaseline);
+  } catch (err) {
+    console.error("POST /api/clients/:clientId/baseline/calculate error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

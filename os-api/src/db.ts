@@ -1,5 +1,5 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, PromptTemplate, PromptScore, RunStatus, RunStage, Campaign, CampaignDeliverable, DeliverableStatus } from "./types.js";
+import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, BrandBaseline, PromptTemplate, PromptScore, RunStatus, RunStage, Campaign, CampaignDeliverable, DeliverableStatus } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
@@ -982,4 +982,120 @@ export async function getPromptLineage(promptId: string): Promise<Record<string,
 
   if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
   return data ?? [];
+}
+
+// ============ Brand Baseline DB Row Type ============
+
+interface DbBrandBaseline {
+  id: string;
+  client_id: string;
+  version: number;
+  is_active: boolean;
+  clip_baseline_z: number | null;
+  e5_baseline_z: number | null;
+  cohere_baseline_z: number | null;
+  fused_baseline_z: number | null;
+  clip_baseline_raw: number | null;
+  e5_baseline_raw: number | null;
+  cohere_baseline_raw: number | null;
+  clip_stddev: number | null;
+  e5_stddev: number | null;
+  cohere_stddev: number | null;
+  sample_count: number | null;
+  created_at: string;
+}
+
+// ============ Brand Baseline Mapper ============
+
+function mapDbBaselineToBaseline(row: DbBrandBaseline): BrandBaseline {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    version: row.version,
+    isActive: row.is_active,
+    geminiBaselineZ: row.clip_baseline_z ?? undefined,   // clip_* → gemini (same as drift_metrics mapping)
+    cohereBaselineZ: row.cohere_baseline_z ?? undefined,
+    fusedBaselineZ: row.fused_baseline_z ?? undefined,
+    geminiBaselineRaw: row.clip_baseline_raw ?? undefined, // clip_* → gemini raw
+    cohereBaselineRaw: row.cohere_baseline_raw ?? undefined,
+    geminiStddev: row.clip_stddev ?? undefined,            // clip_stddev → gemini stddev
+    cohereStddev: row.cohere_stddev ?? undefined,
+    sampleCount: row.sample_count ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+// ============ Brand Baseline Operations ============
+
+async function getNextBaselineVersion(clientId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .select("version")
+    .eq("client_id", clientId)
+    .order("version", { ascending: false })
+    .limit(1);
+
+  if (error) throw new Error(`Failed to get baseline version: ${error.message}`);
+  if (!data || data.length === 0) return 1;
+  return (data[0].version as number) + 1;
+}
+
+export async function getActiveBaseline(clientId: string): Promise<BrandBaseline | null> {
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("is_active", true)
+    .order("version", { ascending: false })
+    .limit(1);
+
+  if (error) throw new Error(`Failed to get active baseline: ${error.message}`);
+  if (!data || data.length === 0) return null;
+  return mapDbBaselineToBaseline(data[0] as DbBrandBaseline);
+}
+
+export async function getBaselineHistory(clientId: string): Promise<BrandBaseline[]> {
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("version", { ascending: false });
+
+  if (error) throw new Error(`Failed to get baseline history: ${error.message}`);
+  return (data as DbBrandBaseline[]).map(mapDbBaselineToBaseline);
+}
+
+export async function createBaseline(baseline: BrandBaseline): Promise<BrandBaseline> {
+  const version = await getNextBaselineVersion(baseline.clientId);
+
+  const { data, error } = await supabase
+    .from("brand_baselines")
+    .insert({
+      client_id: baseline.clientId,
+      version,
+      is_active: true,
+      clip_baseline_z: baseline.geminiBaselineZ ?? null,     // gemini → clip_* columns
+      cohere_baseline_z: baseline.cohereBaselineZ ?? null,
+      fused_baseline_z: baseline.fusedBaselineZ ?? null,
+      clip_baseline_raw: baseline.geminiBaselineRaw ?? null,  // gemini raw → clip_* columns
+      cohere_baseline_raw: baseline.cohereBaselineRaw ?? null,
+      clip_stddev: baseline.geminiStddev ?? null,             // gemini stddev → clip_stddev
+      cohere_stddev: baseline.cohereStddev ?? null,
+      sample_count: baseline.sampleCount ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create baseline: ${error.message}`);
+  return mapDbBaselineToBaseline(data as DbBrandBaseline);
+}
+
+export async function deactivateBaselines(clientId: string, exceptId: string): Promise<void> {
+  const { error } = await supabase
+    .from("brand_baselines")
+    .update({ is_active: false })
+    .eq("client_id", clientId)
+    .neq("id", exceptId);
+
+  if (error) throw new Error(`Failed to deactivate baselines: ${error.message}`);
 }
