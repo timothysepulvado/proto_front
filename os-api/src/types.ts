@@ -159,6 +159,25 @@ export interface HitlDecision {
   createdAt?: string;
 }
 
+export interface PlatformSpec {
+  key: string;
+  label: string;
+  width: number;
+  height: number;
+  aspectRatio: string;
+  crop: string;
+  gravity: string;
+}
+
+export interface PlatformVariant {
+  platform: string;
+  label: string;
+  width: number;
+  height: number;
+  aspectRatio: string;
+  url: string;
+}
+
 export interface ReviewPayload {
   notes?: string;
   artifactId?: string;

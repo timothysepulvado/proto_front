@@ -9,6 +9,7 @@
 import fs from "fs";
 import path from "path";
 import { supabase } from "./supabase.js";
+import { isCloudinaryConfigured, uploadToCloudinary } from "./cloudinary.js";
 
 const BUCKET = "artifacts";
 
@@ -70,7 +71,7 @@ export async function uploadArtifact(
   artifactId: string,
   localPath: string,
   fileName: string,
-): Promise<{ storagePath: string; publicUrl: string; size: number | null } | null> {
+): Promise<{ storagePath: string; publicUrl: string; size: number | null; cloudinaryPublicId?: string } | null> {
   // Check file exists
   if (!fs.existsSync(localPath)) {
     console.warn(`[storage] File not found, skipping upload: ${localPath}`);
@@ -100,10 +101,21 @@ export async function uploadArtifact(
       .from(BUCKET)
       .getPublicUrl(storagePath);
 
+    // Dual-write to Cloudinary if configured (non-fatal)
+    let cloudinaryPublicId: string | undefined;
+    if (isCloudinaryConfigured()) {
+      const cldPublicId = `brandstudios/${clientId}/${runId}/${artifactId}`;
+      const cldResult = await uploadToCloudinary(localPath, cldPublicId);
+      if (cldResult) {
+        cloudinaryPublicId = cldResult.publicId;
+      }
+    }
+
     return {
       storagePath,
       publicUrl: urlData.publicUrl,
       size,
+      cloudinaryPublicId,
     };
   } catch (err) {
     console.error(`[storage] Unexpected error uploading ${storagePath}:`, err);

@@ -1001,9 +1001,52 @@ export function subscribeToDriftAlerts(
   };
 }
 
-// ============ Brand Baseline Operations ============
+// ============ Platform Variant Operations ============
 
-const OS_API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
+
+export interface PlatformVariant {
+  platform: string;
+  label: string;
+  width: number;
+  height: number;
+  aspectRatio: string;
+  url: string;
+}
+
+export interface PlatformVariantsResponse {
+  artifactId: string;
+  artifactName: string;
+  sourceUrl: string;
+  availablePlatforms: string[];
+  variants: PlatformVariant[];
+}
+
+/**
+ * Get platform-specific variant URLs for an artifact via the OS API.
+ * Requires the artifact to have been uploaded with Cloudinary configured.
+ * Returns null if the API call fails or the artifact has no Cloudinary ID.
+ */
+export async function getArtifactPlatformUrls(
+  artifactId: string,
+  platforms?: string[],
+): Promise<PlatformVariantsResponse | null> {
+  try {
+    const params = platforms && platforms.length > 0
+      ? `?platforms=${platforms.join(",")}`
+      : "";
+    const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/platforms${params}`);
+    if (!resp.ok) {
+      return null;
+    }
+    return (await resp.json()) as PlatformVariantsResponse;
+  } catch (err) {
+    console.warn("[api] Failed to get platform variants:", err);
+    return null;
+  }
+}
+
+// ============ Brand Baseline Operations ============
 
 export interface BrandBaseline {
   id: string;

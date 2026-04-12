@@ -290,6 +290,21 @@ export async function getArtifactsByRun(runId: string): Promise<Artifact[]> {
   return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
 }
 
+export async function getArtifactById(artifactId: string): Promise<Artifact | null> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("id", artifactId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get artifact: ${error.message}`);
+  }
+
+  if (!data) return null;
+  return mapDbArtifactToArtifact(data as DbArtifact);
+}
+
 // ============ Client Operations ============
 
 export async function getClient(clientId: string): Promise<Client | null> {

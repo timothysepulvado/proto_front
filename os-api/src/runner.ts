@@ -97,7 +97,10 @@ async function createArtifactWithUpload(opts: {
     storagePath: uploaded?.storagePath,
     stage: opts.stage,
     size: uploaded?.size ?? getFileSize(opts.localPath) ?? undefined,
-    metadata: opts.metadata,
+    metadata: {
+      ...opts.metadata,
+      ...(uploaded?.cloudinaryPublicId ? { cloudinaryPublicId: uploaded.cloudinaryPublicId } : {}),
+    },
     createdAt: new Date().toISOString(),
   };
 

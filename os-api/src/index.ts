@@ -12,6 +12,7 @@ import {
   getRunsByClient,
   getLogsByRun,
   getArtifactsByRun,
+  getArtifactById,
   getClient,
   getAllClients,
   addHitlDecision,
@@ -34,10 +35,10 @@ import {
   getDriftAlertsByClient,
   getDriftAlertsByRun,
   acknowledgeDriftAlert,
-  getActiveBaseline,
   createBaseline,
   deactivateBaselines,
 } from "./db.js";
+import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
 dotenv.config();
@@ -414,6 +415,48 @@ app.post("/api/runs/:runId/export", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("POST /api/runs/:runId/export error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Platform Variant Routes ============
+
+// GET /api/artifacts/:artifactId/platforms - Get platform-specific variant URLs
+app.get("/api/artifacts/:artifactId/platforms", async (req: Request, res: Response) => {
+  try {
+    const artifactId = getParam(req, "artifactId");
+    const artifact = await getArtifactById(artifactId);
+    if (!artifact) {
+      res.status(404).json({ error: "Artifact not found" });
+      return;
+    }
+
+    const cloudinaryPublicId = (artifact.metadata as Record<string, unknown> | undefined)?.cloudinaryPublicId as string | undefined;
+    if (!cloudinaryPublicId) {
+      res.status(404).json({
+        error: "No Cloudinary ID found for this artifact",
+        hint: "Asset must be uploaded with Cloudinary configured to generate platform variants",
+      });
+      return;
+    }
+
+    // Optional platform filter from query string
+    const platformsParam = req.query.platforms as string | undefined;
+    const platformFilter = platformsParam
+      ? platformsParam.split(",").map((p) => p.trim()).filter(Boolean)
+      : undefined;
+
+    const variants = getPlatformVariants(cloudinaryPublicId, platformFilter);
+
+    res.json({
+      artifactId: artifact.id,
+      artifactName: artifact.name,
+      sourceUrl: artifact.path,
+      availablePlatforms: Object.keys(PLATFORM_SPECS),
+      variants,
+    });
+  } catch (err) {
+    console.error("GET /api/artifacts/:artifactId/platforms error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
