@@ -135,14 +135,17 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 10. ~~Baseline calculation & versioning~~ ✅ (`2aac4e4`) — BaselinePanel, baseline snapshots, baseline-aware drift scoring
 11. ~~Cloudinary transform/CDN layer~~ ✅ (`c5bfe4c`) — Optional dual-write, 10 platform presets, graceful degradation, `GET /api/artifacts/:id/platforms`
 
-### Next — Creative Loop
-12. Prompt Evolution UI in Creative Studio — surface prompt_templates/scores/evolution_log alongside DeliverableTracker. Backend exists (3 tables, 6 db functions, 6 API routes, worker prompt_evolver.py). Frontend-heavy.
+### Done — Creative Loop (Task 12)
+12. ~~Prompt Evolution UI in Creative Studio~~ ✅ (`13824b0`) — PromptEvolutionPanel with active prompt card, score indicator, manual editor, version history (lazy scores), evolution lineage log, realtime subscription. `createPrompt()` in api.ts. Wired alongside DeliverableTracker in Creative Studio pillar.
+
+### Next — Runner ↔ Prompt Wiring
+13. Wire prompt_templates into runner + Temp-gen pipeline — runner reads active prompt via `getActivePrompt()` instead of hardcoded fallback, passes promptText to Temp-gen generation, scores fed back after HITL review to close the evolution loop. Connects Creative Studio UI (Task #12) to actual generation.
 
 ### Medium-term — Phase Coverage
-13. Platform variant picker component (Cloudinary UI for Task #11)
-14. Insight Loop telemetry (Phase 8 — external asset tracking, platform engagement)
-15. Governed promotion flow (Phase 9 — vector tier promotion)
-16. End-to-end pipeline verification (full run through brand-engine)
+14. Platform variant picker component (Cloudinary UI for Task #11)
+15. Insight Loop telemetry (Phase 8 — external asset tracking, platform engagement)
+16. Governed promotion flow (Phase 9 — vector tier promotion)
+17. End-to-end pipeline verification (full run through brand-engine)
 
 ---
 
@@ -150,7 +153,7 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 
 | Doc | Location | Status |
 |-----|----------|--------|
-| CHANGELOG | proto_front, Brand_linter, Temp-gen | Current through v0.9.0 (2026-04-11) |
+| CHANGELOG | proto_front, Brand_linter, Temp-gen | Current through v1.0.0 (2026-04-12) |
 | README | All 3 repos | Updated — current architecture |
 | Integration Audit | proto_front `docs/INTEGRATION_AUDIT_2026-04-07.md` | 18 seams, 28% coverage |
 | Tech Requirements | proto_front `docs/TECH_REQUIREMENTS` | 13 items marked RESOLVED |

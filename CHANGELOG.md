@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-04-12
+
+### Added
+- **Prompt Evolution UI** — `PromptEvolutionPanel` component in Creative Studio pillar. Active prompt card with score indicator (emerald/amber/red thresholds), manual create/edit editor, collapsible version history with lazy-loaded per-version scores, evolution lineage log with trigger badges and score deltas.
+- **`createPrompt()`** in `src/api.ts` — deactivates current active prompt, computes next version, inserts new prompt as active. Follows same transactional pattern as `createRun()`.
+- Realtime subscription via `subscribeToPrompts()` auto-refreshes panel on any prompt change.
+- Empty state with create CTA when no prompts exist for a client.
+
+### Changed
+- `src/App.tsx` — Creative Studio pillar now renders `PromptEvolutionPanel` when a client is selected, with `DeliverableTracker` conditionally below when a campaign run is active. Previous placeholder text replaced.
+
+### Note
+- Runner (`os-api/src/runner.ts`) does **not** yet read from `prompt_templates` — it still constructs prompts from campaign data. Task #13 will wire the active prompt into the generation pipeline.
+
 ## [0.9.0] - 2026-04-11
 
 ### Added
