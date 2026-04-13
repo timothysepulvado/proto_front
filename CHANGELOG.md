@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-04-11
+
+### Added
+- **Cloudinary transform/CDN layer** — optional dual-write integration that uploads artifacts to Cloudinary alongside Supabase Storage. 10 platform presets: `ig_feed`, `ig_story`, `fb_feed`, `fb_story`, `x_post`, `x_header`, `linkedin_post`, `pinterest_pin`, `tiktok_video`, `youtube_thumb`.
+- **`os-api/src/cloudinary.ts`** — Cloudinary client with `uploadToCloudinary()` and `getTransformUrl()`. Stores `cloudinaryPublicId` in artifact metadata JSONB.
+- **`GET /api/artifacts/:artifactId/platforms`** — returns platform-specific CDN URLs with auto-optimization, responsive sizing, format conversion. Query param: `?platforms=ig_feed,fb_feed`.
+- **`getArtifactPlatformUrls()`** in `src/api.ts` — frontend helper for platform variant URLs. Data layer only (no UI component yet).
+- Graceful degradation: no `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` env vars = zero Cloudinary calls, pipeline identical to before.
+
+### Changed
+- `os-api/src/storage.ts` — dual-write: uploads to both Supabase Storage and Cloudinary when configured.
+- `os-api/src/runner.ts` — artifact creation pipeline calls Cloudinary upload on success.
+- `os-api/src/types.ts` — Artifact metadata can include `cloudinaryPublicId`.
+- `package.json` — added `cloudinary` dependency.
+
+## [0.8.0] - 2026-04-11
+
+### Added
+- **Baseline calculation & versioning** — brand baselines now computed and stored as versioned snapshots in `brand_baselines` table. Drift scoring measured against real baseline data.
+- **`BaselinePanel.tsx`** — new component in Brand Drift pillar showing current baseline version, last computed date, and key metrics. Renders alongside `DriftAlertPanel` when a client is selected.
+- **Baseline API routes** — baseline CRUD and computation endpoints wired through os-api.
+- **Brand-engine baseline computation** — sidecar computes baseline embeddings from indexed brand assets.
+
+### Changed
+- `src/App.tsx` — Brand Drift pillar now renders `BaselinePanel` + `DriftAlertPanel` together when a client is active.
+
 ## [0.7.0] - 2026-04-10
 
 ### Added

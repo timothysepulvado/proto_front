@@ -18,8 +18,8 @@ the real product — the client-facing tool that runs brand operations.
 - **Brand Engine:** Python FastAPI sidecar (`brand-engine/`) — Gemini Embed 2 + Cohere v4 dual fusion for ingest, retrieve, drift.
 - **Pipeline:** Five pillars — Brand Memory, Creative Studio, Brand Drift, Review Gate, Insight Loop
 - **Data:** `hud.json` is the UI data source. Supabase tables (15): `clients`, `runs`, `run_logs`, `artifacts`, `campaigns`, `campaign_deliverables`, `campaign_memory`, `hitl_decisions`, `rejection_categories`, `drift_metrics`, `drift_alerts`, `brand_baselines`, `prompt_templates`, `prompt_scores`, `prompt_evolution_log`.
-- **Realtime:** SSE log streaming for pipeline execution. Supabase Realtime on `runs`, `run_logs`, `clients`, `campaigns`, `campaign_deliverables`, `hitl_decisions`, `drift_metrics`, `drift_alerts`.
-- **Storage:** Supabase Storage bucket `artifacts` for generated images/videos. Public URLs in artifacts table.
+- **Realtime:** SSE log streaming for pipeline execution. Supabase Realtime on `runs`, `run_logs`, `clients`, `campaigns`, `campaign_deliverables`, `hitl_decisions`, `drift_metrics`, `drift_alerts`, `brand_baselines`.
+- **Storage:** Supabase Storage bucket `artifacts` for generated images/videos. Public URLs in artifacts table. Optional Cloudinary CDN for platform-specific variants (10 presets).
 
 ## Connected Repos (wired but optional)
 - `Temp-gen/` — Image/video generation CLI (Gemini 3 Pro, Veo 3.1, Sora 2)
@@ -34,13 +34,15 @@ the real product — the client-facing tool that runs brand operations.
 | `src/components/ReviewPanel.tsx` | HITL review UI — artifact preview, grading, rejection categories |
 | `src/components/DeliverableTracker.tsx` | Campaign deliverable status with realtime updates |
 | `src/components/DriftAlertPanel.tsx` | Drift alert surfacing, severity badges, acknowledgment with realtime |
+| `src/components/BaselinePanel.tsx` | Brand baseline display — versioned snapshots in drift pillar |
 | `src/lib/supabase.ts` | Supabase client config |
 | `hud.json` | Client data + UI config (source of truth) |
 | `os-api/src/index.ts` | Express API routes (runs, HITL, campaigns, deliverables, drift, prompts) |
 | `os-api/src/runner.ts` | Pipeline executor — calls brand-engine sidecar + Temp-gen |
 | `os-api/src/db.ts` | Supabase query layer — typed mappers for all tables |
 | `os-api/src/types.ts` | Shared types — Run, Artifact, Campaign, CampaignDeliverable, DriftAlert, DriftMetric, etc. |
-| `os-api/src/storage.ts` | Supabase Storage upload utility |
+| `os-api/src/storage.ts` | Supabase Storage upload utility (dual-write to Cloudinary when configured) |
+| `os-api/src/cloudinary.ts` | Optional Cloudinary CDN — platform-specific transforms (10 presets) |
 | `supabase/migrations/` | 5 migrations (001-005) |
 | `worker/` | Python worker for HUD run execution |
 | `brand-engine/` | Python SDK — embeddings, retrieval, drift scoring |

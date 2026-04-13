@@ -1,6 +1,6 @@
 # BrandStudios OS — Roadmap & State of Play
 
-> Last updated: 2026-04-10 | Maintainer: Brandy
+> Last updated: 2026-04-12 | Maintainer: Brandy
 
 ---
 
@@ -8,7 +8,7 @@
 
 | Repo | Location | GitHub | Branch | Latest | Purpose |
 |------|----------|--------|--------|--------|---------|
-| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `78d4edf` | The product — HUD, runner, worker, brand-engine |
+| **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `c5bfe4c` | The product — HUD, runner, worker, brand-engine |
 | **Brand_linter** | ~/Brand_linter/local_quick_setup | timothysepulvado/BDE | phase-3 | `74eebbd` | Legacy brand compliance CLI (being superseded by brand-engine) |
 | **BDE** | ~/BDE | timothysepulvado/BDE | main | `cbdc8b7` | Sidelined ML worker architecture (OOP absorbed into brand-engine) |
 | **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `921180a` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) |
@@ -24,8 +24,8 @@
 
 | Layer | Key Files | Status |
 |-------|-----------|--------|
-| HUD UI | `src/App.tsx`, `src/api.ts`, `src/components/ReviewPanel.tsx`, `DriftAlertPanel.tsx`, `DeliverableTracker.tsx`, `src/lib/supabase.ts` | Working — 5 pillar tabs, Review Gate + Brand Drift + Creative Studio live |
-| os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `supabase.ts` | Working — calls brand-engine sidecar via HTTP |
+| HUD UI | `src/App.tsx`, `src/api.ts`, `src/components/ReviewPanel.tsx`, `DeliverableTracker.tsx`, `DriftAlertPanel.tsx`, `BaselinePanel.tsx`, `src/lib/supabase.ts` | Working — 5 pillar tabs (4/5 have live UI content), scrollable layout |
+| os-api | `os-api/src/runner.ts`, `db.ts`, `index.ts`, `types.ts`, `cloudinary.ts`, `supabase.ts` | Working — calls brand-engine sidecar via HTTP, campaign deliverable pipeline, optional Cloudinary CDN |
 | Worker | `worker/worker.py`, `executors/ingest.py`, `grading.py`, `prompt_evolver.py` | Working — imports brand_engine.core directly |
 | Brand Engine | `brand-engine/brand_engine/core/` (7 modules) + `api/server.py` + `cli/main.py` | **Wired — E2E verified** |
 | Migrations | `supabase/migrations/001-005` | Applied |
@@ -35,6 +35,20 @@
 - Runner calls brand-engine FastAPI sidecar at `:8100` (ingest, retrieve, drift stages)
 - Worker executors import `brand_engine.core` directly (Python-to-Python, no subprocess)
 - Generate stages still call Temp-gen CLI via subprocess (unchanged)
+
+### Pillar Definitions
+
+| Pillar | Scope | Current UI | Status |
+|--------|-------|-----------|--------|
+| **Brand Memory** | Ingest, index, embed brand assets | Run controls (placeholder) | Basic |
+| **Creative Studio** | Generate + track deliverables + prompt evolution (INTERNAL creative loop) | DeliverableTracker | Live |
+| **Brand Drift** | Compliance scoring, drift metrics, baselines | BaselinePanel + DriftAlertPanel | Live |
+| **Review Gate** | Human-in-the-loop review and approval | ReviewPanel (pending runs list) | Live |
+| **Insight Loop** | EXTERNAL intelligence — asset performance in the wild, platform engagement, ROI | (empty) | Not started |
+
+**Creative Studio** owns the full creative cycle: generate → track deliverables → see prompt performance → evolve prompts → generate better. This is the internal feedback loop.
+
+**Insight Loop** is the external intelligence layer: what happens to assets after they leave the system. Platform engagement data, brand sentiment, aggregate trends. Requires external data source integrations (Phase 8).
 
 **Supabase tables (15):** clients, runs, run_logs, artifacts, hitl_decisions, rejection_categories, campaigns, campaign_deliverables, campaign_memory, drift_metrics, drift_alerts, brand_baselines, prompt_templates, prompt_scores, prompt_evolution_log
 
@@ -87,46 +101,48 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 
 ## Architecture Coverage (vs Canonical 9-Phase Spec)
 
-| Phase | Coverage | Key Change (April 10) |
+| Phase | Coverage | Key Change (April 12) |
 |-------|----------|---------------------|
 | 1. Brand Onboarding | ~30% | Per-brand data dirs + brand profiles wired |
 | 2. Memory Formation | ~35% | Gemini Embed 2 + Cohere v4 pipeline verified E2E |
-| 3. Project Activation | ~45% | Campaign deliverable lifecycle wired E2E |
+| 3. Project Activation | ~55% | Campaign deliverable tracking — per-asset lifecycle wired |
 | 4. Runtime Environment | ~40% | Memory retrieval via brand-engine /retrieve |
-| 5. Generation | ~55% | Deliverable-level generation + artifact storage pipeline |
-| 6. Governance & Drift | ~80% | Drift alert surfacing + ack UI, HITL Review Gate, deliverable tracking |
-| 7. Asset Preparation | ~15% | Supabase Storage artifact pipeline |
-| 8. Insight Loop | 0% | Not started |
+| 5. Generation | ~70% | Deliverable-aware generation (per-deliverable prompt, artifact linking) |
+| 6. Governance & Drift | **~85%** | **Drift alerts (#9) + baseline versioning (#10) + HITL cascade** |
+| 7. Asset Preparation | **~30%** | **Cloudinary CDN layer (#11) — 10 platform presets, dual-write** |
+| 8. Insight Loop | 0% | Not started (external asset tracking — requires data source integrations) |
 | 9. Governed Promotion | ~20% | RL trainer reads Supabase |
-| **Overall** | **~36%** | Up from 33% (v0.6.0) |
+| **Overall** | **~41%** | Up from ~36% (v0.7.0) |
 
 ---
 
 ## What's Next (Priority Order)
 
-### Immediate — Brand Engine Completion
-1. ~~Wire worker/executors~~ ✅
-2. ~~Wire runner.ts to sidecar~~ ✅
+### Done — Brand Engine + HITL (Tasks 1-6)
+1. ~~Wire worker/executors~~ ✅ (`ced83f3`)
+2. ~~Wire runner.ts to sidecar~~ ✅ (`ced83f3`)
 3. ~~Create Gemini Embed 2 Pinecone indexes~~ ✅ (brand-dna tier)
-4. ~~Re-embed existing JK assets (23 images) through brand-engine indexer~~ ✅
+4. ~~Re-embed existing JK assets~~ ✅ (`0fedc40`, 23 images)
 5. ~~ADR~~ ✅ (`~/agent-vault/adr/002`)
+6. ~~HITL Review UI~~ ✅ (`22f350a` + `f78945b` + `65fa72f`) — ReviewPanel, Review Gate pillar, nav badge, 3 entry points
 
-### Done — HITL
-6. ~~HITL Review UI~~ ✅ (`22f350a` + `f78945b` + `65fa72f`) — ReviewPanel component, Review Gate pillar tab, nav notification badge, 3 entry points
+### Done — Artifact Storage + Deliverables (Tasks 7-8)
+7. ~~Artifact writing to Supabase~~ ✅ (`c10eaec`) — Supabase Storage bucket + upload pipeline, migration 004
+8. ~~Campaign deliverable tracking~~ ✅ (`3ddafbb`) — Full per-asset lifecycle, DeliverableTracker component, 8 API routes, migration 005
 
-### Done — Pipeline Completion
-7. ~~Artifact writing to Supabase~~ ✅ (`c10eaec`) — Supabase Storage pipeline, migration 004, public URLs
-8. ~~Campaign deliverable tracking~~ ✅ (`3ddafbb`) — full per-asset lifecycle, DeliverableTracker component, 8 API routes
-9. ~~Drift alert surfacing + acknowledgment~~ ✅ — DriftAlertPanel, 4 drift API routes, realtime subscription, severity badges + ack flow
+### Done — Drift, Baselines, CDN (Tasks 9-11)
+9. ~~Drift alert surfacing + acknowledgment~~ ✅ (`a859c68`) — DriftAlertPanel, severity badges, ack flow, 4 API routes, realtime
+10. ~~Baseline calculation & versioning~~ ✅ (`2aac4e4`) — BaselinePanel, baseline snapshots, baseline-aware drift scoring
+11. ~~Cloudinary transform/CDN layer~~ ✅ (`c5bfe4c`) — Optional dual-write, 10 platform presets, graceful degradation, `GET /api/artifacts/:id/platforms`
 
-### Next — Drift & Baselines
-10. Baseline calculation and versioning (brand_baselines table)
-11. End-to-end pipeline verification (full run through brand-engine)
+### Next — Creative Loop
+12. Prompt Evolution UI in Creative Studio — surface prompt_templates/scores/evolution_log alongside DeliverableTracker. Backend exists (3 tables, 6 db functions, 6 API routes, worker prompt_evolver.py). Frontend-heavy.
 
 ### Medium-term — Phase Coverage
-12. Platform-specific asset formatting (Phase 7)
-13. Insight Loop telemetry (Phase 8)
-14. Governed promotion flow (Phase 9 — vector tier promotion)
+13. Platform variant picker component (Cloudinary UI for Task #11)
+14. Insight Loop telemetry (Phase 8 — external asset tracking, platform engagement)
+15. Governed promotion flow (Phase 9 — vector tier promotion)
+16. End-to-end pipeline verification (full run through brand-engine)
 
 ---
 
@@ -134,7 +150,7 @@ Called by proto_front runner for the generate stage. Integration seam verified.
 
 | Doc | Location | Status |
 |-----|----------|--------|
-| CHANGELOG | proto_front, Brand_linter, Temp-gen | Backfilled through 2026-04-07 |
+| CHANGELOG | proto_front, Brand_linter, Temp-gen | Current through v0.9.0 (2026-04-11) |
 | README | All 3 repos | Updated — current architecture |
 | Integration Audit | proto_front `docs/INTEGRATION_AUDIT_2026-04-07.md` | 18 seams, 28% coverage |
 | Tech Requirements | proto_front `docs/TECH_REQUIREMENTS` | 13 items marked RESOLVED |
