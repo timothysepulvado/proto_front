@@ -619,6 +619,43 @@ export function subscribeToPrompts(
   };
 }
 
+// Create a new prompt (deactivates current active)
+export async function createPrompt(
+  clientId: string,
+  promptText: string,
+  stage: string = "generate",
+  parentId?: string
+): Promise<PromptTemplate> {
+  const history = await getPromptHistory(clientId, stage);
+  const nextVersion = history.length > 0 ? Math.max(...history.map(h => h.version)) + 1 : 1;
+
+  // Deactivate current active prompt
+  await supabase
+    .from("prompt_templates")
+    .update({ is_active: false })
+    .eq("client_id", clientId)
+    .eq("stage", stage)
+    .eq("is_active", true);
+
+  // Insert new prompt
+  const { data, error } = await supabase
+    .from("prompt_templates")
+    .insert({
+      client_id: clientId,
+      stage,
+      version: nextVersion,
+      prompt_text: promptText,
+      parent_id: parentId ?? null,
+      is_active: true,
+      source: "manual",
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create prompt: ${error.message}`);
+  return mapDbPromptToPrompt(data as DbPromptTemplate);
+}
+
 // ============ HITL Decision Operations ============
 
 export type HitlDecisionType = "approved" | "rejected" | "needs_revision";

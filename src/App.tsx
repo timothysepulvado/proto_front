@@ -25,6 +25,7 @@ import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
+import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
 import {
   createRun,
   cancelRun,
@@ -842,11 +843,16 @@ export default function App() {
                       <ShieldCheck size={10} className="mr-1.5" />
                       No pending reviews — all clear
                     </p>
-                  ) : activePillar === "creative" && currentRun?.campaignId ? (
-                    <DeliverableTracker campaignId={currentRun.campaignId} />
+                  ) : activePillar === "creative" && activeClient ? (
+                    <>
+                      <PromptEvolutionPanel clientId={activeClient} />
+                      {currentRun?.campaignId && (
+                        <DeliverableTracker campaignId={currentRun.campaignId} />
+                      )}
+                    </>
                   ) : activePillar === "creative" ? (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
-                      No active campaign — start a campaign run to track deliverables
+                      Select a client to manage prompt evolution
                     </p>
                   ) : activePillar === "drift" && activeClient ? (
                     <>
