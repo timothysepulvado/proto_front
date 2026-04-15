@@ -581,7 +581,7 @@ async function executeDeliverableGeneration(
       "/generate/video", "POST",
       {
         prompt,
-        model: deliverable.aiModel ?? "veo-3.1-generate-preview",
+        model: deliverable.aiModel ?? "veo-3.1-generate-001",
         duration_seconds: deliverable.durationSeconds ?? 8,
         aspect_ratio: deliverable.aspectRatio ?? "16:9",
         resolution: deliverable.resolution ?? "720p",
@@ -809,7 +809,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     "/generate/video", "POST",
     {
       prompt: videoPrompt,
-      model: "veo-3.1-generate-preview",
+      model: "veo-3.1-generate-001",
       duration_seconds: 8,
       aspect_ratio: "16:9",
       resolution: "720p",
