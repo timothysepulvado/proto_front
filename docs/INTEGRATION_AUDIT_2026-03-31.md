@@ -18,7 +18,7 @@ the **integration seams** between repos and maps them against the canonical arch
 | **proto_front** | HUD + os-api backend | React + Vite + Express + SQLite |
 | **BDE** | Brand DNA Engine (ML worker + linter API) | Python + Node.js |
 | **Brand_linter** | Standalone brand compliance CLI | Python + Node.js |
-| **Temp-gen** | Image/video generation CLI | Python (Gemini, Veo, Sora) |
+| **Temp-gen** | Image/video generation CLI | Python (Gemini, Veo) |
 
 ---
 

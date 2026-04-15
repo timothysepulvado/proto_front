@@ -11,7 +11,7 @@
 | **proto_front** | ~/proto_front | timothysepulvado/proto_front | main | `c5bfe4c` | The product — HUD, runner, worker, brand-engine |
 | **Brand_linter** | ~/Brand_linter/local_quick_setup | timothysepulvado/BDE | phase-3 | `74eebbd` | Legacy brand compliance CLI (being superseded by brand-engine) |
 | **BDE** | ~/BDE | timothysepulvado/BDE | main | `cbdc8b7` | Sidelined ML worker architecture (OOP absorbed into brand-engine) |
-| **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `921180a` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) |
+| **Temp-gen** | ~/Temp-gen | timothysepulvado/Temp-gen | main | `1a19a4d` | AI image/video generation (Gemini 3 Pro, Veo 3.1) + FastAPI sidecar :8200 |
 
 ---
 
@@ -90,12 +90,13 @@ BDE's OOP class hierarchy + Brand_linter's production features → merged into `
 
 ## Temp-gen
 
-Production-ready unified CLI. Three models operational:
-- `python main.py nano generate` → Gemini 3 Pro Image
-- `python main.py veo generate` → Veo 3.1 (Vertex AI)
-- `python main.py sora generate` → Sora 2 / 2 Pro
+Production-ready unified CLI + FastAPI sidecar (:8200). Two active models:
+- `python main.py nano generate` → Gemini 3 Pro Image (`gemini-3-pro-image-preview`)
+- `python main.py veo generate` → Veo 3.1 (`veo-3.1-generate-001`)
+- `python -m api.server` → Sidecar on :8200 (image sync, video async+poll, cost estimation, batch)
+- Sora 2 — discontinued April 2026. CLI stub archived.
 
-Called by proto_front runner for the generate stage. Integration seam verified.
+Runner calls sidecar via HTTP (replaced subprocess). Demo fallback if sidecar down.
 
 ---
 

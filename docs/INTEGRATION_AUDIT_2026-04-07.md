@@ -15,7 +15,7 @@ This audit reflects the current state.
 | **proto_front** | HUD + os-api backend + Python worker | React + Vite + Express + Supabase |
 | **BDE** | Brand DNA Engine (ML worker + linter API) | Python + Node.js (sidelined) |
 | **Brand_linter** | Standalone brand compliance CLI | Python + Node.js |
-| **Temp-gen** | Image/video generation CLI | Python (Gemini, Veo, Sora) |
+| **Temp-gen** | Image/video generation CLI | Python (Gemini, Veo) |
 
 ---
 
