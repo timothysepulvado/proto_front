@@ -28,7 +28,7 @@ proto_front/
 │
 ├── os-api/src/             ← Express API (orchestration layer)
 │   ├── index.ts            ← Routes: runs, HITL, campaigns, deliverables, drift, prompts
-│   ├── runner.ts           ← Pipeline executor — calls brand-engine sidecar + Temp-gen
+│   ├── runner.ts           ← Pipeline executor — calls brand-engine :8100 + Temp-gen :8200
 │   ├── db.ts               ← Supabase query layer, typed mappers
 │   ├── types.ts            ← Shared types (Run, Artifact, Campaign, DriftAlert, etc.)
 │   ├── storage.ts          ← Supabase Storage upload (dual-write to Cloudinary)
@@ -44,7 +44,7 @@ proto_front/
 │   ├── api/server.py       ← FastAPI sidecar on :8100
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 5 migrations (001-005)
+├── supabase/migrations/    ← 6 migrations (001-006)
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements
 ```
@@ -54,7 +54,7 @@ proto_front/
 | Repo | Location | What It Does | How It's Called |
 |------|----------|-------------|-----------------|
 | **Brand_linter** | `~/Brand_linter/local_quick_setup` | Brand compliance CLI (triple fusion scoring) | Runner subprocess (being deprecated → brand-engine) |
-| **Temp-gen** | `~/Temp-gen` | AI image/video generation (Gemini 3 Pro, Veo 3.1, Sora 2) | Runner subprocess for generate stage |
+| **Temp-gen** | `~/Temp-gen` | AI image/video generation (Gemini 3 Pro, Veo 3.1) | FastAPI sidecar :8200 (runner HTTP calls) |
 | **brand-engine** | `proto_front/brand-engine/` | Consolidated SDK — embeddings, drift, RL | FastAPI sidecar :8100 (runner) + direct import (worker) |
 
 ---
@@ -65,9 +65,9 @@ proto_front/
 ingest → retrieve → generate → drift → hitl → export
 ```
 
-- **Runner** (TypeScript, os-api) → calls brand-engine FastAPI sidecar for ingest, retrieve, drift
+- **Runner** (TypeScript, os-api) → calls brand-engine sidecar :8100 for ingest, retrieve, drift
+- **Runner** → calls Temp-gen sidecar :8200 for generate (image sync, video async+poll)
 - **Worker** (Python) → imports `brand_engine.core` directly for headless execution
-- **Generate** → calls Temp-gen CLI via subprocess (unchanged)
 - **Realtime** → SSE log streaming for pipeline execution, Supabase Realtime on key tables
 
 ### HUD Pillars (5)
@@ -101,11 +101,15 @@ cd brand-engine && python -m api.server   # FastAPI on :8100
 cd worker && python worker.py
 ```
 
-**Temp-gen** (standalone test):
+**Temp-gen sidecar** (when running pipeline):
 ```bash
-cd ~/Temp-gen && python main.py nano generate   # Gemini 3 Pro
+cd ~/Temp-gen && python -m api.server   # FastAPI on :8200
+```
+
+**Temp-gen** (standalone CLI test):
+```bash
+cd ~/Temp-gen && python main.py nano generate   # Gemini 3 Pro Image
 cd ~/Temp-gen && python main.py veo generate    # Veo 3.1
-cd ~/Temp-gen && python main.py sora generate   # Sora 2
 ```
 
 ### Run Modes
@@ -136,7 +140,7 @@ cd ~/Temp-gen && python main.py sora generate   # Sora 2
 **Storage:** `artifacts` bucket for generated images/videos. Public URLs in artifacts table.
 Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 
-**Migrations:** `supabase/migrations/001-005` — all applied.
+**Migrations:** `supabase/migrations/001-006` — 001-005 applied, 006 pending (deliverable generation specs).
 
 ---
 

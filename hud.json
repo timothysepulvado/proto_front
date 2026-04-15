@@ -74,7 +74,7 @@
         "switch_options": {
           "llm": ["OpenAI GPT-5 (reasoning)", "Anthropic Claude Opus 4.5", "Google Gemini 2.0 Pro"],
           "agent_tool": ["Atlas Browser Agent", "Playwright Runner", "Supabase Queue Worker"],
-          "creative_tool": ["Google Veo 3.1", "OpenAI Sora 2", "Runway Gen-3"]
+          "creative_tool": ["Google Veo 3.1", "Gemini 3 Pro Image", "Runway Gen-3"]
         },
         "links": {
           "project_home": "mock://projects/cylndr/overview",
@@ -97,12 +97,12 @@
         "configuration": {
           "llm": "Anthropic Claude Opus 4.5",
           "agent_tool": "Supabase Queue Worker",
-          "creative_tool": "OpenAI Sora 2"
+          "creative_tool": "Google Veo 3.1"
         },
         "switch_options": {
           "llm": ["Anthropic Claude Opus 4.5", "OpenAI GPT-5 (reasoning)", "Google Gemini 2.0 Pro"],
           "agent_tool": ["Supabase Queue Worker", "Atlas Browser Agent", "Zapier MCP Connector"],
-          "creative_tool": ["OpenAI Sora 2", "Google Veo 3.1", "Midjourney V7"]
+          "creative_tool": ["Google Veo 3.1", "Gemini 3 Pro Image", "Midjourney V7"]
         },
         "links": {
           "project_home": "mock://projects/jenni-kayne/overview",
@@ -130,7 +130,7 @@
         "switch_options": {
           "llm": ["Google Gemini 2.0 Pro", "OpenAI GPT-5 (reasoning)", "Anthropic Claude Opus 4.5"],
           "agent_tool": ["Playwright Runner", "Atlas Browser Agent", "Supabase Queue Worker"],
-          "creative_tool": ["Runway Gen-3", "Google Veo 3.1", "OpenAI Sora 2"]
+          "creative_tool": ["Runway Gen-3", "Google Veo 3.1", "Gemini 3 Pro Image"]
         },
         "links": {
           "project_home": "mock://projects/lilydale/overview",
@@ -163,7 +163,7 @@
         ],
         "creative_tool": [
           "Google Veo 3.1",
-          "OpenAI Sora 2",
+          "Gemini 3 Pro Image",
           "Runway Gen-3",
           "Midjourney V7"
         ]

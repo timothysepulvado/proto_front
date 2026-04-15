@@ -686,16 +686,82 @@ app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Res
 app.post("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
-    const { description, aiModel, originalPrompt } = req.body;
+    const {
+      description, aiModel, originalPrompt,
+      format, mediaType, durationSeconds, aspectRatio,
+      resolution, platform, qualityTier, referenceImages, estimatedCost,
+    } = req.body;
     const deliverable = await createDeliverable({
       campaignId,
       description,
       aiModel,
       originalPrompt,
+      format,
+      mediaType,
+      durationSeconds,
+      aspectRatio,
+      resolution,
+      platform,
+      qualityTier,
+      referenceImages,
+      estimatedCost,
     });
     res.status(201).json(deliverable);
   } catch (err) {
     console.error("POST /api/campaigns/:campaignId/deliverables error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/campaigns/:campaignId/estimate-cost - Estimate generation cost for campaign deliverables
+app.post("/api/campaigns/:campaignId/estimate-cost", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const deliverables = await getDeliverablesByCampaign(campaignId);
+
+    if (deliverables.length === 0) {
+      res.json({ campaignId, deliverables: [], totalCost: 0 });
+      return;
+    }
+
+    const tempGenUrl = process.env.TEMP_GEN_URL || "http://localhost:8200";
+    const estimates: Array<{ deliverableId: string; description?: string; estimatedCost: number }> = [];
+    let totalCost = 0;
+
+    for (const d of deliverables) {
+      try {
+        const estimateResponse = await fetch(`${tempGenUrl}/estimate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            media_type: d.mediaType === "video" ? "video" : "image",
+            model: d.aiModel,
+            duration_seconds: d.durationSeconds,
+            quality_tier: d.qualityTier ?? "standard",
+            image_size: d.resolution,
+          }),
+          signal: AbortSignal.timeout(5_000),
+        });
+
+        if (estimateResponse.ok) {
+          const data = await estimateResponse.json() as { total_cost: number };
+          estimates.push({
+            deliverableId: d.id,
+            description: d.description,
+            estimatedCost: data.total_cost,
+          });
+          totalCost += data.total_cost;
+        } else {
+          estimates.push({ deliverableId: d.id, description: d.description, estimatedCost: 0 });
+        }
+      } catch {
+        estimates.push({ deliverableId: d.id, description: d.description, estimatedCost: 0 });
+      }
+    }
+
+    res.json({ campaignId, deliverables: estimates, totalCost: Math.round(totalCost * 10000) / 10000 });
+  } catch (err) {
+    console.error("POST /api/campaigns/:campaignId/estimate-cost error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

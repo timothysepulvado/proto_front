@@ -644,6 +644,16 @@ interface DbCampaignDeliverable {
   retry_count: number;
   rejection_reasons: string[] | null;
   custom_rejection_note: string | null;
+  // Generation spec columns (migration 006)
+  format: string | null;
+  media_type: string | null;
+  duration_seconds: number | null;
+  aspect_ratio: string | null;
+  resolution: string | null;
+  platform: string | null;
+  quality_tier: string | null;
+  reference_images: string[] | null;
+  estimated_cost: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -676,6 +686,16 @@ function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliv
     status: db.status as DeliverableStatus,
     retryCount: db.retry_count,
     rejectionReason: db.custom_rejection_note ?? undefined,
+    // Generation spec fields
+    format: (db.format as CampaignDeliverable["format"]) ?? undefined,
+    mediaType: (db.media_type as CampaignDeliverable["mediaType"]) ?? undefined,
+    durationSeconds: db.duration_seconds ?? undefined,
+    aspectRatio: db.aspect_ratio ?? undefined,
+    resolution: db.resolution ?? undefined,
+    platform: db.platform ?? undefined,
+    qualityTier: (db.quality_tier as CampaignDeliverable["qualityTier"]) ?? undefined,
+    referenceImages: db.reference_images ?? undefined,
+    estimatedCost: db.estimated_cost != null ? Number(db.estimated_cost) : undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
@@ -791,6 +811,16 @@ export async function createDeliverable(deliverable: {
   description?: string;
   aiModel?: string;
   originalPrompt?: string;
+  // Generation spec fields
+  format?: string;
+  mediaType?: string;
+  durationSeconds?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  platform?: string;
+  qualityTier?: string;
+  referenceImages?: string[];
+  estimatedCost?: number;
 }): Promise<CampaignDeliverable> {
   const { data, error } = await supabase
     .from("campaign_deliverables")
@@ -802,6 +832,16 @@ export async function createDeliverable(deliverable: {
       current_prompt: deliverable.originalPrompt ?? null,
       status: "pending",
       retry_count: 0,
+      // Generation spec columns
+      format: deliverable.format ?? null,
+      media_type: deliverable.mediaType ?? "image",
+      duration_seconds: deliverable.durationSeconds ?? null,
+      aspect_ratio: deliverable.aspectRatio ?? "16:9",
+      resolution: deliverable.resolution ?? "720p",
+      platform: deliverable.platform ?? null,
+      quality_tier: deliverable.qualityTier ?? "standard",
+      reference_images: deliverable.referenceImages ?? null,
+      estimated_cost: deliverable.estimatedCost ?? null,
     })
     .select()
     .single();

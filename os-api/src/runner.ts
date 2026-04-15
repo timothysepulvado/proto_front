@@ -19,6 +19,9 @@ const TEMP_GEN_VENV = process.env.TEMP_GEN_VENV || path.join(TEMP_GEN_PATH, ".ve
 // Brand Engine FastAPI sidecar (replaces Brand_linter subprocess calls)
 const BRAND_ENGINE_URL = process.env.BRAND_ENGINE_URL || "http://localhost:8100";
 
+// Temp-gen FastAPI sidecar (replaces Temp-gen subprocess calls)
+const TEMP_GEN_URL = process.env.TEMP_GEN_URL || "http://localhost:8200";
+
 // Legacy path — still used for BRAND_ASSETS_BASE default. Active stages call brand-engine sidecar.
 const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulvado/Brand_linter/local_quick_setup";
 
@@ -214,6 +217,107 @@ async function checkBrandEngineHealth(): Promise<boolean> {
   }
 }
 
+// Temp-gen sidecar helper — POST/GET JSON, parse response, handle errors
+async function callTempGen<T = unknown>(
+  endpoint: string,
+  method: "GET" | "POST" = "POST",
+  body?: Record<string, unknown>,
+  runId?: string,
+  stage?: string,
+  timeoutMs: number = 120_000,
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  try {
+    if (runId && stage) {
+      await emitLog(runId, stage, "info", `Calling temp-gen: ${method} ${endpoint}`);
+    }
+    const options: RequestInit = {
+      method,
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+    if (body && method === "POST") {
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(`${TEMP_GEN_URL}${endpoint}`, options);
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { ok: false, error: `HTTP ${response.status}: ${text}` };
+    }
+
+    const data = (await response.json()) as T;
+    return { ok: true, data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
+
+// Check temp-gen sidecar health
+async function checkTempGenHealth(): Promise<boolean> {
+  try {
+    const response = await fetch(`${TEMP_GEN_URL}/health`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Poll a temp-gen async job (video or batch) with exponential backoff
+interface TempGenJobStatus {
+  job_id: string;
+  type: string;
+  status: string;
+  segments_complete: number;
+  segments_total: number;
+  progress_pct: number;
+  result_path: string | null;
+  error: string | null;
+}
+
+async function pollTempGenJob(
+  jobId: string,
+  runId: string,
+  stage: string,
+  maxWaitMs: number = 15 * 60 * 1000,
+): Promise<string> {
+  let delay = 5000;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    const result = await callTempGen<TempGenJobStatus>(
+      `/jobs/${jobId}`, "GET", undefined, undefined, undefined, 30_000,
+    );
+
+    if (!result.ok) {
+      await emitLog(runId, stage, "warn", `Job poll error: ${result.error}`);
+      await new Promise(r => setTimeout(r, delay));
+      delay = Math.min(delay * 1.5, 30000);
+      continue;
+    }
+
+    const status = result.data;
+    if (status.status === "complete") {
+      await emitLog(runId, stage, "info",
+        `Job ${jobId} complete: ${status.result_path}`);
+      return status.result_path ?? "";
+    }
+    if (status.status === "failed") {
+      throw new Error(`Job ${jobId} failed: ${status.error}`);
+    }
+
+    await emitLog(runId, stage, "info",
+      `Job ${jobId}: ${status.segments_complete}/${status.segments_total} segments (${status.progress_pct}%)`);
+
+    await new Promise(r => setTimeout(r, delay));
+    delay = Math.min(delay * 1.5, 30000);
+  }
+
+  throw new Error(`Job ${jobId} timed out after ${maxWaitMs / 1000}s`);
+}
+
 // Stage executors
 async function executeIngestStage(run: Run): Promise<boolean> {
   const stageId = "ingest";
@@ -375,8 +479,11 @@ async function executeRetrieveStage(run: Run): Promise<boolean> {
 }
 
 /**
- * Generate a single deliverable — transitions through generating → reviewing,
- * creates artifact linked to the deliverable.
+ * Generate a single deliverable via the Temp-gen sidecar HTTP API.
+ *
+ * Routes to /generate/image (sync) or /generate/video (async + poll)
+ * based on deliverable.mediaType.  Falls back to demo mode if sidecar
+ * is unreachable.
  */
 async function executeDeliverableGeneration(
   run: Run,
@@ -385,15 +492,19 @@ async function executeDeliverableGeneration(
   stageId: string,
 ): Promise<void> {
   const brandName = run.clientId.replace("client_", "");
+  const shortId = deliverable.id.slice(0, 8);
+  const mediaType = deliverable.mediaType ?? "image";
+  const isVideo = mediaType === "video";
+  const isMixed = mediaType === "mixed";
 
   await emitLog(run.runId, stageId, "info",
-    `Generating deliverable: ${deliverable.description ?? deliverable.id.slice(0, 8)}`);
+    `Generating ${mediaType} deliverable: ${deliverable.description ?? shortId}`);
 
   // Transition to generating
   await updateDeliverableStatus(deliverable.id, deliverable.status, "generating");
 
   // Build prompt from deliverable → campaign fallback
-  let prompt = deliverable.currentPrompt ?? deliverable.originalPrompt ?? campaign.prompt ?? `Brand campaign image for ${brandName}`;
+  let prompt = deliverable.currentPrompt ?? deliverable.originalPrompt ?? campaign.prompt ?? `Brand campaign ${mediaType} for ${brandName}`;
 
   // Enrich with brand context
   const brandContext = retrievalContext.get(run.runId);
@@ -401,67 +512,163 @@ async function executeDeliverableGeneration(
     prompt = `${prompt}. Brand context: ${brandContext}`;
   }
 
-  const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
-  const fileName = `deliverable_${deliverable.id.slice(0, 8)}.png`;
 
-  const result = await runCommand(
-    run.runId,
-    stageId,
-    pythonPath,
-    [
-      "main.py",
-      "nano",
-      "generate",
-      "--prompt", prompt,
-      "--output", path.join(outputDir, fileName),
-    ],
-    TEMP_GEN_PATH,
+  // --- Cost estimation ---
+  type EstimateResponse = { media_type: string; model: string; unit_cost: number; total_cost: number };
+  const estimateResult = await callTempGen<EstimateResponse>(
+    "/estimate", "POST",
+    {
+      media_type: isVideo ? "video" : "image",
+      model: deliverable.aiModel,
+      duration_seconds: deliverable.durationSeconds,
+      quality_tier: deliverable.qualityTier ?? "standard",
+      image_size: deliverable.resolution,
+    },
+    run.runId, stageId,
   );
+  if (estimateResult.ok) {
+    await emitLog(run.runId, stageId, "info",
+      `Estimated cost: $${estimateResult.data.total_cost.toFixed(4)} (${estimateResult.data.model})`);
+  }
 
-  if (result.success) {
-    await createArtifactWithUpload({
-      runId: run.runId,
-      clientId: run.clientId,
-      campaignId: run.campaignId,
-      deliverableId: deliverable.id,
-      type: "image",
-      name: fileName,
-      localPath: path.join(outputDir, fileName),
-      stage: stageId,
-      metadata: { model: deliverable.aiModel ?? "gemini-3-pro-image", prompt },
-    });
-  } else {
-    // Demo fallback — still create artifact and transition
-    await emitLog(run.runId, stageId, "warn",
-      `[DEMO] Deliverable generation fallback for ${deliverable.id.slice(0, 8)}`);
-    await new Promise(r => setTimeout(r, 1500));
-    await createArtifactWithUpload({
-      runId: run.runId,
-      clientId: run.clientId,
-      campaignId: run.campaignId,
-      deliverableId: deliverable.id,
-      type: "image",
-      name: fileName,
-      localPath: path.join(outputDir, fileName),
-      stage: stageId,
-      metadata: { model: "demo", prompt },
-    });
+  let artifactCreated = false;
+
+  // --- Image generation (or image part of mixed) ---
+  if (!isVideo || isMixed) {
+    const imgFileName = `deliverable_${shortId}.png`;
+    type ImageResponse = { status: string; local_path: string | null; model: string; cost: number };
+
+    const imgResult = await callTempGen<ImageResponse>(
+      "/generate/image", "POST",
+      {
+        prompt,
+        model: deliverable.aiModel ?? "gemini-3-pro-image-preview",
+        aspect_ratio: deliverable.aspectRatio ?? "1:1",
+        reference_images: deliverable.referenceImages,
+        image_size: deliverable.resolution,
+        output_path: path.join(outputDir, imgFileName),
+      },
+      run.runId, stageId,
+    );
+
+    if (imgResult.ok && imgResult.data.status === "success") {
+      await createArtifactWithUpload({
+        runId: run.runId,
+        clientId: run.clientId,
+        campaignId: run.campaignId,
+        deliverableId: deliverable.id,
+        type: "image",
+        name: imgFileName,
+        localPath: imgResult.data.local_path ?? path.join(outputDir, imgFileName),
+        stage: stageId,
+        metadata: { model: imgResult.data.model, prompt, cost: imgResult.data.cost },
+      });
+      artifactCreated = true;
+    } else if (!isVideo) {
+      // Image-only fallback to demo
+      await _demoFallbackArtifact(run, deliverable, stageId, outputDir, imgFileName, "image", prompt);
+      artifactCreated = true;
+    }
+  }
+
+  // --- Video generation (or video part of mixed) ---
+  if (isVideo || isMixed) {
+    const vidFileName = `deliverable_${shortId}.mp4`;
+    type VideoJobResponse = { job_id: string; status: string; segments_total: number };
+
+    const vidResult = await callTempGen<VideoJobResponse>(
+      "/generate/video", "POST",
+      {
+        prompt,
+        model: deliverable.aiModel ?? "veo-3.1-generate-preview",
+        duration_seconds: deliverable.durationSeconds ?? 8,
+        aspect_ratio: deliverable.aspectRatio ?? "16:9",
+        resolution: deliverable.resolution ?? "720p",
+        quality_tier: deliverable.qualityTier ?? "standard",
+        reference_image: deliverable.referenceImages?.[0],
+      },
+      run.runId, stageId,
+    );
+
+    if (vidResult.ok) {
+      try {
+        const resultPath = await pollTempGenJob(
+          vidResult.data.job_id, run.runId, stageId,
+        );
+        await createArtifactWithUpload({
+          runId: run.runId,
+          clientId: run.clientId,
+          campaignId: run.campaignId,
+          deliverableId: deliverable.id,
+          type: "video",
+          name: vidFileName,
+          localPath: resultPath || path.join(outputDir, vidFileName),
+          stage: stageId,
+          metadata: {
+            model: deliverable.aiModel ?? "veo-3.1",
+            prompt,
+            duration_seconds: deliverable.durationSeconds ?? 8,
+            quality_tier: deliverable.qualityTier ?? "standard",
+          },
+        });
+        artifactCreated = true;
+      } catch (err) {
+        await emitLog(run.runId, stageId, "error",
+          `Video job failed: ${err instanceof Error ? err.message : String(err)}`);
+        await _demoFallbackArtifact(run, deliverable, stageId, outputDir, vidFileName, "video", prompt);
+        artifactCreated = true;
+      }
+    } else {
+      // Sidecar unreachable — demo fallback
+      await _demoFallbackArtifact(run, deliverable, stageId, outputDir, vidFileName, "video", prompt);
+      artifactCreated = true;
+    }
+  }
+
+  if (!artifactCreated) {
+    const fallbackName = `deliverable_${shortId}.png`;
+    await _demoFallbackArtifact(run, deliverable, stageId, outputDir, fallbackName, "image", prompt);
   }
 
   // Transition to reviewing
   await updateDeliverableStatus(deliverable.id, "generating", "reviewing");
-  await emitLog(run.runId, stageId, "info",
-    `Deliverable ${deliverable.id.slice(0, 8)} → reviewing`);
+  await emitLog(run.runId, stageId, "info", `Deliverable ${shortId} → reviewing`);
+}
+
+/** Demo fallback — create a placeholder artifact when sidecar is unavailable */
+async function _demoFallbackArtifact(
+  run: Run,
+  deliverable: CampaignDeliverable,
+  stageId: string,
+  outputDir: string,
+  fileName: string,
+  type: "image" | "video",
+  prompt: string,
+): Promise<void> {
+  await emitLog(run.runId, stageId, "warn",
+    `[DEMO] ${type} generation fallback for ${deliverable.id.slice(0, 8)}`);
+  await new Promise(r => setTimeout(r, 1500));
+  await createArtifactWithUpload({
+    runId: run.runId,
+    clientId: run.clientId,
+    campaignId: run.campaignId,
+    deliverableId: deliverable.id,
+    type,
+    name: fileName,
+    localPath: path.join(outputDir, fileName),
+    stage: stageId,
+    metadata: { model: "demo", prompt },
+  });
 }
 
 async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_images";
   run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
-  await emitLog(run.runId, stageId, "info", "Starting image generation with Temp-gen...");
+  await emitLog(run.runId, stageId, "info", "Starting image generation with Temp-gen sidecar...");
 
-  // Campaign deliverable branch — generate per-deliverable
+  // Campaign deliverable branch — generate per-deliverable via sidecar
   if (run.campaignId) {
     const campaign = await getCampaign(run.campaignId);
     if (campaign) {
@@ -481,7 +688,6 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
     // Fall through to existing non-deliverable flow
   }
 
-  const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
 
   // Build prompt — use campaign prompt if available, else fallback
@@ -503,40 +709,38 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   if (brandContext) {
     prompt = `${prompt}. Brand context: ${brandContext}`;
     await emitLog(run.runId, stageId, "info", "Prompt enriched with brand memory context");
-    // Clean up after use
     retrievalContext.delete(run.runId);
   }
 
-  const result = await runCommand(
-    run.runId,
-    stageId,
-    pythonPath,
-    [
-      "main.py",
-      "nano",
-      "generate",
-      "--prompt", prompt,
-      "--output", path.join(outputDir, "generated.png"),
-    ],
-    TEMP_GEN_PATH
+  // Call Temp-gen sidecar for image generation
+  type ImageResponse = { status: string; local_path: string | null; model: string; cost: number };
+  const result = await callTempGen<ImageResponse>(
+    "/generate/image", "POST",
+    {
+      prompt,
+      model: "gemini-3-pro-image-preview",
+      output_path: path.join(outputDir, "generated.png"),
+    },
+    run.runId, stageId,
   );
 
-  if (result.success) {
+  if (result.ok && result.data.status === "success") {
     await createArtifactWithUpload({
       runId: run.runId,
       clientId: run.clientId,
       campaignId: run.campaignId,
       type: "image",
       name: "generated.png",
-      localPath: path.join(outputDir, "generated.png"),
+      localPath: result.data.local_path ?? path.join(outputDir, "generated.png"),
       stage: stageId,
-      metadata: { model: "gemini-3-pro-image", prompt },
+      metadata: { model: result.data.model, prompt, cost: result.data.cost },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
   } else {
-    // Demo fallback
-    await emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
+    // Demo fallback — sidecar unavailable or generation failed
+    const errorMsg = result.ok ? "Generation returned non-success" : result.error;
+    await emitLog(run.runId, stageId, "warn", `Sidecar image gen failed: ${errorMsg} — falling back to demo mode`);
     await emitLog(run.runId, stageId, "info", "[DEMO] Initializing Gemini image model...");
     await new Promise(r => setTimeout(r, 1200));
     await emitLog(run.runId, stageId, "info", `[DEMO] Generating brand image for ${brandName}...`);
@@ -564,9 +768,9 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
   const stageId = run.mode === "full" ? "generate" : "generate_video";
   run = await updateStageStatus(run, stageId, "running");
   const brandName = run.clientId.replace("client_", "");
-  await emitLog(run.runId, stageId, "info", "Starting video generation with Temp-gen...");
+  await emitLog(run.runId, stageId, "info", "Starting video generation with Temp-gen sidecar...");
 
-  // Campaign deliverable branch for video
+  // Campaign deliverable branch — now routed through sidecar via executeDeliverableGeneration
   if (run.campaignId) {
     const campaign = await getCampaign(run.campaignId);
     if (campaign) {
@@ -575,34 +779,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
         await emitLog(run.runId, stageId, "info",
           `Processing ${deliverables.length} video deliverable(s) for campaign "${campaign.name}"`);
         for (const d of deliverables) {
-          // Video deliverables follow same flow but with video type
-          await emitLog(run.runId, stageId, "info",
-            `Generating video deliverable: ${d.description ?? d.id.slice(0, 8)}`);
-          await updateDeliverableStatus(d.id, d.status, "generating");
-
-          const prompt = d.currentPrompt ?? d.originalPrompt ?? campaign.prompt ?? `Brand campaign video for ${brandName}`;
-          const fileName = `deliverable_${d.id.slice(0, 8)}.mp4`;
-          const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
-
-          const result = await runCommand(
-            run.runId, stageId, getPythonPath(TEMP_GEN_VENV),
-            ["main.py", "veo", "generate", "--prompt", prompt, "--output", path.join(outputDir, fileName)],
-            TEMP_GEN_PATH,
-          );
-
-          if (!result.success) {
-            await emitLog(run.runId, stageId, "warn", `[DEMO] Video deliverable fallback for ${d.id.slice(0, 8)}`);
-            await new Promise(r => setTimeout(r, 2000));
-          }
-
-          await createArtifactWithUpload({
-            runId: run.runId, clientId: run.clientId, campaignId: run.campaignId,
-            deliverableId: d.id, type: "video", name: fileName,
-            localPath: path.join(outputDir, fileName), stage: stageId,
-            metadata: { model: result.success ? "veo-3.1" : "demo", prompt },
-          });
-
-          await updateDeliverableStatus(d.id, "generating", "reviewing");
+          await executeDeliverableGeneration(run, d, campaign, stageId);
         }
         run = await updateStageStatus(run, stageId, "completed");
         return true;
@@ -610,7 +787,6 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     }
   }
 
-  const pythonPath = getPythonPath(TEMP_GEN_VENV);
   const outputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
 
   // Use campaign prompt if available
@@ -627,59 +803,71 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     }
   }
 
-  const result = await runCommand(
-    run.runId,
-    stageId,
-    pythonPath,
-    [
-      "main.py",
-      "veo",
-      "generate",
-      "--prompt", videoPrompt,
-      "--output", path.join(outputDir, "generated.mp4"),
-    ],
-    TEMP_GEN_PATH
+  // Call Temp-gen sidecar for async video generation
+  type VideoJobResponse = { job_id: string; status: string; segments_total: number };
+  const result = await callTempGen<VideoJobResponse>(
+    "/generate/video", "POST",
+    {
+      prompt: videoPrompt,
+      model: "veo-3.1-generate-preview",
+      duration_seconds: 8,
+      aspect_ratio: "16:9",
+      resolution: "720p",
+      quality_tier: "standard",
+    },
+    run.runId, stageId,
   );
 
-  if (result.success) {
-    await createArtifactWithUpload({
-      runId: run.runId,
-      clientId: run.clientId,
-      campaignId: run.campaignId,
-      type: "video",
-      name: "generated.mp4",
-      localPath: path.join(outputDir, "generated.mp4"),
-      stage: stageId,
-      metadata: { model: "veo-3.1", prompt: videoPrompt },
-    });
-    run = await updateStageStatus(run, stageId, "completed");
-    return true;
+  if (result.ok) {
+    try {
+      const resultPath = await pollTempGenJob(
+        result.data.job_id, run.runId, stageId,
+      );
+      await createArtifactWithUpload({
+        runId: run.runId,
+        clientId: run.clientId,
+        campaignId: run.campaignId,
+        type: "video",
+        name: "generated.mp4",
+        localPath: resultPath || path.join(outputDir, "generated.mp4"),
+        stage: stageId,
+        metadata: { model: "veo-3.1", prompt: videoPrompt },
+      });
+      run = await updateStageStatus(run, stageId, "completed");
+      return true;
+    } catch (err) {
+      await emitLog(run.runId, stageId, "error",
+        `Video job failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Fall through to demo
+    }
   } else {
-    // Demo fallback
-    await emitLog(run.runId, stageId, "warn", "Real generation failed - falling back to demo mode");
-    await emitLog(run.runId, stageId, "info", "[DEMO] Initializing Veo video model...");
-    await new Promise(r => setTimeout(r, 1500));
-    await emitLog(run.runId, stageId, "info", `[DEMO] Generating brand video for ${brandName}...`);
-    await new Promise(r => setTimeout(r, 3000));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Rendering frames...");
-    await new Promise(r => setTimeout(r, 2000));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Encoding video...");
-    await new Promise(r => setTimeout(r, 1500));
-    await emitLog(run.runId, stageId, "info", "[DEMO] Video generated successfully");
-
-    await createArtifactWithUpload({
-      runId: run.runId,
-      clientId: run.clientId,
-      campaignId: run.campaignId,
-      type: "video",
-      name: "generated.mp4",
-      localPath: path.join(outputDir, "generated.mp4"),
-      stage: stageId,
-      metadata: { model: "demo", prompt: videoPrompt },
-    });
-    run = await updateStageStatus(run, stageId, "completed");
-    return true;
+    await emitLog(run.runId, stageId, "warn", `Sidecar video gen failed: ${result.error}`);
   }
+
+  // Demo fallback — sidecar unavailable or job failed
+  await emitLog(run.runId, stageId, "info", "Falling back to demo mode...");
+  await emitLog(run.runId, stageId, "info", "[DEMO] Initializing Veo video model...");
+  await new Promise(r => setTimeout(r, 1500));
+  await emitLog(run.runId, stageId, "info", `[DEMO] Generating brand video for ${brandName}...`);
+  await new Promise(r => setTimeout(r, 3000));
+  await emitLog(run.runId, stageId, "info", "[DEMO] Rendering frames...");
+  await new Promise(r => setTimeout(r, 2000));
+  await emitLog(run.runId, stageId, "info", "[DEMO] Encoding video...");
+  await new Promise(r => setTimeout(r, 1500));
+  await emitLog(run.runId, stageId, "info", "[DEMO] Video generated successfully");
+
+  await createArtifactWithUpload({
+    runId: run.runId,
+    clientId: run.clientId,
+    campaignId: run.campaignId,
+    type: "video",
+    name: "generated.mp4",
+    localPath: path.join(outputDir, "generated.mp4"),
+    stage: stageId,
+    metadata: { model: "demo", prompt: videoPrompt },
+  });
+  run = await updateStageStatus(run, stageId, "completed");
+  return true;
 }
 
 async function executeDriftStage(run: Run): Promise<boolean> {

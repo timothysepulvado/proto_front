@@ -129,6 +129,17 @@ export interface CampaignDeliverable {
   status: DeliverableStatus;
   retryCount: number;
   rejectionReason?: string;
+  // Generation spec fields (Temp-gen sidecar pipeline)
+  format?: "before_after" | "carousel" | "testimonial" | "heritage"
+         | "problem_solution" | "review_ad" | "custom";
+  mediaType?: "image" | "video" | "mixed";
+  durationSeconds?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  platform?: string;
+  qualityTier?: "lite" | "fast" | "standard" | "pro";
+  referenceImages?: string[];
+  estimatedCost?: number;
   createdAt: string;
   updatedAt: string;
 }
