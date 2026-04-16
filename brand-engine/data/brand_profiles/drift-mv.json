@@ -1,0 +1,34 @@
+{
+  "brand_slug": "drift-mv",
+  "display_name": "Drift MV (BrandStudios.AI)",
+  "pinecone_namespace": "drift-mv",
+  "thresholds": {
+    "auto_pass_z": 0.5,
+    "auto_fail_z": -1.5,
+    "gemini_weight": 0.6,
+    "cohere_weight": 0.4
+  },
+  "allowed_colors": [
+    "#15217C",
+    "#ED4C14",
+    "#EFECEB",
+    "#1A8C3E",
+    "#9B59B6",
+    "#E67E22",
+    "#2980B9",
+    "#FFD700"
+  ],
+  "disallowed_patterns": [
+    "fairy dust",
+    "bokeh particles",
+    "galaxy swirls",
+    "digital glow",
+    "lens flare",
+    "cartoon",
+    "anime"
+  ],
+  "indexes": {
+    "brand-dna-gemini768": "drift-mv-brand-dna-gemini768",
+    "brand-dna-cohere": "drift-mv-brand-dna-cohere"
+  }
+}
