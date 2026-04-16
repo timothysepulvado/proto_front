@@ -161,3 +161,19 @@ Runner calls sidecar via HTTP (replaced subprocess). Demo fallback if sidecar do
 | Vault projects.md | ~/agent-vault | All 4 repos listed |
 | Vault MISSION.md | ~/agent-vault/domains/brandstudios | Rewritten with all repos |
 | This roadmap | ~/agent-vault/domains/brandstudios/ROADMAP.md | You are here |
+
+---
+
+## Active Handoffs (2026-04-16, append)
+
+### Drift MV — Escalation System + Shot 27 Resolution
+- **Handoff:** `~/proto_front/.claude/handoffs/2026-04-16-escalation-system-shot-27.md`
+- **Context:** Drift MV Shot 27 hit a Veo model limitation (atmospheric creep from fire/smoke on extended aerials) that L1/L2 prompt fixes cannot resolve. Surfaces a product gap: Shot Escalation Ladder doctrine exists in Temp-gen docs but there's zero product instrumentation.
+- **Staged execution:**
+  - Phase A — Jackie motion QA on 5 v3/v4-resolved shots (05, 07, 15, 18, 20)
+  - Phase B — Shot 27 L3 resolution (Option B redesign or Option C replace)
+  - Phase C1 — Supabase migration 007 (`known_limitations` + `asset_escalations` tables + 7-rule seed)
+  - Phase C2 — Runner wall-detection logic + 7 new API endpoints
+  - Phase C3 — Review Gate UI (EscalationPanel, RedesignWorkflow, badges)
+- **Gates:** Drift MV Phase 3 assembly is blocked until Phase A + B + C1 are complete
+- **Priority relative to tasks 14-17 above:** Decision pending — the client-facing urgency of the escalation system may bump it ahead of the Platform variant picker
