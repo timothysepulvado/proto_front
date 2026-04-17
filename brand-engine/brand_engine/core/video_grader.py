@@ -1,5 +1,11 @@
 """Video grader: Gemini 3.1 Pro multimodal critic for generated video clips.
 
+Runs on **Vertex AI** (no AI Studio fallback). Auth is Application Default
+Credentials — `gcloud auth application-default login` or a service-account
+JSON file via `GOOGLE_APPLICATION_CREDENTIALS`. Project + region come from
+`VERTEX_PROJECT_ID` (default `bran-479523`) and `VERTEX_REGION` (default
+`global`), matching the orchestrator's vertex-sdk configuration.
+
 This is the in-process version of what Jackie (the Gemini CLI agent) does
 manually. It accepts a video clip + brand context + known-limitation catalog
 subset, invokes Gemini 3.1 Pro with a locked prompt harness, and returns a
@@ -34,20 +40,12 @@ from brand_engine.core.models import (
 logger = logging.getLogger(__name__)
 
 
-# ── Canonical model id (override via env for preview/GA tracking) ────────────
-# google-genai SDK uses bare model ids for Gemini. The Gemini 3.x Pro family
-# supports multimodal video input up to ~20 minutes.
-#
-# Endpoint-sensitive naming (2026-04-16):
-#   - On Vertex AI (`genai.Client(vertexai=True, project=..., location=...)`):
-#     `gemini-3.1-pro-001` (GA)
-#   - On AI Studio (`genai.Client(api_key=...)`, current wiring):
-#     `gemini-3.1-pro-preview` (v1beta ListModels-confirmed)
-#
-# TODO(consolidate-vertex): move brand-engine's google-genai client to
-# Vertex mode so the GA id `gemini-3.1-pro-001` is used and auth matches
-# the orchestrator's `@anthropic-ai/vertex-sdk` project (bran-479523).
-DEFAULT_GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_CRITIC_MODEL", "gemini-3.1-pro-preview")
+# ── Canonical model id (Vertex AI, GA) ───────────────────────────────────────
+# google-genai SDK on Vertex mode uses the GA id `gemini-3.1-pro-001`, matching
+# the orchestrator's `@anthropic-ai/vertex-sdk` project (bran-479523). The
+# previous `gemini-3.1-pro-preview` (AI Studio) default deprecated 2026-04.
+# Override via `GEMINI_VIDEO_CRITIC_MODEL` if tracking a successor id.
+DEFAULT_GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_CRITIC_MODEL", "gemini-3.1-pro-001")
 
 # ── Criteria locked to the Jackie-derived taxonomy ───────────────────────────
 # These mirror the brief at ~/agent-vault/briefs/drift-mv-jackie-motion-qa.md.
@@ -223,22 +221,17 @@ class VideoGrader:
 
     @property
     def client(self) -> genai.Client:
-        """Lazy init — only creates client when grade() is called."""
+        """Lazy init — only creates client when grade() is called.
+
+        Vertex-only. Auth is Application Default Credentials. Project + region
+        come from env vars (defaults documented in the module docstring).
+        """
         if self._client is None:
-            # brand-engine/.env stores the Gemini key as GOOGLE_GENAI_API_KEY
-            # (matching the embeddings module's convention). The google-genai
-            # SDK itself only auto-detects GOOGLE_API_KEY / GEMINI_API_KEY, so
-            # bridge the names here. Fall back to Application Default
-            # Credentials (Vertex) if no API key is present.
-            api_key = (
-                os.getenv("GOOGLE_API_KEY")
-                or os.getenv("GEMINI_API_KEY")
-                or os.getenv("GOOGLE_GENAI_API_KEY")
+            self._client = genai.Client(
+                vertexai=True,
+                project=os.getenv("VERTEX_PROJECT_ID", "bran-479523"),
+                location=os.getenv("VERTEX_REGION", "global"),
             )
-            if api_key:
-                self._client = genai.Client(api_key=api_key)
-            else:
-                self._client = genai.Client()
         return self._client
 
     def grade(
