@@ -226,15 +226,31 @@ def _output_schema_example() -> dict:
 
 
 def _extract_json_block(text: str) -> dict:
-    """Recover JSON from the model output, tolerating fenced code blocks."""
+    """Recover JSON from the model output, tolerating fenced code blocks.
+
+    Gemini 3.x sometimes returns `[{...}]` (single-element array) when asked
+    for a JSON object via response_mime_type="application/json"; unwrap that.
+    """
     text = text.strip()
     if text.startswith("```"):
-        # Strip ```json ... ``` fences
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start : end + 1]
-    return json.loads(text)
+        # Strip ```json ... ``` fences — keep the first balanced JSON value.
+        for open_ch, close_ch in (("{", "}"), ("[", "]")):
+            start = text.find(open_ch)
+            end = text.rfind(close_ch)
+            if start >= 0 and end > start:
+                text = text[start : end + 1]
+                break
+    parsed = json.loads(text)
+    if isinstance(parsed, list):
+        # Unwrap single-element arrays — a common Gemini quirk.
+        if len(parsed) == 1 and isinstance(parsed[0], dict):
+            return parsed[0]
+        raise ValueError(
+            f"Expected a JSON object (VideoGradeResult), got a {len(parsed)}-element array"
+        )
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Expected a JSON object, got {type(parsed).__name__}")
+    return parsed
 
 
 class VideoGrader:
