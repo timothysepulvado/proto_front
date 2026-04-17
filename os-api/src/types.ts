@@ -330,6 +330,17 @@ export interface VideoGradeResult {
   model: string;
   cost: number;
   latency_ms: number;
+  /**
+   * Non-null iff the /grade_video call used the Rule-1 consensus path
+   * (escalation-ops brief). Values describe the resolution taken:
+   *   - "not borderline, single call"
+   *   - "agreed N=2 (...)"
+   *   - "disagreement resolved via frame extraction (...)"
+   * The escalation loop uses presence of this field to flip
+   * OrchestratorInput.consensusResolved = true, which tells the orchestrator
+   * the verdict is authoritative and not subject to critic variance.
+   */
+  consensus_note?: string | null;
 }
 
 // ─── Orchestrator (Claude Opus 4.7) input/output contract ────────────────

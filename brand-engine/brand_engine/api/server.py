@@ -184,14 +184,29 @@ async def grade_video(request: VideoGradeRequest):
 
     try:
         grader = _get_video_grader()
-        result = grader.grade(
-            video_path=request.video_path,
-            profile=profile,
-            deliverable_context=request.deliverable_context,
-            hero_still_path=request.hero_still_path,
-            known_limitations=request.known_limitations_context,
-            failure_modes_to_check=request.failure_modes_to_check,
-        )
+        if request.consensus:
+            # Rule-1 consensus path (escalation-ops brief): single call, second
+            # pass on borderline score, ffmpeg frame-strip tiebreak on
+            # disagreement. consensus_note on the result is the caller's
+            # signal to flip OrchestratorInput.consensusResolved=true.
+            result = grader.grade_video_with_consensus(
+                video_path=request.video_path,
+                profile=profile,
+                deliverable_context=request.deliverable_context,
+                hero_still_path=request.hero_still_path,
+                known_limitations=request.known_limitations_context,
+                failure_modes_to_check=request.failure_modes_to_check,
+                threshold_band=request.consensus_threshold_band,
+            )
+        else:
+            result = grader.grade(
+                video_path=request.video_path,
+                profile=profile,
+                deliverable_context=request.deliverable_context,
+                hero_still_path=request.hero_still_path,
+                known_limitations=request.known_limitations_context,
+                failure_modes_to_check=request.failure_modes_to_check,
+            )
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

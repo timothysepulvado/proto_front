@@ -205,6 +205,21 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
     };
   }
 
+  // Rule 1 — if the QA verdict carries a consensus_note set by brand-engine's
+  // grade_video_with_consensus, treat it as post-consensus and surface that
+  // fact to the orchestrator so it doesn't second-guess the verdict. Single-
+  // call results from legacy callers (consensus=false) land here with no
+  // consensus_note → consensusResolved stays undefined/false.
+  const consensusResolved = Boolean(
+    (qaVerdict as { consensus_note?: string | null } | undefined)?.consensus_note,
+  );
+  if (consensusResolved) {
+    await logger(
+      "info",
+      `QA verdict carries consensus_note — passing consensusResolved=true to orchestrator`,
+    );
+  }
+
   // 4. Call orchestrator
   let decisionResult;
   try {
@@ -225,6 +240,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       perShotCumulativeCost: cumulativeCost,
       consecutiveSamePromptRegens: consecutiveSameRegens,
       levelsUsed,
+      consensusResolved,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

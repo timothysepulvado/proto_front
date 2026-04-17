@@ -205,6 +205,21 @@ class VideoGradeRequest(BaseModel):
         default=None,
         description="Clip duration (informational — Gemini reads from the video itself)",
     )
+    consensus: bool = Field(
+        default=True,
+        description=(
+            "When true (default), route to grade_video_with_consensus: run Gemini once, "
+            "and on borderline aggregate_score (within ±0.3 of 3.0 or 4.0) run a second "
+            "pass; on disagreement, tiebreak via 1fps ffmpeg frame extraction. Matches "
+            "escalation-ops brief Rule 1. Set false for a raw single-call grade."
+        ),
+    )
+    consensus_threshold_band: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Distance around a verdict boundary (3.0 FAIL/WARN, 4.0 WARN/PASS) that is considered 'borderline' and triggers a second consensus call. Only applied when consensus=true.",
+    )
 
 
 class VideoGradeCriterion(BaseModel):
@@ -237,3 +252,15 @@ class VideoGradeResult(BaseModel):
     model: str = Field(description="Gemini model id used")
     cost: float = Field(default=0.0, description="USD cost of the grade call")
     latency_ms: int = Field(default=0, description="Wall-clock latency of the grade call")
+    consensus_note: Optional[str] = Field(
+        default=None,
+        description=(
+            "Non-null iff this result passed through grade_video_with_consensus "
+            "(escalation-ops brief Rule 1). Values describe the consensus path taken: "
+            "'not borderline, single call' | 'agreed N=2' | "
+            "'disagreement resolved via frame extraction (...)'. "
+            "The os-api caller treats a non-null value as a signal to flip "
+            "OrchestratorInput.consensusResolved=true so the orchestrator knows "
+            "the verdict is authoritative (not subject to critic variance)."
+        ),
+    )
