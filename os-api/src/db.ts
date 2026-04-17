@@ -1,5 +1,12 @@
 import { supabase } from "./supabase.js";
-import type { Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert, BrandBaseline, PromptTemplate, PromptScore, RunStatus, RunStage, Campaign, CampaignDeliverable, DeliverableStatus } from "./types.js";
+import type {
+  Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert,
+  BrandBaseline, PromptTemplate, PromptScore, RunStatus, RunStage,
+  Campaign, CampaignDeliverable, DeliverableStatus,
+  KnownLimitation, KnownLimitationSeverity,
+  AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
+  OrchestrationDecisionRecord, PromptHistoryEntry,
+} from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
@@ -1153,4 +1160,443 @@ export async function deactivateBaselines(clientId: string, exceptId: string): P
     .neq("id", exceptId);
 
   if (error) throw new Error(`Failed to deactivate baselines: ${error.message}`);
+}
+
+// ============================================================================
+// Escalation System CRUD (migration 007)
+// ============================================================================
+
+interface DbKnownLimitation {
+  id: string;
+  model: string;
+  category: string;
+  failure_mode: string;
+  description: string;
+  mitigation: string | null;
+  severity: string;
+  detected_in_production_id: string | null;
+  detected_in_run_id: string | null;
+  times_encountered: number;
+  last_encountered_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbAssetEscalation {
+  id: string;
+  artifact_id: string;
+  deliverable_id: string | null;
+  run_id: string | null;
+  current_level: string;
+  status: string;
+  iteration_count: number;
+  failure_class: string | null;
+  known_limitation_id: string | null;
+  resolution_path: string | null;
+  resolution_notes: string | null;
+  final_artifact_id: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DbOrchestrationDecision {
+  id: string;
+  escalation_id: string;
+  run_id: string | null;
+  iteration: number;
+  input_context: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  model: string;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cost: number | null;
+  latency_ms: number | null;
+  created_at: string;
+}
+
+// ── Mappers ────────────────────────────────────────────────────────────────
+function mapKnownLimitation(d: DbKnownLimitation): KnownLimitation {
+  return {
+    id: d.id,
+    model: d.model,
+    category: d.category,
+    failureMode: d.failure_mode,
+    description: d.description,
+    mitigation: d.mitigation ?? undefined,
+    severity: (d.severity === "blocking" ? "blocking" : "warning") as KnownLimitationSeverity,
+    detectedInProductionId: d.detected_in_production_id ?? undefined,
+    detectedInRunId: d.detected_in_run_id ?? undefined,
+    timesEncountered: d.times_encountered,
+    lastEncounteredAt: d.last_encountered_at,
+    createdAt: d.created_at,
+    updatedAt: d.updated_at,
+  };
+}
+
+function mapAssetEscalation(d: DbAssetEscalation): AssetEscalation {
+  return {
+    id: d.id,
+    artifactId: d.artifact_id,
+    deliverableId: d.deliverable_id ?? undefined,
+    runId: d.run_id ?? undefined,
+    currentLevel: d.current_level as EscalationLevel,
+    status: d.status as EscalationStatus,
+    iterationCount: d.iteration_count,
+    failureClass: d.failure_class ?? undefined,
+    knownLimitationId: d.known_limitation_id ?? undefined,
+    resolutionPath: (d.resolution_path ?? undefined) as EscalationAction | undefined,
+    resolutionNotes: d.resolution_notes ?? undefined,
+    finalArtifactId: d.final_artifact_id ?? undefined,
+    resolvedAt: d.resolved_at ?? undefined,
+    createdAt: d.created_at,
+    updatedAt: d.updated_at,
+  };
+}
+
+function mapOrchestrationDecision(d: DbOrchestrationDecision): OrchestrationDecisionRecord {
+  return {
+    id: d.id,
+    escalationId: d.escalation_id,
+    runId: d.run_id ?? undefined,
+    iteration: d.iteration,
+    inputContext: d.input_context,
+    decision: d.decision,
+    model: d.model,
+    tokensIn: d.tokens_in ?? undefined,
+    tokensOut: d.tokens_out ?? undefined,
+    cost: d.cost ?? undefined,
+    latencyMs: d.latency_ms ?? undefined,
+    createdAt: d.created_at,
+  };
+}
+
+// ── known_limitations CRUD ─────────────────────────────────────────────────
+
+export async function listKnownLimitations(filters?: {
+  model?: string;
+  category?: string;
+  severity?: KnownLimitationSeverity;
+}): Promise<KnownLimitation[]> {
+  let q = supabase.from("known_limitations").select("*").order("times_encountered", { ascending: false });
+  if (filters?.model) q = q.eq("model", filters.model);
+  if (filters?.category) q = q.eq("category", filters.category);
+  if (filters?.severity) q = q.eq("severity", filters.severity);
+  const { data, error } = await q;
+  if (error) throw new Error(`Failed to list known limitations: ${error.message}`);
+  return (data as DbKnownLimitation[]).map(mapKnownLimitation);
+}
+
+export async function getKnownLimitation(id: string): Promise<KnownLimitation | null> {
+  const { data, error } = await supabase
+    .from("known_limitations")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to get known limitation: ${error.message}`);
+  return data ? mapKnownLimitation(data as DbKnownLimitation) : null;
+}
+
+export async function getLimitationByFailureMode(failureMode: string): Promise<KnownLimitation | null> {
+  const { data, error } = await supabase
+    .from("known_limitations")
+    .select("*")
+    .eq("failure_mode", failureMode)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to get limitation by failure_mode: ${error.message}`);
+  return data ? mapKnownLimitation(data as DbKnownLimitation) : null;
+}
+
+export async function createKnownLimitation(limit: Omit<KnownLimitation, "id" | "timesEncountered" | "lastEncounteredAt" | "createdAt" | "updatedAt">): Promise<KnownLimitation> {
+  const { data, error } = await supabase
+    .from("known_limitations")
+    .insert({
+      model: limit.model,
+      category: limit.category,
+      failure_mode: limit.failureMode,
+      description: limit.description,
+      mitigation: limit.mitigation ?? null,
+      severity: limit.severity,
+      detected_in_production_id: limit.detectedInProductionId ?? null,
+      detected_in_run_id: limit.detectedInRunId ?? null,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to create known limitation: ${error.message}`);
+  return mapKnownLimitation(data as DbKnownLimitation);
+}
+
+export async function updateKnownLimitation(id: string, updates: Partial<KnownLimitation>): Promise<KnownLimitation> {
+  const patch: Record<string, unknown> = {};
+  if (updates.description !== undefined) patch.description = updates.description;
+  if (updates.mitigation !== undefined) patch.mitigation = updates.mitigation;
+  if (updates.severity !== undefined) patch.severity = updates.severity;
+  const { data, error } = await supabase
+    .from("known_limitations")
+    .update(patch)
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to update known limitation: ${error.message}`);
+  return mapKnownLimitation(data as DbKnownLimitation);
+}
+
+export async function incrementLimitationCounter(id: string): Promise<void> {
+  // Fetch current count, increment atomically via .rpc would be ideal but we
+  // don't have the RPC defined — do read-modify-write within a single request.
+  const { data: current, error: readErr } = await supabase
+    .from("known_limitations")
+    .select("times_encountered")
+    .eq("id", id)
+    .single();
+  if (readErr || !current) return;
+  const { error } = await supabase
+    .from("known_limitations")
+    .update({
+      times_encountered: ((current as { times_encountered: number }).times_encountered ?? 0) + 1,
+      last_encountered_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+  if (error) throw new Error(`Failed to increment limitation counter: ${error.message}`);
+}
+
+// ── asset_escalations CRUD ─────────────────────────────────────────────────
+
+export async function getEscalationByArtifact(artifactId: string): Promise<AssetEscalation | null> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .eq("artifact_id", artifactId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to get escalation for artifact: ${error.message}`);
+  return data ? mapAssetEscalation(data as DbAssetEscalation) : null;
+}
+
+export async function getEscalation(id: string): Promise<AssetEscalation | null> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to get escalation: ${error.message}`);
+  return data ? mapAssetEscalation(data as DbAssetEscalation) : null;
+}
+
+export async function listEscalations(filters?: {
+  status?: EscalationStatus;
+  runId?: string;
+  campaignId?: string;
+  clientId?: string;
+}): Promise<AssetEscalation[]> {
+  let q = supabase
+    .from("asset_escalations")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (filters?.status) q = q.eq("status", filters.status);
+  if (filters?.runId) q = q.eq("run_id", filters.runId);
+  // Campaign/client filters need a join through deliverables; defer to a view or
+  // two-step query. For now, accept that campaignId and clientId require join.
+  const { data, error } = await q;
+  if (error) throw new Error(`Failed to list escalations: ${error.message}`);
+  let items = (data as DbAssetEscalation[]).map(mapAssetEscalation);
+  if (filters?.campaignId || filters?.clientId) {
+    // Filter client-side by joining to deliverables/runs
+    const deliverableIds = new Set<string>();
+    if (filters.campaignId) {
+      const { data: dels } = await supabase
+        .from("campaign_deliverables")
+        .select("id")
+        .eq("campaign_id", filters.campaignId);
+      (dels ?? []).forEach((d: { id: string }) => deliverableIds.add(d.id));
+      items = items.filter((e) => e.deliverableId && deliverableIds.has(e.deliverableId));
+    }
+    if (filters.clientId) {
+      const { data: runs } = await supabase
+        .from("runs")
+        .select("id")
+        .eq("client_id", filters.clientId);
+      const runIds = new Set((runs ?? []).map((r: { id: string }) => r.id));
+      items = items.filter((e) => e.runId && runIds.has(e.runId));
+    }
+  }
+  return items;
+}
+
+export async function listEscalationsByRun(runId: string): Promise<AssetEscalation[]> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(`Failed to list run escalations: ${error.message}`);
+  return (data as DbAssetEscalation[]).map(mapAssetEscalation);
+}
+
+export async function createEscalation(params: {
+  artifactId: string;
+  deliverableId?: string;
+  runId?: string;
+  currentLevel?: EscalationLevel;
+  status?: EscalationStatus;
+  failureClass?: string;
+  knownLimitationId?: string;
+}): Promise<AssetEscalation> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .insert({
+      artifact_id: params.artifactId,
+      deliverable_id: params.deliverableId ?? null,
+      run_id: params.runId ?? null,
+      current_level: params.currentLevel ?? "L1",
+      status: params.status ?? "in_progress",
+      iteration_count: 0,
+      failure_class: params.failureClass ?? null,
+      known_limitation_id: params.knownLimitationId ?? null,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to create escalation: ${error.message}`);
+  return mapAssetEscalation(data as DbAssetEscalation);
+}
+
+export async function updateEscalation(id: string, updates: {
+  currentLevel?: EscalationLevel;
+  status?: EscalationStatus;
+  iterationCount?: number;
+  failureClass?: string;
+  knownLimitationId?: string;
+  resolutionPath?: EscalationAction;
+  resolutionNotes?: string;
+  finalArtifactId?: string;
+  resolvedAt?: string | null;
+}): Promise<AssetEscalation> {
+  const patch: Record<string, unknown> = {};
+  if (updates.currentLevel !== undefined) patch.current_level = updates.currentLevel;
+  if (updates.status !== undefined) patch.status = updates.status;
+  if (updates.iterationCount !== undefined) patch.iteration_count = updates.iterationCount;
+  if (updates.failureClass !== undefined) patch.failure_class = updates.failureClass;
+  if (updates.knownLimitationId !== undefined) patch.known_limitation_id = updates.knownLimitationId;
+  if (updates.resolutionPath !== undefined) patch.resolution_path = updates.resolutionPath;
+  if (updates.resolutionNotes !== undefined) patch.resolution_notes = updates.resolutionNotes;
+  if (updates.finalArtifactId !== undefined) patch.final_artifact_id = updates.finalArtifactId;
+  if (updates.resolvedAt !== undefined) patch.resolved_at = updates.resolvedAt;
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .update(patch)
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to update escalation: ${error.message}`);
+  return mapAssetEscalation(data as DbAssetEscalation);
+}
+
+export async function resolveEscalation(
+  id: string,
+  status: EscalationStatus,
+  notes?: string,
+  finalArtifactId?: string,
+): Promise<AssetEscalation> {
+  return updateEscalation(id, {
+    status,
+    resolutionNotes: notes,
+    finalArtifactId,
+    resolvedAt: new Date().toISOString(),
+  });
+}
+
+// ── orchestration_decisions CRUD ────────────────────────────────────────────
+
+export async function recordOrchestrationDecision(params: {
+  escalationId: string;
+  runId?: string;
+  iteration: number;
+  inputContext: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  model: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  cost?: number;
+  latencyMs?: number;
+}): Promise<OrchestrationDecisionRecord> {
+  const { data, error } = await supabase
+    .from("orchestration_decisions")
+    .insert({
+      escalation_id: params.escalationId,
+      run_id: params.runId ?? null,
+      iteration: params.iteration,
+      input_context: params.inputContext,
+      decision: params.decision,
+      model: params.model,
+      tokens_in: params.tokensIn ?? null,
+      tokens_out: params.tokensOut ?? null,
+      cost: params.cost ?? null,
+      latency_ms: params.latencyMs ?? null,
+    })
+    .select()
+    .single();
+  if (error) throw new Error(`Failed to record orchestration decision: ${error.message}`);
+  return mapOrchestrationDecision(data as DbOrchestrationDecision);
+}
+
+export async function getOrchestrationDecisions(escalationId: string): Promise<OrchestrationDecisionRecord[]> {
+  const { data, error } = await supabase
+    .from("orchestration_decisions")
+    .select("*")
+    .eq("escalation_id", escalationId)
+    .order("iteration", { ascending: true });
+  if (error) throw new Error(`Failed to get orchestration decisions: ${error.message}`);
+  return (data as DbOrchestrationDecision[]).map(mapOrchestrationDecision);
+}
+
+export async function getOrchestrationDecisionsByRun(runId: string): Promise<OrchestrationDecisionRecord[]> {
+  const { data, error } = await supabase
+    .from("orchestration_decisions")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`Failed to get run orchestration decisions: ${error.message}`);
+  return (data as DbOrchestrationDecision[]).map(mapOrchestrationDecision);
+}
+
+// ── Prompt history helper (for orchestrator input assembly) ────────────────
+
+/**
+ * Assemble prompt history for a deliverable from prompt_templates + prompt_scores.
+ * Used by runner to feed the orchestrator with "what's been tried" context.
+ */
+export async function getPromptHistoryForDeliverable(
+  deliverableId: string,
+): Promise<PromptHistoryEntry[]> {
+  // Fetch prompts tied to this deliverable via metadata.deliverableId or related run
+  const { data: scores, error } = await supabase
+    .from("prompt_scores")
+    .select("*, prompt_templates!inner(*)")
+    .order("created_at", { ascending: true });
+  if (error) {
+    // Scores table may be sparse; fall back to empty
+    return [];
+  }
+  const history: PromptHistoryEntry[] = [];
+  let iteration = 0;
+  for (const row of (scores ?? []) as Array<Record<string, unknown>>) {
+    const tmpl = row.prompt_templates as Record<string, unknown> | undefined;
+    if (!tmpl) continue;
+    const metadata = (tmpl.metadata as Record<string, unknown> | undefined) ?? {};
+    if (metadata.deliverableId !== deliverableId) continue;
+    iteration += 1;
+    history.push({
+      iteration,
+      stillPrompt: (metadata.stillPrompt as string | undefined) ?? (tmpl.prompt_text as string | undefined),
+      veoPrompt: metadata.veoPrompt as string | undefined,
+      negativePrompt: metadata.negativePrompt as string | undefined,
+      verdict: (row.gate_decision as string | undefined) ?? "unknown",
+      failureClass: metadata.failureClass as string | undefined,
+      gradeScore: row.score as number | undefined,
+      artifactId: (row.artifact_id as string | undefined) ?? undefined,
+      timestamp: row.created_at as string | undefined,
+    });
+  }
+  return history;
 }

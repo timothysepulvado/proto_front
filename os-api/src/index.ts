@@ -37,7 +37,19 @@ import {
   acknowledgeDriftAlert,
   createBaseline,
   deactivateBaselines,
+  listKnownLimitations,
+  getKnownLimitation,
+  getLimitationByFailureMode,
+  createKnownLimitation,
+  updateKnownLimitation,
+  listEscalations,
+  getEscalation,
+  getEscalationByArtifact,
+  listEscalationsByRun,
+  getOrchestrationDecisions,
+  getOrchestrationDecisionsByRun,
 } from "./db.js";
+import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 
@@ -927,6 +939,322 @@ app.post("/api/clients/:clientId/baseline/calculate", async (req: Request, res: 
   } catch (err) {
     console.error("POST /api/clients/:clientId/baseline/calculate error:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Known Limitations (migration 007) ============
+
+// GET /api/known-limitations - List catalog (filter by model, category, severity)
+app.get("/api/known-limitations", async (req: Request, res: Response) => {
+  try {
+    const { model, category, severity } = req.query;
+    const limits = await listKnownLimitations({
+      model: typeof model === "string" ? model : undefined,
+      category: typeof category === "string" ? category : undefined,
+      severity: severity === "blocking" || severity === "warning" ? severity : undefined,
+    });
+    res.json(limits);
+  } catch (err) {
+    console.error("GET /api/known-limitations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/known-limitations/:id - Get one
+app.get("/api/known-limitations/:id", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const limit = await getKnownLimitation(id);
+    if (!limit) return res.status(404).json({ error: "Known limitation not found" });
+    res.json(limit);
+  } catch (err) {
+    console.error("GET /api/known-limitations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/known-limitations - Add new (auto-discovered by orchestrator OR manual)
+app.post("/api/known-limitations", async (req: Request, res: Response) => {
+  try {
+    const body = req.body as {
+      model: string;
+      category: string;
+      failureMode: string;
+      description: string;
+      mitigation?: string;
+      severity?: "warning" | "blocking";
+      detectedInProductionId?: string;
+      detectedInRunId?: string;
+    };
+    if (!body.model || !body.category || !body.failureMode || !body.description) {
+      return res.status(400).json({ error: "model, category, failureMode, description are required" });
+    }
+    // Idempotent on failureMode — if it exists, return existing
+    const existing = await getLimitationByFailureMode(body.failureMode);
+    if (existing) return res.status(200).json(existing);
+    const created = await createKnownLimitation({
+      model: body.model,
+      category: body.category,
+      failureMode: body.failureMode,
+      description: body.description,
+      mitigation: body.mitigation,
+      severity: body.severity ?? "warning",
+      detectedInProductionId: body.detectedInProductionId,
+      detectedInRunId: body.detectedInRunId,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    console.error("POST /api/known-limitations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/known-limitations/:id - Update mitigation/description as we learn
+app.patch("/api/known-limitations/:id", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const body = req.body as { description?: string; mitigation?: string; severity?: "warning" | "blocking" };
+    const updated = await updateKnownLimitation(id, body);
+    res.json(updated);
+  } catch (err) {
+    console.error("PATCH /api/known-limitations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Asset Escalations ============
+
+// GET /api/escalations - List (filter by status, run, campaign, client)
+app.get("/api/escalations", async (req: Request, res: Response) => {
+  try {
+    const { status, runId, campaignId, clientId } = req.query;
+    const items = await listEscalations({
+      status: typeof status === "string" ? (status as never) : undefined,
+      runId: typeof runId === "string" ? runId : undefined,
+      campaignId: typeof campaignId === "string" ? campaignId : undefined,
+      clientId: typeof clientId === "string" ? clientId : undefined,
+    });
+    res.json(items);
+  } catch (err) {
+    console.error("GET /api/escalations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/escalations/:id - Get one with full orchestration_decisions history
+app.get("/api/escalations/:id", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const escalation = await getEscalation(id);
+    if (!escalation) return res.status(404).json({ error: "Escalation not found" });
+    const decisions = await getOrchestrationDecisions(id);
+    res.json({ ...escalation, decisions });
+  } catch (err) {
+    console.error("GET /api/escalations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/artifacts/:id/escalation - Get escalation for an artifact (null if none)
+app.get("/api/artifacts/:id/escalation", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const escalation = await getEscalationByArtifact(id);
+    if (!escalation) return res.status(404).json({ error: "No escalation for this artifact" });
+    res.json(escalation);
+  } catch (err) {
+    console.error("GET /api/artifacts/:id/escalation error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/escalations - Campaign-level dashboard
+app.get("/api/campaigns/:campaignId/escalations", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const items = await listEscalations({ campaignId });
+    res.json(items);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/escalations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Run Escalation Report (Final HITL surface) ============
+
+// GET /api/runs/:runId/escalation-report - Full report for final HITL
+app.get("/api/runs/:runId/escalation-report", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ error: "Run not found" });
+
+    const escalations = await listEscalationsByRun(runId);
+    const decisions = await getOrchestrationDecisionsByRun(runId);
+    const artifacts = await getArtifactsByRun(runId);
+
+    // Group per deliverable
+    const deliverableIds = [...new Set(artifacts.map((a) => a.deliverableId).filter(Boolean))] as string[];
+    const deliverableTrails = await Promise.all(
+      deliverableIds.map(async (dId) => {
+        const d = await getDeliverable(dId);
+        const dEscalations = escalations.filter((e) => e.deliverableId === dId);
+        const dDecisions = decisions.filter((x) => dEscalations.some((e) => e.id === x.escalationId));
+        const knownLimitationIds = [...new Set(dEscalations.map((e) => e.knownLimitationId).filter(Boolean))] as string[];
+        const knownLimitationsHit = (await Promise.all(knownLimitationIds.map((lid) => getKnownLimitation(lid)))).filter(Boolean);
+        return {
+          deliverable: d,
+          escalations: dEscalations,
+          decisionHistory: dDecisions,
+          knownLimitationsHit,
+          totalRegenCost: dDecisions.reduce((sum, x) => sum + (x.cost ?? 0), 0),
+        };
+      }),
+    );
+
+    const totalOrchCost = decisions.reduce((sum, d) => sum + (d.cost ?? 0), 0);
+    const limitationCounts = new Map<string, number>();
+    escalations.forEach((e) => {
+      if (e.failureClass) limitationCounts.set(e.failureClass, (limitationCounts.get(e.failureClass) ?? 0) + 1);
+    });
+
+    res.json({
+      runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      status: run.status,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      deliverables: deliverableTrails,
+      aggregate: {
+        totalEscalations: escalations.length,
+        totalOrchestratorCalls: decisions.length,
+        totalOrchestratorCost: totalOrchCost,
+        totalGenerationCost: 0, // TODO: aggregate from artifact.metadata.cost if available
+        knownLimitationsHit: [...limitationCounts.entries()].map(([failureMode, count]) => ({ failureMode, count })),
+      },
+      finalHitl: run.hitlRequired
+        ? {
+            status: run.status === "completed" ? "approved" : run.status === "failed" ? "rejected" : "pending",
+            reviewedAt: run.completedAt,
+            reviewerNotes: run.hitlNotes,
+          }
+        : undefined,
+    });
+  } catch (err) {
+    console.error("GET /api/runs/:runId/escalation-report error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/runs/:runId/final-hitl/approve - Client passes the bundle → completed
+app.post("/api/runs/:runId/final-hitl/approve", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const body = req.body as { notes?: string; reviewerId?: string };
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ error: "Run not found" });
+    const updated = await updateRun(runId, {
+      status: "completed",
+      hitlNotes: body.notes,
+      completedAt: new Date().toISOString(),
+    });
+    runEvents.emit(`complete:${runId}`, { runId, status: "completed" });
+    res.json(updated);
+  } catch (err) {
+    console.error("POST /api/runs/:runId/final-hitl/approve error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/runs/:runId/final-hitl/reject - Client rejects → triggers new orchestrator loop run
+app.post("/api/runs/:runId/final-hitl/reject", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const body = req.body as { notes: string; deliverableIds?: string[] };
+    if (!body.notes) return res.status(400).json({ error: "notes (rejection message) is required" });
+    const run = await getRun(runId);
+    if (!run) return res.status(404).json({ error: "Run not found" });
+    await updateRun(runId, {
+      status: "needs_review",
+      hitlNotes: body.notes,
+    });
+    // Create a new run in 'full' mode for the same client/campaign, carrying the rejection
+    const newRunId = uuidv4();
+    const newRun: Run = {
+      runId: newRunId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      mode: "full",
+      status: "pending",
+      stages: STAGE_DEFINITIONS.full.map((s) => ({ ...s, status: "pending" })),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      hitlRequired: false,
+      hitlNotes: `Triggered by rejection of run ${runId}: ${body.notes}`,
+    };
+    await createRun(newRun);
+    executeRun(newRun).catch((err) => console.error(`Rejection-triggered run ${newRunId} failed:`, err));
+    res.status(202).json({ originalRunId: runId, newRunId, status: "rejected_rerun_queued" });
+  } catch (err) {
+    console.error("POST /api/runs/:runId/final-hitl/reject error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ============ Orchestrator (introspection + dev replay) ============
+
+// GET /api/orchestrator/decisions/:escalationId - Full decision history
+app.get("/api/orchestrator/decisions/:escalationId", async (req: Request, res: Response) => {
+  try {
+    const escalationId = getParam(req, "escalationId");
+    const decisions = await getOrchestrationDecisions(escalationId);
+    res.json(decisions);
+  } catch (err) {
+    console.error("GET /api/orchestrator/decisions/:escalationId error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/orchestrator/replay - Dev-only: replay an escalation input to test orchestrator changes
+app.post("/api/orchestrator/replay", async (req: Request, res: Response) => {
+  try {
+    const body = req.body as {
+      artifact: unknown;
+      qaVerdict: unknown;
+      promptHistory?: unknown[];
+      escalationLevel?: "L1" | "L2" | "L3";
+      attemptCount?: number;
+      deliverableId?: string;
+      campaignId?: string;
+      brandSlug: string;
+    };
+    if (!body.artifact || !body.qaVerdict || !body.brandSlug) {
+      return res.status(400).json({ error: "artifact, qaVerdict, and brandSlug are required" });
+    }
+    const catalog = await listKnownLimitations();
+    const deliverable = body.deliverableId ? await getDeliverable(body.deliverableId) : null;
+    const campaign = body.campaignId ? await getCampaign(body.campaignId) : null;
+    if (!deliverable) {
+      return res.status(400).json({ error: "deliverableId required to replay orchestrator" });
+    }
+    const result = await decideEscalation({
+      artifact: body.artifact as never,
+      qaVerdict: body.qaVerdict as never,
+      promptHistory: (body.promptHistory as never) ?? [],
+      knownLimitationsCatalog: catalog,
+      attemptCount: body.attemptCount ?? 0,
+      escalationLevel: body.escalationLevel ?? "L1",
+      deliverable,
+      campaignContext: {
+        prompt: campaign?.prompt,
+        brandSlug: body.brandSlug,
+      },
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("POST /api/orchestrator/replay error:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : "Internal server error" });
   }
 });
 

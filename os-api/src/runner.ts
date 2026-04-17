@@ -1,9 +1,10 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable } from "./types.js";
-import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getActiveBaseline, getCampaign, getPendingDeliverables, updateDeliverableStatus } from "./db.js";
+import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable, VideoGradeResult } from "./types.js";
+import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getActiveBaseline, getCampaign, getPendingDeliverables, updateDeliverableStatus, listKnownLimitations } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
+import { handleQAFailure, markEscalationResolved } from "./escalation_loop.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation
@@ -596,7 +597,7 @@ async function executeDeliverableGeneration(
         const resultPath = await pollTempGenJob(
           vidResult.data.job_id, run.runId, stageId,
         );
-        await createArtifactWithUpload({
+        const videoArtifact = await createArtifactWithUpload({
           runId: run.runId,
           clientId: run.clientId,
           campaignId: run.campaignId,
@@ -610,9 +611,37 @@ async function executeDeliverableGeneration(
             prompt,
             duration_seconds: deliverable.durationSeconds ?? 8,
             quality_tier: deliverable.qualityTier ?? "standard",
+            referenceImagePath: deliverable.referenceImages?.[0],
           },
         });
         artifactCreated = true;
+
+        // Autonomous QA + escalation loop (new in migration 007 / Phase C2c).
+        // If the sidecar's grade_video reports non-PASS, orchestrator picks
+        // L1/L2/L3 action and we regenerate until resolved or hitl_required.
+        try {
+          const escResult = await runVideoQAWithEscalation({
+            run,
+            artifact: videoArtifact,
+            deliverable,
+            campaign,
+            stageId,
+            narrative: deliverable.description ?? campaign.prompt,
+            heroStillPath: deliverable.referenceImages?.[0],
+          });
+          if (escResult.outcome === "hitl_required") {
+            await emitLog(run.runId, stageId, "warn",
+              `Deliverable ${shortId} escalation requires HITL review — orchestrator could not auto-resolve`);
+          } else if (escResult.outcome === "failed") {
+            await emitLog(run.runId, stageId, "error",
+              `Deliverable ${shortId} escalation loop failed — check logs`);
+          }
+        } catch (escErr) {
+          // Escalation loop itself failed (non-fatal to the overall run).
+          // Log and continue — human review will catch.
+          await emitLog(run.runId, stageId, "warn",
+            `Escalation loop errored (non-fatal): ${escErr instanceof Error ? escErr.message : String(escErr)}`);
+        }
       } catch (err) {
         await emitLog(run.runId, stageId, "error",
           `Video job failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1065,6 +1094,266 @@ async function executeExportStage(run: Run): Promise<boolean> {
   run = await updateStageStatus(run, stageId, "completed");
 
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Autonomous escalation loop — called after video generation to QA via
+// brand-engine /grade_video and, on failure, drive L1/L2/L3 orchestration.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Maximum times the loop will spin per artifact before breaking out. */
+const ESCALATION_LOOP_MAX = 6; // combined across L1/L2/L3 (3 + 2 + 2 minus one for the initial call)
+
+/**
+ * Grade a video artifact via brand-engine /grade_video; on non-PASS, invoke
+ * the orchestrator and either regenerate (looping) or flag HITL.
+ *
+ * Returns the final artifact (possibly a successor of the input artifact)
+ * along with a resolved/hitl/failed signal.
+ */
+async function gradeAndEscalateVideo(params: {
+  run: Run;
+  artifact: Artifact;
+  deliverable: CampaignDeliverable;
+  campaign: Campaign | null;
+  stageId: string;
+  /** Optional narrative context to feed the video critic. */
+  narrative?: string;
+  /** Optional hero still path for composition matching. */
+  heroStillPath?: string;
+}): Promise<{ outcome: "resolved" | "hitl_required" | "failed"; finalArtifact: Artifact }> {
+  const { run, deliverable, campaign, stageId, narrative, heroStillPath } = params;
+  let currentArtifact = params.artifact;
+  const brandSlug = run.clientId.replace("client_", "");
+
+  for (let loop = 0; loop < ESCALATION_LOOP_MAX; loop++) {
+    // 1. Grade the current video
+    await emitLog(run.runId, stageId, "info", `Grading video artifact ${currentArtifact.id} (loop ${loop + 1}/${ESCALATION_LOOP_MAX})`);
+
+    const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-generate-001" });
+    const relevantFailureModes = catalog.map((k) => k.failureMode);
+
+    const gradeResult = await callBrandEngine<VideoGradeResult>(
+      "/grade_video",
+      {
+        video_path: currentArtifact.path,
+        brand_slug: brandSlug,
+        failure_modes_to_check: relevantFailureModes,
+        deliverable_context: narrative ?? deliverable.description ?? campaign?.prompt,
+        hero_still_path: heroStillPath,
+        known_limitations_context: catalog.map((k) => ({
+          failure_mode: k.failureMode,
+          description: k.description,
+          mitigation: k.mitigation,
+          severity: k.severity,
+          id: k.id,
+          category: k.category,
+        })),
+        duration_seconds: deliverable.durationSeconds,
+      },
+      run.runId,
+      stageId,
+    );
+
+    if (!gradeResult.ok) {
+      // Sidecar unreachable or grade failed → treat as fail-soft and continue
+      await emitLog(run.runId, stageId, "warn", `/grade_video failed: ${gradeResult.error}. Skipping escalation loop.`);
+      return { outcome: "resolved", finalArtifact: currentArtifact };
+    }
+
+    const verdict = gradeResult.data;
+    await emitLog(
+      run.runId,
+      stageId,
+      "info",
+      `Grade: verdict=${verdict.verdict}, score=${verdict.aggregate_score}, detected=${JSON.stringify(verdict.detected_failure_classes)}, recommendation=${verdict.recommendation}`,
+    );
+
+    if (verdict.verdict === "PASS") {
+      return { outcome: "resolved", finalArtifact: currentArtifact };
+    }
+
+    // 2. Failure — call orchestrator via escalation loop
+    const escalationResult = await handleQAFailure({
+      runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      artifact: currentArtifact,
+      qaVerdict: verdict,
+      stageId,
+      runEvents,
+      logger: (level, message) => emitLog(run.runId, stageId, level, message),
+    });
+
+    if (escalationResult.outcome === "accepted") {
+      await emitLog(run.runId, stageId, "info", `Escalation resolved with accept: ${escalationResult.decision.reasoning}`);
+      return { outcome: "resolved", finalArtifact: currentArtifact };
+    }
+    if (escalationResult.outcome === "hitl_required") {
+      await emitLog(run.runId, stageId, "warn", `Escalation flagged for HITL review`);
+      return { outcome: "hitl_required", finalArtifact: currentArtifact };
+    }
+    if (escalationResult.outcome === "failed") {
+      await emitLog(run.runId, stageId, "error", `Escalation loop failed`);
+      return { outcome: "failed", finalArtifact: currentArtifact };
+    }
+
+    // 3. outcome === "regenerate" — fire new generation
+    const { decision, newPrompts } = escalationResult;
+    if (!newPrompts) {
+      return { outcome: "hitl_required", finalArtifact: currentArtifact };
+    }
+
+    await emitLog(
+      run.runId,
+      stageId,
+      "info",
+      `Regenerating artifact (action=${decision.action}) with orchestrator-provided prompts`,
+    );
+
+    // If the action includes a still regen (redesign/replace), do that first
+    let refImagePath: string | undefined = currentArtifact.metadata?.referenceImagePath as string | undefined;
+    if ((decision.action === "redesign" || decision.action === "replace") && newPrompts.stillPrompt) {
+      const newStillFileName = `still_${escalationResult.escalation.id.slice(0, 8)}_iter${escalationResult.escalation.iterationCount}.png`;
+      const stillOutputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
+      type ImageResp = { status: string; local_path: string | null; model: string; cost: number };
+      const stillResult = await callTempGen<ImageResp>(
+        "/generate/image",
+        "POST",
+        {
+          prompt: newPrompts.stillPrompt,
+          model: deliverable.aiModel ?? "gemini-3-pro-image-preview",
+          aspect_ratio: deliverable.aspectRatio ?? "16:9",
+          reference_images: deliverable.referenceImages,
+          image_size: deliverable.resolution,
+          output_path: path.join(stillOutputDir, newStillFileName),
+        },
+        run.runId,
+        stageId,
+      );
+      if (stillResult.ok && stillResult.data.status === "success") {
+        await createArtifactWithUpload({
+          runId: run.runId,
+          clientId: run.clientId,
+          campaignId: run.campaignId,
+          deliverableId: deliverable.id,
+          type: "image",
+          name: newStillFileName,
+          localPath: stillResult.data.local_path ?? path.join(stillOutputDir, newStillFileName),
+          stage: stageId,
+          metadata: {
+            model: stillResult.data.model,
+            prompt: newPrompts.stillPrompt,
+            cost: stillResult.data.cost,
+            escalationId: escalationResult.escalation.id,
+            role: "redesigned_hero_still",
+          },
+        });
+        refImagePath = stillResult.data.local_path ?? undefined;
+      } else {
+        await emitLog(run.runId, stageId, "warn", `Still regen failed: ${stillResult.ok ? "non-success" : stillResult.error}`);
+      }
+    }
+
+    // Fire new video generation
+    const newVidFileName = `video_${escalationResult.escalation.id.slice(0, 8)}_iter${escalationResult.escalation.iterationCount}.mp4`;
+    const vidOutputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
+    type VideoJobResp = { job_id: string; status: string; segments_total: number };
+    const vidResult = await callTempGen<VideoJobResp>(
+      "/generate/video",
+      "POST",
+      {
+        prompt: newPrompts.veoPrompt ?? deliverable.currentPrompt,
+        model: deliverable.aiModel ?? "veo-3.1-generate-001",
+        duration_seconds: deliverable.durationSeconds ?? 8,
+        aspect_ratio: deliverable.aspectRatio ?? "16:9",
+        resolution: deliverable.resolution ?? "1080p",
+        quality_tier: deliverable.qualityTier ?? "standard",
+        reference_image: refImagePath ?? deliverable.referenceImages?.[0],
+        negative_prompt: newPrompts.negativePrompt,
+      },
+      run.runId,
+      stageId,
+    );
+
+    if (!vidResult.ok) {
+      await emitLog(run.runId, stageId, "error", `Video regen failed: ${vidResult.error}`);
+      return { outcome: "failed", finalArtifact: currentArtifact };
+    }
+
+    let newVidPath: string;
+    try {
+      newVidPath = await pollTempGenJob(vidResult.data.job_id, run.runId, stageId);
+    } catch (err) {
+      await emitLog(run.runId, stageId, "error", `Video regen poll failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { outcome: "failed", finalArtifact: currentArtifact };
+    }
+
+    // Create successor artifact and loop back to grading
+    const successorArtifact = await createArtifactWithUpload({
+      runId: run.runId,
+      clientId: run.clientId,
+      campaignId: run.campaignId,
+      deliverableId: deliverable.id,
+      type: "video",
+      name: newVidFileName,
+      localPath: newVidPath || path.join(vidOutputDir, newVidFileName),
+      stage: stageId,
+      metadata: {
+        model: deliverable.aiModel ?? "veo-3.1",
+        prompt: newPrompts.veoPrompt,
+        negativePrompt: newPrompts.negativePrompt,
+        referenceImagePath: refImagePath,
+        escalationId: escalationResult.escalation.id,
+        orchestrationIteration: escalationResult.escalation.iterationCount,
+        predecessorArtifactId: currentArtifact.id,
+        role: "escalation_regen",
+      },
+    });
+
+    currentArtifact = successorArtifact;
+
+    // Successor was just created; next loop iteration will grade it.
+    // If it passes, markEscalationResolved links it as final_artifact_id.
+    // markEscalationResolved will fire when loop exits with resolved outcome.
+  }
+
+  // Exhausted loop budget
+  await emitLog(
+    run.runId,
+    stageId,
+    "warn",
+    `Escalation loop exhausted after ${ESCALATION_LOOP_MAX} iterations — flagging HITL`,
+  );
+  return { outcome: "hitl_required", finalArtifact: currentArtifact };
+}
+
+/**
+ * Wrapper that the runner can call once for any video artifact. Handles
+ * the full QA → escalate → regen → resolve cycle, and on success links
+ * the final artifact back to the escalation record.
+ */
+export async function runVideoQAWithEscalation(params: {
+  run: Run;
+  artifact: Artifact;
+  deliverable: CampaignDeliverable;
+  campaign: Campaign | null;
+  stageId: string;
+  narrative?: string;
+  heroStillPath?: string;
+}): Promise<{ outcome: "resolved" | "hitl_required" | "failed"; finalArtifact: Artifact }> {
+  const result = await gradeAndEscalateVideo(params);
+
+  // If resolved via a successor artifact, mark the escalation resolved
+  if (result.outcome === "resolved" && result.finalArtifact.id !== params.artifact.id) {
+    const { getEscalationByArtifact } = await import("./db.js");
+    const esc = await getEscalationByArtifact(params.artifact.id);
+    if (esc && !esc.resolvedAt) {
+      await markEscalationResolved(esc.id, result.finalArtifact.id, runEvents, params.run.runId, esc.resolutionPath ?? "prompt_fix");
+    }
+  }
+
+  return result;
 }
 
 // Main run executor

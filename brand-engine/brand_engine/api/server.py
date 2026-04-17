@@ -29,10 +29,13 @@ from brand_engine.core.models import (
     IngestRequest,
     IngestResult,
     RetrieveRequest,
+    VideoGradeRequest,
+    VideoGradeResult,
 )
 from brand_engine.core.pinecone_client import check_connectivity as check_pinecone
 from brand_engine.core.retriever import DualFusionRetriever, load_brand_profile
 from brand_engine.core.trainer import ThresholdTrainer
+from brand_engine.core.video_grader import VideoGrader
 
 load_dotenv()
 
@@ -49,6 +52,7 @@ app = FastAPI(
 _grader: BrandGrader | None = None
 _indexer: BrandIndexer | None = None
 _retriever: DualFusionRetriever | None = None
+_video_grader: VideoGrader | None = None
 
 
 def _get_grader() -> BrandGrader:
@@ -70,6 +74,13 @@ def _get_retriever() -> DualFusionRetriever:
     if _retriever is None:
         _retriever = DualFusionRetriever()
     return _retriever
+
+
+def _get_video_grader() -> VideoGrader:
+    global _video_grader
+    if _video_grader is None:
+        _video_grader = VideoGrader()
+    return _video_grader
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -146,6 +157,50 @@ async def grade(request: GradeRequest):
         return result
     except Exception as e:
         logger.error("Grade failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/grade_video", response_model=VideoGradeResult)
+async def grade_video(request: VideoGradeRequest):
+    """Grade a video clip using Gemini 3.1 Pro multimodal critic.
+
+    Watches the full clip (not stills) and scores 10 motion-specific criteria:
+    morphing, temporal_jitter, lighting_flicker, scale_creep, camera_smoothness,
+    character_drift, wardrobe_drift, atmospheric_creep, vfx_dissipation,
+    composition_stability.
+
+    Cross-references the provided known_limitations catalog to classify
+    detected failures. Output is structured VideoGradeResult (JSON) — the
+    contract used by the os-api orchestrator to decide L1/L2/L3 escalation
+    actions.
+
+    Used by os-api runner.ts after video generation, in place of (or
+    alongside) /grade which is image-only.
+    """
+    try:
+        profile = load_brand_profile(request.brand_slug)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        grader = _get_video_grader()
+        result = grader.grade(
+            video_path=request.video_path,
+            profile=profile,
+            deliverable_context=request.deliverable_context,
+            hero_still_path=request.hero_still_path,
+            known_limitations=request.known_limitations_context,
+            failure_modes_to_check=request.failure_modes_to_check,
+        )
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        # Invalid JSON from Gemini critic — surfaces as 502 Bad Gateway
+        logger.error("Video critic JSON error: %s", e)
+        raise HTTPException(status_code=502, detail=f"Video critic returned invalid output: {e}")
+    except Exception as e:
+        logger.error("Video grade failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

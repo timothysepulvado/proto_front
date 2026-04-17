@@ -228,6 +228,188 @@ export interface RunCreatePayload {
   inputs?: Record<string, unknown>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Escalation System Types (migration 007)
+// ─────────────────────────────────────────────────────────────────────────
+
+export type EscalationLevel = "L1" | "L2" | "L3";
+
+export type EscalationStatus =
+  | "in_progress"
+  | "resolved"
+  | "accepted"
+  | "redesigned"
+  | "replaced"
+  | "hitl_required";
+
+export type EscalationAction =
+  | "prompt_fix"
+  | "approach_change"
+  | "accept"
+  | "redesign"
+  | "replace";
+
+export type KnownLimitationSeverity = "warning" | "blocking";
+
+export interface KnownLimitation {
+  id: string;
+  model: string;
+  category: string;
+  failureMode: string;
+  description: string;
+  mitigation?: string;
+  severity: KnownLimitationSeverity;
+  detectedInProductionId?: string;
+  detectedInRunId?: string;
+  timesEncountered: number;
+  lastEncounteredAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AssetEscalation {
+  id: string;
+  artifactId: string;
+  deliverableId?: string;
+  runId?: string;
+  currentLevel: EscalationLevel;
+  status: EscalationStatus;
+  iterationCount: number;
+  failureClass?: string;
+  knownLimitationId?: string;
+  resolutionPath?: EscalationAction;
+  resolutionNotes?: string;
+  finalArtifactId?: string;
+  resolvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrchestrationDecisionRecord {
+  id: string;
+  escalationId: string;
+  runId?: string;
+  iteration: number;
+  inputContext: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  model: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  cost?: number;
+  latencyMs?: number;
+  createdAt: string;
+}
+
+// ─── Video Grade (mirrors brand-engine VideoGradeResult) ─────────────────
+export interface VideoGradeCriterion {
+  name: string;
+  score: number;
+  notes: string;
+}
+
+export interface VideoGradeResult {
+  verdict: "PASS" | "WARN" | "FAIL";
+  aggregate_score: number;
+  criteria: VideoGradeCriterion[];
+  detected_failure_classes: string[];
+  confidence: number;
+  summary: string;
+  reasoning: string;
+  recommendation:
+    | "ship"
+    | "L1_prompt_fix"
+    | "L2_approach_change"
+    | "L3_escalation"
+    | "L3_accept_with_trim";
+  model: string;
+  cost: number;
+  latency_ms: number;
+}
+
+// ─── Orchestrator (Claude Opus 4.7) input/output contract ────────────────
+export interface PromptHistoryEntry {
+  iteration: number;
+  stillPrompt?: string;
+  veoPrompt?: string;
+  negativePrompt?: string;
+  verdict: string;
+  failureClass?: string;
+  gradeScore?: number;
+  artifactId?: string;
+  timestamp?: string;
+}
+
+export interface OrchestratorInput {
+  artifact: Artifact;
+  qaVerdict: VideoGradeResult | Record<string, unknown>; // image grade also acceptable
+  promptHistory: PromptHistoryEntry[];
+  knownLimitationsCatalog: KnownLimitation[];
+  attemptCount: number;
+  escalationLevel: EscalationLevel;
+  deliverable: CampaignDeliverable;
+  campaignContext: { prompt?: string; brandSlug: string; narrative?: string };
+}
+
+export interface OrchestratorDecision {
+  level: EscalationLevel;
+  action: EscalationAction;
+  failure_class: string | null;
+  known_limitation_id: string | null;
+  new_still_prompt: string | null;
+  new_veo_prompt: string | null;
+  new_negative_prompt: string | null;
+  redesign_option: "B" | "C" | null;
+  reasoning: string;
+  confidence: number;
+  new_candidate_limitation?: {
+    category: string;
+    failure_mode: string;
+    description: string;
+    mitigation?: string;
+    severity: KnownLimitationSeverity;
+  } | null;
+}
+
+export interface OrchestratorCallResult {
+  decision: OrchestratorDecision;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  cost: number;
+  latencyMs: number;
+}
+
+// ─── Run-level escalation report (Final HITL) ────────────────────────────
+export interface DeliverableEscalationTrail {
+  deliverable: CampaignDeliverable;
+  escalations: AssetEscalation[];
+  decisionHistory: OrchestrationDecisionRecord[];
+  knownLimitationsHit: KnownLimitation[];
+  totalRegenCost: number;
+}
+
+export interface RunEscalationReport {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  status: RunStatus;
+  startedAt?: string;
+  completedAt?: string;
+  deliverables: DeliverableEscalationTrail[];
+  aggregate: {
+    totalEscalations: number;
+    totalOrchestratorCalls: number;
+    totalOrchestratorCost: number;
+    totalGenerationCost: number;
+    knownLimitationsHit: { failureMode: string; count: number }[];
+  };
+  finalHitl?: {
+    status: "pending" | "approved" | "rejected";
+    reviewedAt?: string;
+    reviewerNotes?: string;
+  };
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [

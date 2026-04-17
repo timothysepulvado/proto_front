@@ -40,3 +40,6 @@ __pycache__/
 # Worker dev files
 worker/.venv/
 worker/__pycache__/
+
+# Supabase CLI local state
+supabase/.temp/

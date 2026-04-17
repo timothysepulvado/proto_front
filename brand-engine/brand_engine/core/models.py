@@ -172,3 +172,68 @@ class HealthResponse(BaseModel):
     cohere_connected: bool
     pinecone_connected: bool
     version: str
+
+
+# ============ Video Grade Models (Gemini 3.1 Pro multimodal critic) ============
+
+class VideoGradeRequest(BaseModel):
+    """API request to grade a video clip using Gemini 3.1 Pro multimodal.
+
+    The video is evaluated against brand profile + narrative context + a subset
+    of known_limitations failure modes. Returns structured scores per criterion,
+    detected failure classes, and a PASS/WARN/FAIL verdict.
+    """
+    video_path: str = Field(description="Local filesystem path to .mp4 (or gs:// URI)")
+    brand_slug: str
+    failure_modes_to_check: Optional[list[str]] = Field(
+        default=None,
+        description="Subset of known_limitations.failure_mode to specifically probe. If None, all known modes are considered.",
+    )
+    deliverable_context: Optional[str] = Field(
+        default=None,
+        description="Campaign/narrative context — e.g., shot's narrative function, what the clip is supposed to convey",
+    )
+    hero_still_path: Optional[str] = Field(
+        default=None,
+        description="Path to the reference hero still for composition-match checks",
+    )
+    known_limitations_context: Optional[list[dict]] = Field(
+        default=None,
+        description="Full known_limitations records (failure_mode, description, mitigation) for orchestrator-supplied grounding. Injected into the prompt rails.",
+    )
+    duration_seconds: Optional[float] = Field(
+        default=None,
+        description="Clip duration (informational — Gemini reads from the video itself)",
+    )
+
+
+class VideoGradeCriterion(BaseModel):
+    """One scored dimension of video QA."""
+    name: str = Field(description="Criterion name, e.g. 'morphing', 'atmospheric_creep', 'camera_smoothness'")
+    score: float = Field(ge=0.0, le=5.0, description="0=catastrophic, 3=warn, 5=hero-quality")
+    notes: str = Field(description="Specific observation, ideally with timestamps")
+
+
+class VideoGradeResult(BaseModel):
+    """Response for /grade_video — structured verdict on a video clip.
+
+    This schema is the contract the Gemini 3.1 Pro video critic is bound to.
+    It mirrors the output format Jackie produces manually and is what the
+    runner consumes to feed the orchestrator's escalation decision input.
+    """
+    verdict: str = Field(description="PASS | WARN | FAIL")
+    aggregate_score: float = Field(ge=0.0, le=5.0, description="Mean of criterion scores")
+    criteria: list[VideoGradeCriterion]
+    detected_failure_classes: list[str] = Field(
+        default_factory=list,
+        description="Failure modes present in the clip — exact snake_case strings from known_limitations.failure_mode, OR new_candidate:<proposed_name> for undiscovered patterns",
+    )
+    confidence: float = Field(ge=0.0, le=1.0, description="Overall confidence in the verdict")
+    summary: str = Field(description="1-2 sentence overall assessment")
+    reasoning: str = Field(description="3-5 sentences: what was observed, why the verdict")
+    recommendation: str = Field(
+        description="ship | L1_prompt_fix | L2_approach_change | L3_escalation | L3_accept_with_trim",
+    )
+    model: str = Field(description="Gemini model id used")
+    cost: float = Field(default=0.0, description="USD cost of the grade call")
+    latency_ms: int = Field(default=0, description="Wall-clock latency of the grade call")
