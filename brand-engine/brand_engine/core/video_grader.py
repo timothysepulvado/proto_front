@@ -37,7 +37,17 @@ logger = logging.getLogger(__name__)
 # ── Canonical model id (override via env for preview/GA tracking) ────────────
 # google-genai SDK uses bare model ids for Gemini. The Gemini 3.x Pro family
 # supports multimodal video input up to ~20 minutes.
-DEFAULT_GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_CRITIC_MODEL", "gemini-3-pro")
+#
+# Endpoint-sensitive naming (2026-04-16):
+#   - On Vertex AI (`genai.Client(vertexai=True, project=..., location=...)`):
+#     `gemini-3.1-pro-001` (GA)
+#   - On AI Studio (`genai.Client(api_key=...)`, current wiring):
+#     `gemini-3.1-pro-preview` (v1beta ListModels-confirmed)
+#
+# TODO(consolidate-vertex): move brand-engine's google-genai client to
+# Vertex mode so the GA id `gemini-3.1-pro-001` is used and auth matches
+# the orchestrator's `@anthropic-ai/vertex-sdk` project (bran-479523).
+DEFAULT_GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_CRITIC_MODEL", "gemini-3.1-pro-preview")
 
 # ── Criteria locked to the Jackie-derived taxonomy ───────────────────────────
 # These mirror the brief at ~/agent-vault/briefs/drift-mv-jackie-motion-qa.md.
@@ -215,9 +225,20 @@ class VideoGrader:
     def client(self) -> genai.Client:
         """Lazy init — only creates client when grade() is called."""
         if self._client is None:
-            # google-genai reads GOOGLE_API_KEY or Application Default Credentials automatically.
-            # We fall through to the SDK's env-var detection.
-            self._client = genai.Client()
+            # brand-engine/.env stores the Gemini key as GOOGLE_GENAI_API_KEY
+            # (matching the embeddings module's convention). The google-genai
+            # SDK itself only auto-detects GOOGLE_API_KEY / GEMINI_API_KEY, so
+            # bridge the names here. Fall back to Application Default
+            # Credentials (Vertex) if no API key is present.
+            api_key = (
+                os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or os.getenv("GOOGLE_GENAI_API_KEY")
+            )
+            if api_key:
+                self._client = genai.Client(api_key=api_key)
+            else:
+                self._client = genai.Client()
         return self._client
 
     def grade(

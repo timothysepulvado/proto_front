@@ -1,24 +1,38 @@
 /**
- * Anthropic SDK wrapper for orchestrator calls.
+ * Anthropic on Vertex AI SDK wrapper for orchestrator calls.
+ *
+ * First-client infrastructure runs Claude through Google Cloud Vertex AI
+ * (project `bran-479523`), NOT the direct Anthropic API. This wrapper talks
+ * to `aiplatform.googleapis.com` via `@anthropic-ai/vertex-sdk`.
  *
  * Handles:
- *   - Client init with ANTHROPIC_API_KEY from env
- *   - Prompt caching on stable system blocks (5-minute TTL — amortizes cost
- *     across multiple orchestrator calls within a run)
+ *   - Client init via `AnthropicVertex`
+ *       • projectId from `VERTEX_PROJECT_ID` (default: `bran-479523`)
+ *       • region from `VERTEX_REGION` (default: `global` — the supported
+ *         Claude-on-Vertex endpoint per GCP docs)
+ *       • auth precedence: `VERTEX_API_KEY` as `accessToken` → Google
+ *         Application Default Credentials. The direct-SDK `apiKey` slot is
+ *         unavailable on Vertex; Google credentials are required.
+ *   - Prompt caching on stable system blocks (ephemeral `cache_control`,
+ *     supported on Claude-on-Vertex per model card)
  *   - Retries on transient errors (429 rate limit, 5xx)
  *   - Structured error handling (retryable vs fatal)
  *   - Per-call cost calculation based on input/output tokens
  *
- * Pricing is read from ~/agent-vault/MODEL_INTELLIGENCE.md at orchestrator-init
- * time (or falls back to conservative defaults). Cost is informational — real
- * billing is via Anthropic dashboard.
+ * Pricing is read from env (fallback to conservative defaults). Cost is
+ * informational — real billing is on the GCP console.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
 
 // ── Config ────────────────────────────────────────────────────────────────
+// Vertex uses the unsuffixed model id. The GA version name is
+// "claude-opus-4-7@default" but `messages.create()` takes just the base id.
 const DEFAULT_MODEL = process.env.CLAUDE_ORCHESTRATOR_MODEL
-  ?? "claude-opus-4-7-20260101";
+  ?? "claude-opus-4-7";
+
+const DEFAULT_PROJECT_ID = process.env.VERTEX_PROJECT_ID ?? "bran-479523";
+const DEFAULT_REGION = process.env.VERTEX_REGION ?? "global";
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
@@ -31,18 +45,23 @@ const CACHE_WRITE_MULT = 1.25;
 const CACHE_READ_MULT = 0.1;
 
 // ── Singleton client ──────────────────────────────────────────────────────
-let _client: Anthropic | null = null;
+let _client: AnthropicVertex | null = null;
 
-export function getAnthropicClient(): Anthropic {
+export function getAnthropicClient(): AnthropicVertex {
   if (_client) return _client;
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. Required for orchestrator calls. " +
-      "See os-api/.env.example."
-    );
-  }
-  _client = new Anthropic({ apiKey });
+  const projectId = DEFAULT_PROJECT_ID;
+  const region = DEFAULT_REGION;
+  const accessToken = process.env.VERTEX_API_KEY;
+  // If VERTEX_API_KEY is provided, pass it through as an `accessToken`
+  // (e.g. short-lived OAuth token from `gcloud auth print-access-token`, or
+  // an impersonated credential). If absent, the SDK falls back to Google
+  // Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS env,
+  // gcloud ADC, or an attached service account).
+  _client = new AnthropicVertex({
+    projectId,
+    region,
+    ...(accessToken ? { accessToken } : {}),
+  });
   return _client;
 }
 
@@ -74,7 +93,8 @@ export interface OrchestratorCallResponse {
 
 // ── Main call ─────────────────────────────────────────────────────────────
 /**
- * Invoke Claude with a cached system prompt + dynamic user message.
+ * Invoke Claude (on Vertex) with a cached system prompt + dynamic user
+ * message.
  *
  * Returns text + token accounting + cost estimate. Never throws on transient
  * errors — retries internally up to MAX_RETRIES. Throws only on fatal errors
@@ -177,4 +197,19 @@ function _sleep(ms: number): Promise<void> {
 /** Expose model id for logging / DB records. */
 export function getDefaultModel(): string {
   return DEFAULT_MODEL;
+}
+
+/** Expose Vertex deployment info for logging / diagnostics. */
+export function getVertexConfig(): {
+  projectId: string;
+  region: string;
+  model: string;
+  authMode: "access_token" | "adc";
+} {
+  return {
+    projectId: DEFAULT_PROJECT_ID,
+    region: DEFAULT_REGION,
+    model: DEFAULT_MODEL,
+    authMode: process.env.VERTEX_API_KEY ? "access_token" : "adc",
+  };
 }
