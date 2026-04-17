@@ -99,7 +99,7 @@ Generic locks like "exact appearance remains unchanged" are weak and result in w
 
 ## Active Escalations
 
-*(none currently — Drift MV Shot 27 escalation will be logged here after Phase B execution)*
+*(none currently — all Drift MV Phase-2 escalations resolved as of 2026-04-17. See Resolved section below.)*
 
 ---
 
@@ -150,17 +150,34 @@ Generic locks like "exact appearance remains unchanged" are weak and result in w
 - **Fix:** "Golden sunlight illuminates the four mechs from the front left"; "the sky behind them remains darker, creating contrast"; "each mech's faction colors remain clearly distinguishable against the sky throughout."
 - **Lesson:** Encoded as rule #17 (front/side lighting for color distinction). This resolution's pattern was later applied to Shot 18 (pattern transfer validated).
 
-### Drift MV — Shot 27 (2026-04-XX) [PENDING — Phase B]
+### Drift MV — Shot 27 (2026-04-17) [RESOLVED L3 replace (Option C)]
 
-- **Failure class:** `atmospheric_creep_fire_smoke_aerial`
-- **Journey:** v2 WARN → v3 WARN (3.25, atmospheric bank) → v4 WARN (3.5, marginal soft haze)
-- **Resolution:** Pending — will execute L3 redesign or replace via Phase B of the escalation-system handoff
-- **Root cause:** Veo generates atmospheric haze on ANY extended aerial over a scene with burning/smoking cityscape, regardless of camera trajectory (ascending OR fixed-altitude) or prompt negation ("zero fog, zero cloud, zero atmospheric haze"). Scene content (fire/smoke columns) is the trigger, not the camera move.
-- **Attempted fixes:**
-  - v2: ascending pullback → full cloud bank
-  - v3: removed "rises into clouds" + explicit "stays below cloud layer" negation → clouds still generated
-  - v4: fixed-altitude lateral orbit + triple-lock negation → soft haze still appears after ~3s
-- **Prompt engineering limit reached.** Must escalate to still/scene level (Option B redesign or Option C replace).
+- **Failure class:** `atmospheric_creep_fire_smoke_aerial` (severity: **blocking**)
+- **Journey:** v2 WARN → v3 WARN (3.25, atmospheric bank) → v4 WARN (3.5, marginal soft haze) → **v5 Option C PASS 4.4**
+- **Resolution:** L3 replace — Option C (interior courtyard trust moment, Gemini mech kneeling, worker approaching). Fully eliminates the burning-cityscape trigger from frame.
+- **Why Option C over Option B:** Option B (ground-level wide, fortress background) was orchestrator-recommended for confidence, but Option C was picked for the stronger emotional beat at the finale and because it **removes the trigger entirely** instead of working around it.
+- **v5 Option C auto-QA:** PASS 4.4, `detected_failure_classes: []`, recommendation `ship`. Critic summary: "completely avoiding the atmospheric_creep_fire_smoke_aerial issue that plagued the previous version."
+- **Root cause (confirmed):** Scene-content-driven atmospheric generation. Fire/smoke columns in frame → Veo adds atmospheric haze regardless of camera trajectory or negation prompts. Cannot be negotiated via prompt engineering.
+- **Catalog update:** `known_limitations.times_encountered` incremented from 1 → 2 (Drift MV is the second encounter; prior was the original discovery production).
+- **Cost:** ~$0.04 still + ~$0.75 clip = ~$0.79 (first-attempt success for Option C).
+- **Rule added to escalation-ops brief:** If detected class has `severity: blocking` AND the mitigation is scene-content-level (not prompt-level), orchestrator should skip L1/L2 and go direct-L3 on first encounter (Rule 3 in `~/agent-vault/briefs/escalation-ladder-autonomous-ops.md`).
+- **Full Drift-MV-side record:** `~/Temp-gen/productions/drift-mv/docs/ESCALATION_LOG.md`.
+
+---
+
+## Critic Consensus — Rule 1 IMPLEMENTED (2026-04-17)
+
+Shot 05 v3 (logged above) surfaced Gemini-3.1-pro-preview critic variance: single-call aggregate scores for the identical clip swung up to 3 points depending on the call, producing WARN↔PASS verdict flips. That session ran the critic manually N=2 and used frame extraction as a visual tiebreak.
+
+As of proto_front commit **`420a3c3`** (2026-04-17), that practice is **production-wired** in brand-engine:
+
+- `brand_engine/core/video_grader.py::grade_video_with_consensus()` — runs one call; if `aggregate_score` is within ±0.3 of a verdict boundary (3.0 FAIL/WARN, 4.0 WARN/PASS), runs a second call; agree → higher-confidence result; disagree → `_frame_extraction_fallback` (ffmpeg `-vf fps=1` → tile grid → Gemini as image-mode).
+- `VideoGradeResult.consensus_note` describes the path taken. When non-null, os-api `escalation_loop.ts` flips `OrchestratorInput.consensusResolved = true`, and SYSTEM_PROMPT Rule 1 tells Claude to treat the verdict as authoritative.
+- `/grade_video` endpoint defaults `consensus: true`; legacy `consensus: false` single-call path preserved for callers that don't want it.
+
+Live gate vs Shot 20 this session showed five different verdicts across four calls on the identical clip; consensus + tiebreak reliably resolved to PASS 4.9.
+
+Brief: `~/agent-vault/briefs/escalation-ladder-autonomous-ops.md` Rule 1.
 
 ---
 
