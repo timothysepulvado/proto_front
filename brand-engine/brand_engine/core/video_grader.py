@@ -1,14 +1,22 @@
-"""Video grader: Gemini 3.1 Pro multimodal critic for generated video clips.
+"""Video grader: Gemini multimodal critic for generated video clips.
 
-Runs on **Vertex AI** (no AI Studio fallback). Auth is Application Default
-Credentials — `gcloud auth application-default login` or a service-account
-JSON file via `GOOGLE_APPLICATION_CREDENTIALS`. Project + region come from
-`VERTEX_PROJECT_ID` (default `bran-479523`) and `VERTEX_REGION` (default
-`global`), matching the orchestrator's vertex-sdk configuration.
+Supports two backends (toggle via `GEMINI_VIDEO_CRITIC_BACKEND` env):
+
+  * `ai_studio` (default) — AI Studio via `GOOGLE_GENAI_API_KEY`.
+    Default model `gemini-3.1-pro-preview`. Video delivered via the File API.
+    This is the operational path while `bran-479523` awaits Gemini 3 Vertex
+    preview access.
+
+  * `vertex` — Vertex AI via ADC on `bran-479523`. Default model
+    `gemini-2.5-pro` (2.5 is the highest Gemini family available on the
+    project today). Video delivered as inline `Part.from_bytes` — Vertex
+    does not expose the Developer-API File upload surface. Override to
+    `gemini-3-pro-preview` via `GEMINI_VIDEO_CRITIC_VERTEX_MODEL` once the
+    project is allow-listed.
 
 This is the in-process version of what Jackie (the Gemini CLI agent) does
 manually. It accepts a video clip + brand context + known-limitation catalog
-subset, invokes Gemini 3.1 Pro with a locked prompt harness, and returns a
+subset, invokes Gemini with a locked prompt harness, and returns a
 structured VideoGradeResult.
 
 Design principles:
@@ -23,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import time
 from pathlib import Path
@@ -30,6 +39,13 @@ from typing import Optional
 
 from google import genai
 from google.genai import types as genai_types
+
+
+# Vertex inline-payload ceiling. The total request body must stay under ~20MB;
+# we reserve ~2MB for the prompt + rails so video+still together max out at 18MB.
+# For clips above this, caller must pre-upload to GCS and pass a gs:// URI
+# (not yet wired here; file the TODO when the first >18MB clip appears).
+MAX_INLINE_VIDEO_BYTES = 18 * 1024 * 1024
 
 from brand_engine.core.models import (
     BrandProfile,
@@ -40,12 +56,30 @@ from brand_engine.core.models import (
 logger = logging.getLogger(__name__)
 
 
-# ── Canonical model id (Vertex AI, GA) ───────────────────────────────────────
-# google-genai SDK on Vertex mode uses the GA id `gemini-3.1-pro-001`, matching
-# the orchestrator's `@anthropic-ai/vertex-sdk` project (bran-479523). The
-# previous `gemini-3.1-pro-preview` (AI Studio) default deprecated 2026-04.
-# Override via `GEMINI_VIDEO_CRITIC_MODEL` if tracking a successor id.
-DEFAULT_GEMINI_VIDEO_MODEL = os.getenv("GEMINI_VIDEO_CRITIC_MODEL", "gemini-3.1-pro-001")
+# ── Backend selection + per-backend model ids ────────────────────────────────
+# Two backends supported. Default backend is `ai_studio` because
+# `bran-479523` is not yet allow-listed for Gemini 3 Vertex preview access
+# (all gemini-3.* ids return 404 on that project as of 2026-04-17).
+#
+#   BACKEND      MODEL ID                    AUTH                         VIDEO DELIVERY
+#   ─────────    ─────────────────────────── ──────────────────────────── ──────────────────────
+#   ai_studio    gemini-3.1-pro-preview      GOOGLE_GENAI_API_KEY         File API upload
+#   vertex       gemini-3-pro-preview        ADC on bran-479523           inline Part.from_bytes
+#
+# 2.5-family ids are intentionally not defaults — Drift MV expects Gemini 3
+# quality. If Vertex access hasn't landed, stay on the ai_studio backend.
+#
+# Rotate per-service via env — do not edit these defaults casually:
+#   GEMINI_VIDEO_CRITIC_BACKEND=ai_studio|vertex
+#   GEMINI_VIDEO_CRITIC_AI_STUDIO_MODEL=<id>
+#   GEMINI_VIDEO_CRITIC_VERTEX_MODEL=<id>
+DEFAULT_VIDEO_CRITIC_BACKEND = os.getenv("GEMINI_VIDEO_CRITIC_BACKEND", "ai_studio").lower()
+DEFAULT_AI_STUDIO_VIDEO_MODEL = os.getenv(
+    "GEMINI_VIDEO_CRITIC_AI_STUDIO_MODEL", "gemini-3.1-pro-preview"
+)
+DEFAULT_VERTEX_VIDEO_MODEL = os.getenv(
+    "GEMINI_VIDEO_CRITIC_VERTEX_MODEL", "gemini-3-pro-preview"
+)
 
 # ── Criteria locked to the Jackie-derived taxonomy ───────────────────────────
 # These mirror the brief at ~/agent-vault/briefs/drift-mv-jackie-motion-qa.md.
@@ -215,23 +249,54 @@ class VideoGrader:
         )
     """
 
-    def __init__(self, model: str = DEFAULT_GEMINI_VIDEO_MODEL):
-        self.model = model
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
+    ):
+        self.backend = (backend or DEFAULT_VIDEO_CRITIC_BACKEND).lower()
+        if self.backend not in ("ai_studio", "vertex"):
+            raise ValueError(
+                f"Unknown backend '{self.backend}'. "
+                "Set GEMINI_VIDEO_CRITIC_BACKEND=ai_studio or vertex."
+            )
+        if model is not None:
+            self.model = model
+        elif self.backend == "vertex":
+            self.model = DEFAULT_VERTEX_VIDEO_MODEL
+        else:
+            self.model = DEFAULT_AI_STUDIO_VIDEO_MODEL
         self._client: Optional[genai.Client] = None
 
     @property
     def client(self) -> genai.Client:
         """Lazy init — only creates client when grade() is called.
 
-        Vertex-only. Auth is Application Default Credentials. Project + region
-        come from env vars (defaults documented in the module docstring).
+        Auth depends on backend:
+          * ai_studio → GOOGLE_GENAI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY
+          * vertex    → ADC (gcloud auth application-default login) or
+                        GOOGLE_APPLICATION_CREDENTIALS → service-account JSON
         """
-        if self._client is None:
+        if self._client is not None:
+            return self._client
+        if self.backend == "vertex":
             self._client = genai.Client(
                 vertexai=True,
                 project=os.getenv("VERTEX_PROJECT_ID", "bran-479523"),
                 location=os.getenv("VERTEX_REGION", "global"),
             )
+        else:
+            api_key = (
+                os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or os.getenv("GOOGLE_GENAI_API_KEY")
+            )
+            if not api_key:
+                raise ValueError(
+                    "GOOGLE_GENAI_API_KEY (or GEMINI_API_KEY / GOOGLE_API_KEY) "
+                    "is required for the ai_studio backend."
+                )
+            self._client = genai.Client(api_key=api_key)
         return self._client
 
     def grade(
@@ -258,44 +323,66 @@ class VideoGrader:
             failure_modes_to_check=failure_modes_to_check,
         )
 
-        # Upload the video via File API (google-genai handles this transparently
-        # for up to ~2GB files). This path is required for video input — inline
-        # bytes are not supported for clips > a few MB.
-        logger.info("Uploading video to Gemini File API: %s", video_path)
-        uploaded = self.client.files.upload(file=str(video_file))
+        # Video delivery depends on backend. AI Studio has the File API (large
+        # clips, server-side processing); Vertex does not expose it, so we use
+        # inline Part.from_bytes with a safety ceiling.
+        uploaded_names: list[str] = []  # remote files to clean up post-response
+        if self.backend == "ai_studio":
+            logger.info("Uploading video via AI Studio File API: %s", video_path)
+            uploaded = self.client.files.upload(file=str(video_file))
+            if uploaded.name is None:
+                raise RuntimeError("AI Studio File API returned upload with no name")
+            video_file_name: str = uploaded.name
+            uploaded_names.append(video_file_name)
 
-        # Capture the file's name (SDK returns Optional[str] in typing but API
-        # guarantees it exists for valid uploads).
-        video_file_name = uploaded.name
-        if video_file_name is None:
-            raise RuntimeError("Gemini File API returned upload with no name")
+            def _state(f) -> str:
+                return f.state.name if (f.state is not None) else "UNKNOWN"
 
-        # Wait for file to become ACTIVE (videos take a few seconds to process).
-        # Poll with a short budget; fail loud if not active within 60s.
-        def _state_str(f) -> str:
-            return f.state.name if (f.state is not None) else "UNKNOWN"
+            deadline = time.time() + 60
+            while _state(uploaded) != "ACTIVE" and time.time() < deadline:
+                time.sleep(2)
+                uploaded = self.client.files.get(name=video_file_name)
+            if _state(uploaded) != "ACTIVE":
+                raise RuntimeError(
+                    f"AI Studio File API did not activate video within 60s (state={_state(uploaded)})"
+                )
+            video_content = uploaded
 
-        deadline = time.time() + 60
-        while _state_str(uploaded) != "ACTIVE" and time.time() < deadline:
-            time.sleep(2)
-            uploaded = self.client.files.get(name=video_file_name)
-        if _state_str(uploaded) != "ACTIVE":
-            raise RuntimeError(
-                f"Gemini File API did not activate video within 60s (state={_state_str(uploaded)})"
+            still_content = None
+            if hero_still_path and Path(hero_still_path).exists():
+                still_up = self.client.files.upload(file=hero_still_path)
+                if still_up.name is not None:
+                    uploaded_names.append(still_up.name)
+                still_content = still_up
+        else:  # vertex — inline bytes
+            video_size = video_file.stat().st_size
+            if video_size > MAX_INLINE_VIDEO_BYTES:
+                raise ValueError(
+                    f"Video exceeds inline limit ({video_size} bytes > "
+                    f"{MAX_INLINE_VIDEO_BYTES}). Upload to GCS and pass a gs:// URI "
+                    f"(not yet wired — see video_grader.py TODO)."
+                )
+            logger.info("Loading video inline for Vertex (%d bytes): %s", video_size, video_path)
+            video_content = genai_types.Part.from_bytes(
+                data=video_file.read_bytes(),
+                mime_type="video/mp4",
             )
 
-        # Hero still grounding (optional — composition match reference)
-        still_part = None
-        still_file_name: Optional[str] = None
-        if hero_still_path and Path(hero_still_path).exists():
-            still_uploaded = self.client.files.upload(file=str(Path(hero_still_path)))
-            still_part = still_uploaded
-            still_file_name = still_uploaded.name
+            still_content = None
+            if hero_still_path and Path(hero_still_path).exists():
+                still_file = Path(hero_still_path)
+                still_mime, _ = mimetypes.guess_type(str(still_file))
+                if still_mime is None:
+                    still_mime = "image/png"
+                still_content = genai_types.Part.from_bytes(
+                    data=still_file.read_bytes(),
+                    mime_type=still_mime,
+                )
 
         # Build contents list: [video, optional still, rails text]
-        contents: list = [uploaded]
-        if still_part is not None:
-            contents.append(still_part)
+        contents: list = [video_content]
+        if still_content is not None:
+            contents.append(still_content)
         contents.append(rails)
 
         # Structured JSON output via response_mime_type
@@ -359,13 +446,12 @@ class VideoGrader:
         # Best-effort cost (google-genai doesn't return cost; leave 0.0 for caller to fill)
         latency_ms = int((time.time() - t0) * 1000)
 
-        # Clean up the uploaded file after use (best-effort)
-        try:
-            self.client.files.delete(name=video_file_name)
-            if still_file_name is not None:
-                self.client.files.delete(name=still_file_name)
-        except Exception as e:
-            logger.warning("File cleanup failed (non-fatal): %s", e)
+        # Clean up AI Studio File API uploads (no-op for Vertex inline path).
+        for name in uploaded_names:
+            try:
+                self.client.files.delete(name=name)
+            except Exception as e:
+                logger.warning("File cleanup failed (non-fatal): %s", e)
 
         return VideoGradeResult(
             verdict=verdict_final,
