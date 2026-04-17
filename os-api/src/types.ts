@@ -247,7 +247,13 @@ export type EscalationAction =
   | "approach_change"
   | "accept"
   | "redesign"
-  | "replace";
+  | "replace"
+  // L3 sub-path: accept the clip as-is but flag for post-production VFX
+  // enhancement (After Effects / Resolve / Nuke). Use when Veo gets composition
+  // + motion + character right but degrades a discrete VFX effect that's easier
+  // to repaint than to regenerate. See escalation-ops brief Rule L3_post_vfx_enhance.
+  // Status-wise, this reuses `accepted` with resolution_path = "post_vfx".
+  | "post_vfx";
 
 export type KnownLimitationSeverity = "warning" | "blocking";
 
@@ -348,6 +354,37 @@ export interface OrchestratorInput {
   escalationLevel: EscalationLevel;
   deliverable: CampaignDeliverable;
   campaignContext: { prompt?: string; brandSlug: string; narrative?: string };
+  // ─── 10a additions (orchestrator readiness) ────────────────────────────
+  /**
+   * ISO date (YYYY-MM-DD) as of the call. Injected into the user message so
+   * the orchestrator always knows the current date — prevents stale-training
+   * drift when reasoning about model ids, tool versions, external facts.
+   */
+  todayDate: string;
+  /**
+   * Per-shot cumulative USD cost across all orchestrator calls + any tracked
+   * generation costs for this asset. The orchestrator uses this to self-check
+   * Rule 5 (budget cap). Optional — caller computes from orchestration_decisions.
+   */
+  perShotCumulativeCost?: number;
+  /**
+   * Count of consecutive prior iterations where the orchestrator proposed the
+   * same (or near-identical) prompt. Surfaced so orchestrator can escalate
+   * instead of looping, and humans watching the SSE stream can intervene.
+   */
+  consecutiveSamePromptRegens?: number;
+  /**
+   * Ordered list of escalation levels used so far on this shot (e.g.
+   * ["L1", "L1", "L2"]). Surfaced for human watcher + orchestrator self-check
+   * on level progression.
+   */
+  levelsUsed?: EscalationLevel[];
+  /**
+   * True iff this call includes a post-consensus QA verdict (Rule 1). When
+   * present, the orchestrator should treat the verdict as authoritative and
+   * not suggest re-running QA.
+   */
+  consensusResolved?: boolean;
 }
 
 export interface OrchestratorDecision {

@@ -67,6 +67,8 @@ You've hit a model limitation that prompt engineering cannot fix. Three options:
 Trim the clip to the good portion (before the artifact appears), pad with clean last frame. Use when first 60-70%+ of clip delivers the narrative beat.
 Action: \`accept\`. \`new_still_prompt\`/\`new_veo_prompt\` remain null. \`resolution_notes\` describes the trim.
 
+**HARD CONSTRAINT — edit timing (Rule 2):** before recommending L3 accept-with-trim, verify \`trimmed_usable_duration >= deliverable.durationSeconds + 0.5\` (0.5s safety margin for assembly cross-fade). If the usable window is shorter than the edit slot needs, you CANNOT accept trim — escalate to L3 redesign or L3 replace instead. Assembly-time rescues you may consider before giving up on the shot: slow-mo stretch (\`trimmed × 1.33\` coverage at 0.75× speed), loop a clean 2-3s segment. If none of those reach the required duration → L3 redesign or L3 replace.
+
 ### L3 Redesign (Option B)
 Same narrative beat + emotional function, different execution. Change camera type/angle/scene composition. Generate a NEW hero still and a NEW clip. Use when the beat is essential and cannot be served by trim.
 Action: \`redesign\`, \`redesign_option: "B"\`. Populate \`new_still_prompt\` + \`new_veo_prompt\`.
@@ -74,6 +76,12 @@ Action: \`redesign\`, \`redesign_option: "B"\`. Populate \`new_still_prompt\` + 
 ### L3 Replace (Option C)
 The shot concept itself conflicts with model capability. Design a different shot that serves the same narrative function differently. Use when the original concept fundamentally incompatible with the limitation.
 Action: \`replace\`, \`redesign_option: "C"\`. Populate \`new_still_prompt\` + \`new_veo_prompt\` with a completely new concept.
+
+### L3 Post-VFX Enhance
+Accept the clip as-is BUT flag for post-production VFX enhancement (After Effects / DaVinci Resolve / Nuke). Use when Veo gets composition + motion + character right but degrades a discrete visible effect that a compositor can repaint (golden ring, shockwave, lightning arc, energy beam). Cost: \$0 additional gen; adds compositor labor time.
+Action: \`post_vfx\`. \`new_still_prompt\`/\`new_veo_prompt\` remain null. \`resolution_notes\` MUST describe what the compositor needs to fix (effect name, timing, spatial location).
+
+**Prefer \`post_vfx\` over \`accept\` when:** the VFX degradation is the ONLY issue AND the effect is discrete + visible enough to repaint cheaper than regenerate. Less useful for broad atmospheric issues or character-level problems.
 
 ## Level 3 fallback — HITL required
 If you cannot confidently pick an L3 path, OR attempt count exceeds the per-level caps, OR the failure is outside the catalog and you can't propose a new one confidently, output:
@@ -104,36 +112,84 @@ The runner will set escalation status to \`hitl_required\`.
 20. Reuse proven fixes across shots with the same failure class (pattern transfer).
 21. Scene-content atmospheric generation — fire/smoke in a scene triggers atmospheric haze on extended aerials regardless of camera move or negation. Accept editorial trim, remove smoke/fire, or redesign as ground-level.
 
+# HARD RULES (autonomous-ops discipline — non-negotiable)
+
+## Rule 1 — Critic consensus (caller-side; reference only)
+Critic variance is real (Shot 05 flipped WARN 4.52 → PASS 5.0 on identical clip). The escalation loop caller is responsible for running \`/grade_video\` twice on any score within ±0.3 of a verdict threshold (3.0 FAIL, 4.0 PASS) and extracting frames if the two calls disagree. You do NOT decide escalation on single borderline verdicts — the caller filters them before they reach you. If a user message's \`## QA VERDICT\` section includes a \`consensus_resolved: true\` annotation, treat the verdict as authoritative.
+
+## Rule 3 — Direct-L3 for known-blocking failure classes
+Some classes are practically unresolvable via prompt iteration. Before trying L1/L2, check the catalog for the detected class; if its severity is \`blocking\` AND its mitigation explicitly references scene-content / composition-level change, skip straight to L3. Examples:
+
+| Failure class | Direct-L3 action | Reason |
+|---|---|---|
+| \`atmospheric_creep_fire_smoke_aerial\` | L3_redesign (ground-level / remove aerial) OR L3_replace | Scene-content driven; prompt negation doesn't work |
+| morphing on >10 human faces across >6s | L3_redesign (reduce face count) OR L3_accept_with_trim | Face tracking breaks at high subject count over time |
+
+Add classes to this pattern as catalog grows. The \`severity: blocking\` field in a catalog entry signals direct-L3 candidacy.
+
+## Rule 4 — Disable Veo audio when the production has a music overlay
+Productions with a music track covering full duration (e.g., Drift MV uses \`Drift (Remastered).mp3\`) do not need Veo-generated diegetic sound — it gets stripped during assembly. When proposing \`new_veo_prompt\`, your prompt text MUST work with \`enable_audio: false\` (which the runner will set). This frees model capacity for visual coherence over 8s clips and cuts per-clip cost. Only recommend audio-on when the production explicitly needs diegetic sound that's hard to source in post.
+
+## Rule 5 — Per-shot budget cap
+Each shot has a hard spend ceiling across all levels: **~\$4.00**. The user message's \`## BUDGET STATE\` section reports \`per_shot_cumulative_cost_usd\`. Before recommending any action that requires regeneration (prompt_fix / approach_change / redesign / replace):
+
+- If \`per_shot_cumulative_cost_usd + next_call_estimate > 4.00\` → vote \`confidence: 0.3\` and recommend \`action: "accept"\` (best available trim) with \`reasoning\` flagging that budget is exhausted, so the runner routes to \`hitl_required\`.
+- If \`consecutiveSamePromptRegens >= 3\` (i.e., the prior 3 orchestrator decisions proposed essentially the same prompt) → you are looping; escalate a level OR recommend HITL. Do NOT propose a near-identical prompt a fourth time.
+- If \`levelsUsed\` shows no progression across multiple iterations (e.g., \`["L1","L1","L1"]\` without a class change) → promote the level.
+
+Human watchers also see these signals via SSE — they may manually cancel the escalation on their side. Your job is to not loop unnecessarily in the first place.
+
+## Staleness discipline (tool use)
+Before proposing any **new** model id, tool version, SDK version, prompt pattern, external fact, or industry claim that could have changed since your training cutoff, you MUST use the \`web_search\` tool to verify currency. Do NOT rely on training-data knowledge for anything model-version, tool-version, or industry-news related. The \`Today's date\` in the user message is authoritative — reason about staleness relative to it, not your training cutoff.
+
+Staleness triggers that REQUIRE a web search before answering:
+- Any generative-AI model id (Veo / Gemini / Sora / Midjourney / Runway — versions churn monthly)
+- SDK / library version references (\`@anthropic-ai/vertex-sdk\`, \`@google/genai\`, etc.)
+- Capability claims about commercial models (context window, multimodal support, API shape)
+- References to deprecation status, preview access, regional availability
+
+You may skip web search when the decision is purely about the Shot Escalation Ladder / 21 prompt rules / this system prompt's doctrine, since those are internal institutional knowledge.
+
+When web search results come back, prefer evidence dated within the last 30 days relative to \`Today's date\`.
+
 # DECISION MATRIX
 
 | Attempt N | Same failure class as N-1? | Known limitation severity | Recommended action |
 |---|---|---|---|
 | 1 | N/A | warning | L1 prompt_fix |
-| 1 | N/A | blocking | L2 approach_change |
+| 1 | N/A | blocking (direct-L3 pattern) | L3 redesign OR L3 replace |
+| 1 | N/A | blocking (approach-fixable) | L2 approach_change |
 | 2 | YES | warning | L2 approach_change |
 | 2 | YES | blocking | L3 redesign |
 | 3 | YES | warning | L3 redesign |
 | 3+ | YES | any | L3 replace OR L3 accept |
+| any | any | any (budget > \$4 or stuck loop) | accept + low confidence → HITL |
+| any | discrete VFX degradation only | any | L3 post_vfx |
 
-Override when the catalog has a specific mitigation that contradicts the matrix — apply the mitigation.
+Override when the catalog has a specific mitigation that contradicts the matrix — apply the mitigation. Rules 3 + 5 can also override this matrix.
 
 # OUTPUT JSON SCHEMA (match exactly)
 
 \`\`\`json
 {
   "level": "L1" | "L2" | "L3",
-  "action": "prompt_fix" | "approach_change" | "accept" | "redesign" | "replace",
+  "action": "prompt_fix" | "approach_change" | "accept" | "redesign" | "replace" | "post_vfx",
   "failure_class": "<failure_mode from catalog, or null>",
   "known_limitation_id": "<uuid from catalog, or null>",
   "new_still_prompt": "<full prompt text, or null>",
   "new_veo_prompt": "<full prompt text, or null>",
   "new_negative_prompt": "<comma-separated exclusions, or null>",
   "redesign_option": "B" | "C" | null,
-  "reasoning": "<3-5 sentences: what failed, why, what you're changing and why it should work>",
+  "reasoning": "<3-5 sentences: what failed, why, what you're changing and why it should work. If action is accept or post_vfx, describe the trim or the compositor instructions here.>",
   "confidence": 0.0,
   "new_candidate_limitation": null
 }
 \`\`\`
+
+Special rules for \`action\`:
+- \`accept\` and \`post_vfx\` → \`new_still_prompt\`, \`new_veo_prompt\`, \`new_negative_prompt\` all null; put trim or compositor detail in \`reasoning\`
+- \`prompt_fix\`, \`approach_change\`, \`redesign\`, \`replace\` → at least one of \`new_still_prompt\` or \`new_veo_prompt\` MUST be non-null
+- Budget exhaustion (Rule 5) → use \`accept\` with \`confidence < 0.5\` so the runner routes to \`hitl_required\`
 
 If you propose a new limitation:
 \`\`\`json
@@ -161,14 +217,47 @@ export function buildUserMessage(params: {
   escalationLevel: EscalationLevel;
   deliverable: CampaignDeliverable;
   campaignContext: { prompt?: string; brandSlug: string; narrative?: string };
+  /** ISO date YYYY-MM-DD — injected as first line so the model always knows
+   *  the current date (staleness discipline). */
+  todayDate: string;
+  /** Per-shot cumulative USD cost for Rule 5 self-check. */
+  perShotCumulativeCost?: number;
+  /** Count of consecutive iterations with near-identical proposed prompts. */
+  consecutiveSamePromptRegens?: number;
+  /** Ordered list of escalation levels used so far on this shot. */
+  levelsUsed?: EscalationLevel[];
+  /** True iff QA verdict has already been cross-validated via Rule 1 consensus. */
+  consensusResolved?: boolean;
 }): string {
   const sections: string[] = [];
+
+  // Today's date — top line, user message (NOT system) so cache stays stable
+  sections.push(`Today's date: ${params.todayDate}`);
+  sections.push("");
 
   sections.push(`# CURRENT FAILURE — DECIDE NEXT ACTION\n`);
 
   sections.push(`## ESCALATION STATE`);
   sections.push(`- Current level: ${params.escalationLevel}`);
   sections.push(`- Attempt count on this artifact: ${params.attemptCount}`);
+  if (params.levelsUsed && params.levelsUsed.length > 0) {
+    sections.push(`- Levels used so far on this shot: [${params.levelsUsed.join(", ")}]`);
+  }
+  sections.push("");
+
+  // ── BUDGET STATE — Rule 5 self-check inputs + human-watcher signals ─────
+  sections.push(`## BUDGET STATE`);
+  const cumCost = params.perShotCumulativeCost ?? 0;
+  const consecSame = params.consecutiveSamePromptRegens ?? 0;
+  sections.push(`- per_shot_cumulative_cost_usd: ${cumCost.toFixed(4)}`);
+  sections.push(`- per_shot_hard_cap_usd: 4.00`);
+  sections.push(`- consecutiveSamePromptRegens: ${consecSame}`);
+  if (cumCost >= 3.5) {
+    sections.push(`- ⚠ BUDGET WARNING: approaching per-shot cap. Per Rule 5, vote accept + confidence < 0.5 → HITL if another regen would exceed \$4.00.`);
+  }
+  if (consecSame >= 3) {
+    sections.push(`- ⚠ LOOP WARNING: last ${consecSame} decisions proposed near-identical prompts. Escalate level OR recommend HITL. Do NOT propose the same prompt again.`);
+  }
   sections.push("");
 
   sections.push(`## ARTIFACT`);
@@ -200,6 +289,9 @@ export function buildUserMessage(params: {
   sections.push("");
 
   sections.push(`## QA VERDICT`);
+  if (params.consensusResolved) {
+    sections.push(`> consensus_resolved: true — this verdict reflects critic-consensus resolution per Rule 1. Treat as authoritative; do not recommend re-running QA.`);
+  }
   sections.push("```json");
   sections.push(JSON.stringify(params.qaVerdict, null, 2));
   sections.push("```");

@@ -30,6 +30,7 @@ const VALID_ACTIONS: EscalationAction[] = [
   "accept",
   "redesign",
   "replace",
+  "post_vfx",
 ];
 
 /**
@@ -48,6 +49,11 @@ export async function decideEscalation(
     escalationLevel: input.escalationLevel,
     deliverable: input.deliverable,
     campaignContext: input.campaignContext,
+    todayDate: input.todayDate,
+    perShotCumulativeCost: input.perShotCumulativeCost,
+    consecutiveSamePromptRegens: input.consecutiveSamePromptRegens,
+    levelsUsed: input.levelsUsed,
+    consensusResolved: input.consensusResolved,
   });
 
   const rawResponse = await callClaude({
@@ -55,6 +61,7 @@ export async function decideEscalation(
     userMessage,
     temperature: 0.1,
     maxTokens: 4096,
+    enableWebSearch: true, // staleness discipline — orchestrator may web-search before proposing
   });
 
   const decision = _parseDecision(rawResponse.text);
@@ -177,12 +184,23 @@ function _validateDecision(
   decision: OrchestratorDecision,
   input: OrchestratorInput,
 ): void {
-  // If action is prompt_fix/approach_change/redesign/replace, must have new_veo_prompt or new_still_prompt
+  // If action is prompt_fix/approach_change/redesign/replace, must have new_veo_prompt or new_still_prompt.
+  // accept + post_vfx are prompt-free — resolution detail lives in `reasoning`.
   const needsPrompts = ["prompt_fix", "approach_change", "redesign", "replace"];
   if (needsPrompts.includes(decision.action)) {
     if (!decision.new_still_prompt && !decision.new_veo_prompt) {
       throw new Error(
         `Orchestrator action '${decision.action}' requires at least one new prompt; got neither.`,
+      );
+    }
+  }
+  // post_vfx and accept should NOT carry new prompts — if they do, it's a signal
+  // the orchestrator is confused. Log but don't throw (lenient forward-compat).
+  if (decision.action === "post_vfx" || decision.action === "accept") {
+    if (decision.new_still_prompt || decision.new_veo_prompt) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[orchestrator] action=${decision.action} should not carry new prompts (got still=${!!decision.new_still_prompt} veo=${!!decision.new_veo_prompt}). Continuing, but review.`,
       );
     }
   }

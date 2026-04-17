@@ -77,6 +77,35 @@ export interface OrchestratorCallRequest {
   temperature?: number;
   /** Max output tokens. */
   maxTokens?: number;
+  /**
+   * If true, declare Anthropic's server-executed `web_search_20250305` tool so
+   * the orchestrator can verify model ids / tool versions / external facts
+   * before proposing them (staleness discipline). Server-side execution — no
+   * client-side tool loop needed; results come back inline in the response.
+   *
+   * Vertex support as of SDK 0.16.0: types present (WebSearchTool20250305).
+   * If Vertex rejects the tool at runtime, callers should treat the failure as
+   * "web search disabled" and continue — the gate is the arg-shape, not the
+   * live call. See 10a handoff: web-search is low-importance for first run.
+   */
+  enableWebSearch?: boolean;
+  /** Max web_search tool uses per call. Default 3. */
+  maxWebSearchUses?: number;
+  /**
+   * Optional additional tool definitions. If you want custom tools (not
+   * web_search), pass them here; they will be merged with the web_search
+   * declaration. Shape: compatible with @anthropic-ai/sdk ToolUnion.
+   */
+  extraTools?: unknown[];
+}
+
+export interface OrchestratorToolUse {
+  /** 'web_search' for web_search_20250305, or a client-defined name. */
+  name: string;
+  /** The tool call id from the model. */
+  id: string;
+  /** The tool_use input payload — for web_search this is { query, ... }. */
+  input: unknown;
 }
 
 export interface OrchestratorCallResponse {
@@ -89,6 +118,10 @@ export interface OrchestratorCallResponse {
   cost: number;
   latencyMs: number;
   stopReason: string | null;
+  /** Tool invocations observed in the response (server-side web_search, etc.). */
+  toolUses: OrchestratorToolUse[];
+  /** Count of web_search server-tool invocations (for audit + cost). */
+  webSearchCount: number;
 }
 
 // ── Main call ─────────────────────────────────────────────────────────────
@@ -107,6 +140,9 @@ export async function callClaude(
   const model = request.model ?? DEFAULT_MODEL;
   const temperature = request.temperature ?? 0.1;
   const maxTokens = request.maxTokens ?? 4096;
+
+  // Assemble tools array if the caller opted in to web_search
+  const tools = _buildTools(request);
 
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -129,11 +165,17 @@ export async function callClaude(
             content: request.userMessage,
           },
         ],
+        // Only include `tools` when the caller declared them — the Vertex SDK
+        // 0.16.0 accepts the field and forwards to Anthropic's server. If the
+        // Vertex backend rejects a specific server-tool id, the error surfaces
+        // as a 400 here and we propagate — caller chooses to retry without
+        // web_search. See 10a handoff Q1.
+        ...(tools.length > 0 ? { tools: tools as never } : {}),
       });
 
       const latencyMs = Date.now() - t0;
 
-      // Extract text
+      // Extract text blocks (assistant's prose / JSON output)
       const textBlocks = response.content.filter(
         (b: { type: string }) => b.type === "text",
       );
@@ -141,13 +183,34 @@ export async function callClaude(
         .map((b: unknown) => (b as { text: string }).text)
         .join("");
 
+      // Extract server_tool_use blocks (web_search invocations, etc.) for audit.
+      // Cast via unknown to decouple from the SDK's ContentBlock union shape —
+      // we only need `type`/`name`/`id`/`input` fields which exist on both
+      // tool_use and server_tool_use block variants.
+      const toolUses: OrchestratorToolUse[] = [];
+      const blocks = response.content as unknown as Array<Record<string, unknown>>;
+      for (const block of blocks) {
+        if (block.type === "server_tool_use" || block.type === "tool_use") {
+          toolUses.push({
+            name: String(block.name ?? ""),
+            id: String(block.id ?? ""),
+            input: block.input ?? null,
+          });
+        }
+      }
+
       const usage = response.usage;
       const tokensIn = usage.input_tokens ?? 0;
       const tokensOut = usage.output_tokens ?? 0;
       const cacheReadTokens = (usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0;
       const cacheWriteTokens = (usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0;
+      const serverToolUsage = (usage as { server_tool_use?: { web_search_requests?: number } | null }).server_tool_use;
+      const webSearchCount = serverToolUsage?.web_search_requests
+        ?? toolUses.filter((t) => t.name === "web_search").length;
 
-      // Cost calc (USD)
+      // Cost calc (USD) — input/output tokens only. Web search has its own
+      // per-request pricing ($0.01/request typical); we surface count but don't
+      // add it to the input-token cost figure (keeps the "model cost" clean).
       const cost =
         ((tokensIn - cacheReadTokens - cacheWriteTokens) * INPUT_COST_PER_M
           + cacheWriteTokens * INPUT_COST_PER_M * CACHE_WRITE_MULT
@@ -164,6 +227,8 @@ export async function callClaude(
         cost,
         latencyMs,
         stopReason: response.stop_reason,
+        toolUses,
+        webSearchCount,
       };
     } catch (err) {
       lastErr = err;
@@ -180,6 +245,33 @@ export async function callClaude(
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────
+
+/**
+ * Build the tools array for a call. Right now this declares Anthropic's
+ * server-executed `web_search_20250305` tool when `enableWebSearch` is set,
+ * plus any extra tools the caller passed.
+ *
+ * Shape reference (@anthropic-ai/sdk 0.16 ToolUnion):
+ *   { name: "web_search", type: "web_search_20250305", max_uses?: number, ... }
+ *
+ * Returns unknown[] because we want to tolerate Vertex-side SDK variance
+ * without tightly binding the call site to ToolUnion's exact shape.
+ */
+export function _buildTools(request: OrchestratorCallRequest): unknown[] {
+  const out: unknown[] = [];
+  if (request.enableWebSearch) {
+    out.push({
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: request.maxWebSearchUses ?? 3,
+    });
+  }
+  if (request.extraTools && Array.isArray(request.extraTools)) {
+    out.push(...request.extraTools);
+  }
+  return out;
+}
+
 function _isRetriable(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const status = (err as { status?: number }).status;

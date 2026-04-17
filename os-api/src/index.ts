@@ -1250,6 +1250,8 @@ app.post("/api/orchestrator/replay", async (req: Request, res: Response) => {
         prompt: campaign?.prompt,
         brandSlug: body.brandSlug,
       },
+      // Replay is a dev endpoint; inject today's date same way escalation_loop does
+      todayDate: new Date().toISOString().slice(0, 10),
     });
     res.json(result);
   } catch (err) {
