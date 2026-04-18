@@ -191,6 +191,68 @@ First end-to-end exercise of the productized pipeline with all 10a + 10b hardeni
 
 ---
 
+## Step 10d-pre — Vertex SA auth + SSE escalation forwarding LANDED (2026-04-17 PM)
+
+**Commit:** `a961b3b` (`feat(orchestrator): 10d-pre — Vertex SA auth + SSE escalation forwarding + probe assertions`).
+
+Tim's session-start pivot inverted the 10c-2 "drop ANTHROPIC_API_KEY" plan: stay on Vertex (NOT direct Anthropic). Real fix = service-account JSON for headless-stable Vertex auth. Closes 10c-1 + 10c-2 from the Step 10c gap list; 10c-3 partial (Tim GCP action remains).
+
+### What landed
+
+**10c-1 CLOSED — SSE escalation forwarding wired.**
+- `os-api/src/index.ts` `/api/runs/:runId/logs` handler now subscribes to `escalation:${runId}` and forwards events as `data: {type:"escalation", payload:event}\n\n`. Existing log writes unchanged (additive change — no break for legacy consumers).
+- Wire shape: payloads with no `type` field at top level are logs; payloads with `type === "escalation"` are escalation events (then inspect inner `payload.type === "watcher_signal"` for watcher signals specifically). The 10a-promised "human watcher can cancel" capability is now live.
+- New wire-level contract test `os-api/tests/10c1-sse-escalation-forward.ts` — 18 assertions across 4 scenarios: watcher_signal forwarding, AssetEscalation row forwarding, cleanup unsubscribes correctly, per-runId isolation. ALL PASSED.
+
+**10c-2 CLOSED — Vertex service-account auth wired.**
+- `os-api/src/anthropic.ts` `getAnthropicClient()` now picks Vertex auth in this precedence inside the Vertex branch: `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON via `googleAuth: new GoogleAuth({keyFile, scopes: cloud-platform})`) > `VERTEX_API_KEY` (legacy accessToken) > bare ADC.
+- `getVertexConfig().authMode` union extended with `"service_account"`.
+- Service account: `vertex-anthropic@bran-479523.iam.gserviceaccount.com`. Key at `~/agent-vault/secrets/vertex-anthropic-bran-479523.json` (chmod 600, gitignored via new `secrets/` exclusion in `agent-vault/.gitignore`). `os-api/.env` adds `GOOGLE_APPLICATION_CREDENTIALS=...`. `.env.example` documents the new precedence.
+- `invalid_rapt` reauth churn eliminated. Verified `backend=vertex, authMode=service_account` in live probe.
+
+**10c-3 PARTIAL — Tim GCP action needed.**
+- `os-api/tests/10c-vertex-websearch-probe.ts` hardened with explicit asserts (webSearchCount + toolUses + text length) + dotenv path resolution.
+- Live probe: auth ✅, but persistent **429 RESOURCE_EXHAUSTED** on Claude Opus 4.7 for `bran-479523`. Persistent across 60s wait; bare no-tools call also 429s.
+- Independent Python `anthropic[vertex]` SDK probe (Tim's diagnostic ask — install in ephemeral venv, run canonical Anthropic snippet with same SA via `GOOGLE_APPLICATION_CREDENTIALS`) returns IDENTICAL 429 RateLimitError. Rules out our Node code, our SDK version, our auth construction.
+- **Project-level quota or Model Garden non-enablement on `bran-479523` for Claude Opus 4.7.** Tim must enable at https://console.cloud.google.com/vertex-ai/model-garden?project=bran-479523 + accept Anthropic TOS click-through. After enablement, re-run probe to close 10c-3.
+
+### Bonus finding (free byproduct of having SA wired)
+
+While the SA was wired, probed Gemini 3.x family availability on Vertex `bran-479523` via the same SA. Findings:
+
+| Model id | Vertex bran-479523 | Notes |
+|----------|---------------------|-------|
+| `gemini-3.1-pro-preview` (text) | ✅ 200 | Current `GEMINI_VIDEO_CRITIC_VERTEX_MODEL` candidate |
+| `gemini-3-pro-preview` (text) | ❌ 404 | Doesn't exist on Vertex (the previous "preview access gated" diagnosis was wrong — it was wrong id all along) |
+| `gemini-3-pro-image-preview` (image Pro) | ✅ 200 | Same id as AI Studio default for Temp-gen Pro |
+| `gemini-3.1-pro-image-preview` (image Pro) | ❌ 404 | Doesn't exist |
+| `gemini-3.1-flash-image-preview` (image Flash) | ✅ 200 | Same id as AI Studio Flash draft |
+| `gemini-3-pro-image-001` (image Pro speculated GA) | ❌ 404 | Hypothesized GA-style id was wrong |
+
+Naming inconsistency: Google uses `gemini-3.1-*` for text Pro and Flash image, but `gemini-3-*` (no `.1`) for Pro image. Tim's "3.1 not just 3" rule applies to text Pro and Flash image; image Pro is the inverse.
+
+**Implications (NOT actioned this session, queued):**
+- Gemini 3 Vertex preview access brief (`~/agent-vault/briefs/gemini-3-vertex-preview-access.md`) marked RESOLVED — preview was always granted; previous failures were wrong model ids.
+- brand-engine video critic Vertex backend: switch on with `GEMINI_VIDEO_CRITIC_BACKEND=vertex` + `GEMINI_VIDEO_CRITIC_VERTEX_MODEL=gemini-3.1-pro-preview` + `GOOGLE_APPLICATION_CREDENTIALS` for SA + restart `:8100`. Separate session.
+- Temp-gen image Vertex migration brief Phase 1 effectively done — confirmed Vertex ids are `gemini-3-pro-image-preview` (Pro) and `gemini-3.1-flash-image-preview` (Flash), same as AI Studio. Separate session, post-MV per original deferral.
+
+### Pre-existing dead code surfaced (NOT in scope)
+
+5 unused-symbol LSP warnings in `os-api/src/runner.ts` (lines 18, 32, 119, 215, 263 — TEMP_GEN_VENV, getPythonPath, runCommand, checkBrandEngineHealth, checkTempGenHealth). Likely artifacts from the runner subprocess→FastAPI HTTP refactor. Karl-sized cleanup commit, deferred.
+
+### Gates (all green at session close)
+
+- `npx tsc --noEmit -p os-api`: clean (exit 0)
+- 10a readiness: 17/17 (no regression)
+- 10c1 SSE escalation forward: 18/18 (new)
+- brand-engine 10b pytest: 26/26 (no regression)
+- Temp-gen job namespacing pytest: 2/2 (no regression)
+- **Total: 63/63 + tsc clean**
+
+**Closeout handoff:** `~/proto_front/.claude/handoffs/2026-04-17-step-10d-pre-closeout.md` (filesystem-only). Includes Tim's GCP action steps + fresh-context kickoff prompt for the post-action session. **Do NOT start 10d in the immediate next session.** 10d is its own ~$20-$120 Veo run.
+
+---
+
 ## Critic Consensus — Rule 1 IMPLEMENTED (2026-04-17)
 
 Shot 05 v3 (logged above) surfaced Gemini-3.1-pro-preview critic variance: single-call aggregate scores for the identical clip swung up to 3 points depending on the call, producing WARN↔PASS verdict flips. That session ran the critic manually N=2 and used frame extraction as a visual tiebreak.
