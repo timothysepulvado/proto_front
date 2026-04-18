@@ -1,18 +1,23 @@
 /**
  * Anthropic SDK wrapper for orchestrator calls.
  *
- * Backend auto-selects per env (10c-2 decision: prefer direct Anthropic, fall
- * back to Vertex). Both SDKs expose the same `messages.create()` shape, so the
- * call-site is identical — only the client factory differs.
+ * Backend auto-selects per env. Both SDKs expose the same `messages.create()`
+ * shape, so the call-site is identical — only the client factory differs.
  *
- *   • Direct Anthropic (`@anthropic-ai/sdk`) — preferred path. Activated when
- *     `ANTHROPIC_API_KEY` is set. Supports `web_search_20250305` natively
- *     (Anthropic authored the server-tool spec). No Google auth / quota.
+ *   • Vertex (`@anthropic-ai/vertex-sdk`) — PRIMARY (Tim's 10d-pre decision,
+ *     2026-04-17). Talks to `aiplatform.googleapis.com` against project
+ *     `bran-479523` (default). Auth precedence:
+ *       1. `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) — preferred
+ *          headless path; no interactive ADC reauth (`invalid_rapt`) churn.
+ *       2. `VERTEX_API_KEY` (OAuth access token) — legacy / dev convenience.
+ *          Short-lived, surfaces `invalid_rapt` when the underlying ADC
+ *          session expires.
+ *       3. Bare ADC (whatever `gcloud auth application-default login` set).
  *
- *   • Vertex (`@anthropic-ai/vertex-sdk`) — fallback. Activated only when
- *     `ANTHROPIC_API_KEY` is absent. Talks to `aiplatform.googleapis.com`
- *     against project `bran-479523` (default). Auth via `VERTEX_API_KEY` as
- *     accessToken OR Google Application Default Credentials.
+ *   • Direct Anthropic (`@anthropic-ai/sdk`) — defensive fallback only.
+ *     Activated when `ANTHROPIC_API_KEY` is set. Currently NOT used in
+ *     production per Tim's session-start direction (2026-04-17 PM): we stay
+ *     on Vertex. Code path stays in place so a future env change auto-routes.
  *
  * Both backends support:
  *   - Prompt caching on stable system blocks (ephemeral `cache_control`)
@@ -25,6 +30,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
+import { GoogleAuth } from "google-auth-library";
 
 // ── Config ────────────────────────────────────────────────────────────────
 // Vertex uses the unsuffixed model id. The GA version name is
@@ -61,9 +67,18 @@ let _backend: "direct" | "vertex" | null = null;
 
 /**
  * Returns the active Anthropic client, lazily constructed.
- * Preference order (10c-2 decision — Tim picked direct):
- *   1. ANTHROPIC_API_KEY set → direct `@anthropic-ai/sdk`
- *   2. else → `@anthropic-ai/vertex-sdk` (Vertex AI on bran-479523)
+ *
+ * Backend selection (top-level):
+ *   1. ANTHROPIC_API_KEY set → direct `@anthropic-ai/sdk` (defensive
+ *      fallback; not used in production per Tim's 10d-pre direction).
+ *   2. else → `@anthropic-ai/vertex-sdk` (Vertex AI on bran-479523).
+ *
+ * Vertex auth precedence (within Vertex branch):
+ *   a. GOOGLE_APPLICATION_CREDENTIALS → service-account JSON via GoogleAuth
+ *      ({keyFile}). Headless-safe; no interactive reauth (`invalid_rapt`).
+ *      THE PREFERRED PATH (10d-pre, 2026-04-17).
+ *   b. VERTEX_API_KEY → OAuth access token. Legacy/dev; short-lived.
+ *   c. Bare ADC.
  */
 export function getAnthropicClient(): AnthropicLikeClient {
   if (_client) return _client;
@@ -73,14 +88,37 @@ export function getAnthropicClient(): AnthropicLikeClient {
     _client = new Anthropic({ apiKey: directKey }) as unknown as AnthropicLikeClient;
     return _client;
   }
-  // Vertex fallback — same construction as before.
-  const accessToken = process.env.VERTEX_API_KEY;
+  // Vertex (primary path).
   _backend = "vertex";
-  _client = new AnthropicVertex({
-    projectId: DEFAULT_PROJECT_ID,
-    region: DEFAULT_REGION,
-    ...(accessToken ? { accessToken } : {}),
-  }) as unknown as AnthropicLikeClient;
+  const saKeyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  const accessToken = process.env.VERTEX_API_KEY;
+
+  if (saKeyPath) {
+    // Service-account JSON — headless-safe, no interactive reauth.
+    const googleAuth = new GoogleAuth({
+      keyFile: saKeyPath,
+      scopes: "https://www.googleapis.com/auth/cloud-platform",
+    });
+    _client = new AnthropicVertex({
+      projectId: DEFAULT_PROJECT_ID,
+      region: DEFAULT_REGION,
+      googleAuth,
+    }) as unknown as AnthropicLikeClient;
+  } else if (accessToken) {
+    // Legacy: short-lived OAuth access token. Surfaces invalid_rapt when the
+    // underlying ADC session expires; OK for dev, not for headless overnight.
+    _client = new AnthropicVertex({
+      projectId: DEFAULT_PROJECT_ID,
+      region: DEFAULT_REGION,
+      accessToken,
+    }) as unknown as AnthropicLikeClient;
+  } else {
+    // Fallback to bare ADC (whatever `gcloud auth application-default login` set).
+    _client = new AnthropicVertex({
+      projectId: DEFAULT_PROJECT_ID,
+      region: DEFAULT_REGION,
+    }) as unknown as AnthropicLikeClient;
+  }
   return _client;
 }
 
@@ -321,18 +359,23 @@ export function getVertexConfig(): {
   projectId: string;
   region: string;
   model: string;
-  authMode: "access_token" | "adc" | "direct_api_key";
+  authMode: "service_account" | "access_token" | "adc" | "direct_api_key";
   backend: "direct" | "vertex";
 } {
   const backend: "direct" | "vertex" = process.env.ANTHROPIC_API_KEY
     ? "direct"
     : "vertex";
+  // Vertex auth precedence: service_account > access_token > adc.
+  // Mirrors the construction in getAnthropicClient(); kept in sync so callers
+  // can introspect the active mode without instantiating the client.
   const authMode =
     backend === "direct"
       ? ("direct_api_key" as const)
-      : process.env.VERTEX_API_KEY
-        ? ("access_token" as const)
-        : ("adc" as const);
+      : process.env.GOOGLE_APPLICATION_CREDENTIALS
+        ? ("service_account" as const)
+        : process.env.VERTEX_API_KEY
+          ? ("access_token" as const)
+          : ("adc" as const);
   return {
     projectId: DEFAULT_PROJECT_ID,
     region: DEFAULT_REGION,

@@ -188,6 +188,23 @@ app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
       res.write(`data: ${JSON.stringify(log)}\n\n`);
     };
 
+    // Listen for escalation events (10d-pre-1, closes gap 10c-1).
+    // Two payload shapes ride this channel:
+    //   • watcher_signal — { type:"watcher_signal", escalationId, artifactId,
+    //     cumulativeCost, perShotHardCap, consecutiveSameRegens, levelsUsed,
+    //     warnBudget, warnLoop } — emitted before each orchestrator call by
+    //     escalation_loop.ts so a human SSE consumer can hit cancel if cost
+    //     or loop signals look wrong.
+    //   • escalation status update — the AssetEscalation row shape (id,
+    //     status, currentLevel, ...) — emitted at every status transition.
+    // Wrap with `type:"escalation"` so wire consumers can branch on the
+    // discriminator first, then inspect inner shape (e.g.
+    // payload.type === "watcher_signal") for sub-typing. Existing log writes
+    // stay raw (additive change, no break for legacy consumers).
+    const escalationListener = (event: unknown) => {
+      res.write(`data: ${JSON.stringify({ type: "escalation", payload: event })}\n\n`);
+    };
+
     const completeListener = (result: unknown) => {
       res.write(`event: complete\ndata: ${JSON.stringify(result)}\n\n`);
       cleanup();
@@ -195,10 +212,12 @@ app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
     };
 
     runEvents.on(`log:${runId}`, logListener);
+    runEvents.on(`escalation:${runId}`, escalationListener);
     runEvents.once(`complete:${runId}`, completeListener);
 
     const cleanup = () => {
       runEvents.off(`log:${runId}`, logListener);
+      runEvents.off(`escalation:${runId}`, escalationListener);
       runEvents.off(`complete:${runId}`, completeListener);
     };
 
