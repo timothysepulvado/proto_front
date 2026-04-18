@@ -425,6 +425,18 @@ export interface OrchestratorCallResult {
   tokensOut: number;
   cost: number;
   latencyMs: number;
+  /**
+   * Tool invocations observed in the response (server-side web_search etc.).
+   * Surfaced so /api/orchestrator/replay + callers that write to
+   * orchestration_decisions can audit whether Vertex accepted/used tools.
+   */
+  toolUses?: {
+    name: string;
+    id: string;
+    input: unknown;
+  }[];
+  /** Count of web_search server-tool invocations (for audit + cost). */
+  webSearchCount?: number;
 }
 
 // ─── Run-level escalation report (Final HITL) ────────────────────────────

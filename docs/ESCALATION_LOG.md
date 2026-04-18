@@ -165,6 +165,32 @@ Generic locks like "exact appearance remains unchanged" are weak and result in w
 
 ---
 
+## Step 10c — Single-shot runner dry run LANDED (2026-04-17 PM)
+
+First end-to-end exercise of the productized pipeline with all 10a + 10b hardening in place. Path A (fresh Veo generation through the HUD runner) was used; Path B manual-insert fallback was not needed.
+
+**Run trail:**
+- Seeded: `client_drift-mv` Supabase client row + campaign `b6691def-...` + deliverable `1d7c52f1-...` with Shot 20's full veo_prompt (8s, 16:9, 720p, veo-3.1-generate-001 standard tier).
+- Run 1 (`eff85bff-...`): Temp-gen job `b2e5cf5e-...` succeeded in ~3 min, artifact row written + uploaded to Supabase Storage. `/grade_video` call **failed with 404** — the runner was passing `currentArtifact.path` (the Supabase public URL) as `video_path`, and brand-engine's grader treats that as a local filesystem path. First real wire-up bug this session.
+- Fix: `createArtifactWithUpload` now writes `metadata.localPath` (the on-disk path before upload) alongside the public-URL `path` field. `gradeAndEscalateVideo` prefers `metadata.localPath` when present, falls back to `artifact.path` for legacy rows.
+- Run 2 (`a8e32483-...`): same deliverable re-fired after the fix landed. Temp-gen job `88c30331-...` produced segment_000.mp4, artifact row written with localPath populated, `/grade_video` returned **PASS 5.0** on first call (`consensus_note="not borderline, single call"`). Deliverable transitioned to `reviewing`, run completed, no escalation.
+- Also landed in this commit: explicit `consensus: true` in runner's `/grade_video` payload (Rule 1 defensive — guards against a future brand-engine default-flip).
+
+**Orchestrator backend change (10c-2 — Tim's call):**
+- Vertex `/api/orchestrator/replay` first call returned 429 RESOURCE_EXHAUSTED (implies request shape including `web_search_20250305` was accepted — a tool rejection would be 400). Retry surfaced `invalid_rapt` — ADC needs reauth.
+- `anthropic.ts` refactored to auto-select backend: direct `@anthropic-ai/sdk` when `ANTHROPIC_API_KEY` is set, Vertex fallback when absent. Call-site unchanged (both SDKs expose identical `messages.create`). `OrchestratorCallResult.toolUses` + `webSearchCount` now propagate from `callClaude` so `/api/orchestrator/replay` can audit web_search use.
+- Clean 2xx verification of `web_search_20250305` returning `toolUses[]` is a 10d prerequisite (needs `ANTHROPIC_API_KEY` in .env OR fresh ADC).
+
+**Gaps surfaced (for 10d to address):**
+1. `runEvents.emit("escalation:${runId}", ...)` — including the 10a `watcher_signal` payload at line 174 of `escalation_loop.ts` — has **zero subscribers**. The SSE `/api/runs/:runId/logs` handler only listens on `log:` + `complete:` channels. Humans watching the SSE stream cannot currently see cumCost / consec-same-prompt / levels-used → cannot "manually cancel" as the 10a commit message promised. Fix: extend `/logs` handler to forward `escalation:` events, or add a separate `/api/runs/:runId/events` endpoint.
+2. `ANTHROPIC_API_KEY` not yet in `os-api/.env` — the direct-backend refactor is live but inert until Tim drops the key.
+3. Run 1's orphan artifact (`cc98c1c1-...`) in the DB lacks `metadata.localPath`. Harmless (it's in `reviewing` status, no follow-up grade), but worth a cleanup pass before 10d.
+4. Original 10c handoff referenced `/api/runs/:runId/stream` — real endpoint is `/api/runs/:runId/logs`. Noted for future handoff accuracy.
+
+**Handoff:** `~/proto_front/.claude/handoffs/2026-04-17-step-10c-closeout-and-10d-prereqs.md` (successor to the historical scope handoff). 10d is gated on the three gaps above + Tim's go-signal.
+
+---
+
 ## Critic Consensus — Rule 1 IMPLEMENTED (2026-04-17)
 
 Shot 05 v3 (logged above) surfaced Gemini-3.1-pro-preview critic variance: single-call aggregate scores for the identical clip swung up to 3 points depending on the call, producing WARN↔PASS verdict flips. That session ran the critic manually N=2 and used frame extraction as a visual tiebreak.

@@ -1,28 +1,29 @@
 /**
- * Anthropic on Vertex AI SDK wrapper for orchestrator calls.
+ * Anthropic SDK wrapper for orchestrator calls.
  *
- * First-client infrastructure runs Claude through Google Cloud Vertex AI
- * (project `bran-479523`), NOT the direct Anthropic API. This wrapper talks
- * to `aiplatform.googleapis.com` via `@anthropic-ai/vertex-sdk`.
+ * Backend auto-selects per env (10c-2 decision: prefer direct Anthropic, fall
+ * back to Vertex). Both SDKs expose the same `messages.create()` shape, so the
+ * call-site is identical — only the client factory differs.
  *
- * Handles:
- *   - Client init via `AnthropicVertex`
- *       • projectId from `VERTEX_PROJECT_ID` (default: `bran-479523`)
- *       • region from `VERTEX_REGION` (default: `global` — the supported
- *         Claude-on-Vertex endpoint per GCP docs)
- *       • auth precedence: `VERTEX_API_KEY` as `accessToken` → Google
- *         Application Default Credentials. The direct-SDK `apiKey` slot is
- *         unavailable on Vertex; Google credentials are required.
- *   - Prompt caching on stable system blocks (ephemeral `cache_control`,
- *     supported on Claude-on-Vertex per model card)
- *   - Retries on transient errors (429 rate limit, 5xx)
- *   - Structured error handling (retryable vs fatal)
- *   - Per-call cost calculation based on input/output tokens
+ *   • Direct Anthropic (`@anthropic-ai/sdk`) — preferred path. Activated when
+ *     `ANTHROPIC_API_KEY` is set. Supports `web_search_20250305` natively
+ *     (Anthropic authored the server-tool spec). No Google auth / quota.
  *
- * Pricing is read from env (fallback to conservative defaults). Cost is
- * informational — real billing is on the GCP console.
+ *   • Vertex (`@anthropic-ai/vertex-sdk`) — fallback. Activated only when
+ *     `ANTHROPIC_API_KEY` is absent. Talks to `aiplatform.googleapis.com`
+ *     against project `bran-479523` (default). Auth via `VERTEX_API_KEY` as
+ *     accessToken OR Google Application Default Credentials.
+ *
+ * Both backends support:
+ *   - Prompt caching on stable system blocks (ephemeral `cache_control`)
+ *   - Internal retries on transient errors (429 rate limit, 5xx)
+ *   - Per-call cost calculation from input/output/cache tokens
+ *
+ * Pricing defaults in env fall through at Anthropic Opus 4.7 rates (USD /
+ * 1M tokens). Cost is informational — real billing is on the chosen backend.
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
 
 // ── Config ────────────────────────────────────────────────────────────────
@@ -45,24 +46,48 @@ const CACHE_WRITE_MULT = 1.25;
 const CACHE_READ_MULT = 0.1;
 
 // ── Singleton client ──────────────────────────────────────────────────────
-let _client: AnthropicVertex | null = null;
+/**
+ * Minimal structural type of the two SDK clients. Both expose `messages.create`
+ * with identical request/response shapes, which is all the orchestrator uses.
+ * Typed as `any` on the method argument because the Vertex SDK's ToolUnion has
+ * drifted from the direct SDK's shape; we tolerate that here since the tool
+ * payload is constructed in `_buildTools` with a runtime-only `unknown[]`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnthropicLikeClient = { messages: { create: (args: any) => Promise<any> } };
 
-export function getAnthropicClient(): AnthropicVertex {
+let _client: AnthropicLikeClient | null = null;
+let _backend: "direct" | "vertex" | null = null;
+
+/**
+ * Returns the active Anthropic client, lazily constructed.
+ * Preference order (10c-2 decision — Tim picked direct):
+ *   1. ANTHROPIC_API_KEY set → direct `@anthropic-ai/sdk`
+ *   2. else → `@anthropic-ai/vertex-sdk` (Vertex AI on bran-479523)
+ */
+export function getAnthropicClient(): AnthropicLikeClient {
   if (_client) return _client;
-  const projectId = DEFAULT_PROJECT_ID;
-  const region = DEFAULT_REGION;
+  const directKey = process.env.ANTHROPIC_API_KEY;
+  if (directKey) {
+    _backend = "direct";
+    _client = new Anthropic({ apiKey: directKey }) as unknown as AnthropicLikeClient;
+    return _client;
+  }
+  // Vertex fallback — same construction as before.
   const accessToken = process.env.VERTEX_API_KEY;
-  // If VERTEX_API_KEY is provided, pass it through as an `accessToken`
-  // (e.g. short-lived OAuth token from `gcloud auth print-access-token`, or
-  // an impersonated credential). If absent, the SDK falls back to Google
-  // Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS env,
-  // gcloud ADC, or an attached service account).
+  _backend = "vertex";
   _client = new AnthropicVertex({
-    projectId,
-    region,
+    projectId: DEFAULT_PROJECT_ID,
+    region: DEFAULT_REGION,
     ...(accessToken ? { accessToken } : {}),
-  });
+  }) as unknown as AnthropicLikeClient;
   return _client;
+}
+
+/** Returns which backend the singleton client is using. */
+export function getBackend(): "direct" | "vertex" | null {
+  if (!_client) getAnthropicClient();
+  return _backend;
 }
 
 // ── Request types ─────────────────────────────────────────────────────────
@@ -291,17 +316,28 @@ export function getDefaultModel(): string {
   return DEFAULT_MODEL;
 }
 
-/** Expose Vertex deployment info for logging / diagnostics. */
+/** Expose deployment info for logging / diagnostics. */
 export function getVertexConfig(): {
   projectId: string;
   region: string;
   model: string;
-  authMode: "access_token" | "adc";
+  authMode: "access_token" | "adc" | "direct_api_key";
+  backend: "direct" | "vertex";
 } {
+  const backend: "direct" | "vertex" = process.env.ANTHROPIC_API_KEY
+    ? "direct"
+    : "vertex";
+  const authMode =
+    backend === "direct"
+      ? ("direct_api_key" as const)
+      : process.env.VERTEX_API_KEY
+        ? ("access_token" as const)
+        : ("adc" as const);
   return {
     projectId: DEFAULT_PROJECT_ID,
     region: DEFAULT_REGION,
     model: DEFAULT_MODEL,
-    authMode: process.env.VERTEX_API_KEY ? "access_token" : "adc",
+    authMode,
+    backend,
   };
 }

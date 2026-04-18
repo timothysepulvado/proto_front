@@ -74,6 +74,11 @@ export async function decideEscalation(
     tokensOut: rawResponse.tokensOut,
     cost: rawResponse.cost,
     latencyMs: rawResponse.latencyMs,
+    // Propagate tool-use audit fields so /api/orchestrator/replay +
+    // escalation_loop (which writes orchestration_decisions.input_context)
+    // can record whether Vertex accepted the server-side tool.
+    toolUses: rawResponse.toolUses,
+    webSearchCount: rawResponse.webSearchCount,
   };
 }
 

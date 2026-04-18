@@ -44,7 +44,7 @@ proto_front/
 │   ├── api/server.py       ← FastAPI sidecar on :8100
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 6 migrations (001-006)
+├── supabase/migrations/    ← 7 migrations (001-007) — 007 adds known_limitations + asset_escalations + orchestration_decisions
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements
 ```
@@ -129,10 +129,11 @@ cd ~/Temp-gen && python main.py veo generate    # Veo 3.1
 
 **Project:** `tfbfzepaccvklpabllao`
 
-**Tables (15):**
+**Tables (18):**
 `clients`, `runs`, `run_logs`, `artifacts`, `hitl_decisions`, `rejection_categories`,
 `campaigns`, `campaign_deliverables`, `campaign_memory`, `drift_metrics`, `drift_alerts`,
-`brand_baselines`, `prompt_templates`, `prompt_scores`, `prompt_evolution_log`
+`brand_baselines`, `prompt_templates`, `prompt_scores`, `prompt_evolution_log`,
+`known_limitations`, `asset_escalations`, `orchestration_decisions` (last 3 added in migration 007 for autonomous escalation).
 
 **Realtime subscriptions:** `runs`, `run_logs`, `clients`, `campaigns`, `campaign_deliverables`,
 `hitl_decisions`, `drift_metrics`, `drift_alerts`, `brand_baselines`
@@ -140,7 +141,7 @@ cd ~/Temp-gen && python main.py veo generate    # Veo 3.1
 **Storage:** `artifacts` bucket for generated images/videos. Public URLs in artifacts table.
 Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 
-**Migrations:** `supabase/migrations/001-006` — 001-005 applied, 006 pending (deliverable generation specs).
+**Migrations:** `supabase/migrations/001-007` — all applied (007 via Management API 2026-04-17).
 
 ---
 

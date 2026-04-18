@@ -103,6 +103,11 @@ async function createArtifactWithUpload(opts: {
     size: uploaded?.size ?? getFileSize(opts.localPath) ?? undefined,
     metadata: {
       ...opts.metadata,
+      // Preserve the local filesystem path so in-process graders (brand-engine
+      // sidecar is a local http service that reads from disk) can access the
+      // asset without re-downloading from storage. artifact.path stays the
+      // public URL for display / HITL UI / API consumers.
+      localPath: opts.localPath,
       ...(uploaded?.cloudinaryPublicId ? { cloudinaryPublicId: uploaded.cloudinaryPublicId } : {}),
     },
     createdAt: new Date().toISOString(),
@@ -1133,10 +1138,18 @@ async function gradeAndEscalateVideo(params: {
     const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-generate-001" });
     const relevantFailureModes = catalog.map((k) => k.failureMode);
 
+    // Prefer the on-disk path (stored in metadata by createArtifactWithUpload)
+    // over the public storage URL so the local brand-engine sidecar can stat
+    // the file directly. Falls back to artifact.path if localPath is missing
+    // (e.g. legacy artifacts written before this field was added).
+    const gradeVideoPath =
+      (currentArtifact.metadata?.localPath as string | undefined) ??
+      currentArtifact.path;
+
     const gradeResult = await callBrandEngine<VideoGradeResult>(
       "/grade_video",
       {
-        video_path: currentArtifact.path,
+        video_path: gradeVideoPath,
         brand_slug: brandSlug,
         failure_modes_to_check: relevantFailureModes,
         deliverable_context: narrative ?? deliverable.description ?? campaign?.prompt,
@@ -1150,6 +1163,10 @@ async function gradeAndEscalateVideo(params: {
           category: k.category,
         })),
         duration_seconds: deliverable.durationSeconds,
+        // Rule 1 (escalation-ladder brief): consensus path is authoritative.
+        // Pass explicitly rather than relying on the brand-engine default so a
+        // future default-flip can't silently break critic variance handling.
+        consensus: true,
       },
       run.runId,
       stageId,
