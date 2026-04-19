@@ -59,7 +59,9 @@ export async function decideEscalation(
   const rawResponse = await callClaude({
     systemCached: SYSTEM_PROMPT,
     userMessage,
-    temperature: 0.1,
+    // temperature omitted: Claude Opus 4.7 on direct Anthropic API deprecated
+    // the field (400 invalid_request_error). Vertex used to accept + ignore it
+    // on this model. See anthropic.ts `callClaude` — temperature is opt-in.
     maxTokens: 4096,
     enableWebSearch: true, // staleness discipline — orchestrator may web-search before proposing
   });

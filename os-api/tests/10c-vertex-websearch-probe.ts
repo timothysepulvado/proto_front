@@ -45,8 +45,7 @@ async function main() {
       systemCached:
         "You are a research assistant. ALWAYS use the web_search tool to verify any external fact (model versions, release dates, API specs) before stating it. Cite the source URL. Respond tersely.",
       userMessage:
-        "As of today (2026-04-17), what is the current GA Claude Opus model id available on Anthropic's API? Use web_search to verify; cite the source URL. One sentence.",
-      temperature: 0.0,
+        "As of today (2026-04-19), what is the current GA Claude Opus model id available on Anthropic's API? Use web_search to verify; cite the source URL. One sentence.",
       maxTokens: 512,
       enableWebSearch: true,
       maxWebSearchUses: 3,

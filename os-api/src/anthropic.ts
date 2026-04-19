@@ -4,20 +4,31 @@
  * Backend auto-selects per env. Both SDKs expose the same `messages.create()`
  * shape, so the call-site is identical — only the client factory differs.
  *
- *   • Vertex (`@anthropic-ai/vertex-sdk`) — PRIMARY (Tim's 10d-pre decision,
- *     2026-04-17). Talks to `aiplatform.googleapis.com` against project
- *     `bran-479523` (default). Auth precedence:
- *       1. `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) — preferred
- *          headless path; no interactive ADC reauth (`invalid_rapt`) churn.
- *       2. `VERTEX_API_KEY` (OAuth access token) — legacy / dev convenience.
- *          Short-lived, surfaces `invalid_rapt` when the underlying ADC
- *          session expires.
- *       3. Bare ADC (whatever `gcloud auth application-default login` set).
+ *   • Direct Anthropic (`@anthropic-ai/sdk`) — PRIMARY as of 2026-04-19
+ *     (Tim's pivot). Activated when `ANTHROPIC_API_KEY` is set. Billed on
+ *     Anthropic's platform ($50 starter credit). Avoids the Vertex Claude
+ *     Opus 4.7 regional-quota provisioning loop surfaced in 10d-pre.
  *
- *   • Direct Anthropic (`@anthropic-ai/sdk`) — defensive fallback only.
- *     Activated when `ANTHROPIC_API_KEY` is set. Currently NOT used in
- *     production per Tim's session-start direction (2026-04-17 PM): we stay
- *     on Vertex. Code path stays in place so a future env change auto-routes.
+ *     NOTE on model surface drift: direct Opus 4.7 DEPRECATED the
+ *     `temperature` field (returns 400 invalid_request_error if present).
+ *     Vertex used to accept + ignore it. We now treat `temperature` as
+ *     opt-in — only forwarded when the caller explicitly sets it. See
+ *     `callClaude` below.
+ *
+ *   • Vertex (`@anthropic-ai/vertex-sdk`) — fallback. Activates when
+ *     `ANTHROPIC_API_KEY` is absent. Talks to `aiplatform.googleapis.com`
+ *     against project `bran-479523` (default region `global`). Still fully
+ *     wired and usable — the 10d-pre service-account auth work
+ *     (`GOOGLE_APPLICATION_CREDENTIALS`) is preserved for headless-safe
+ *     reactivation. Auth precedence within the Vertex branch:
+ *       1. `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) —
+ *          preferred headless path; no interactive ADC reauth
+ *          (`invalid_rapt`) churn.
+ *       2. `VERTEX_API_KEY` (OAuth access token) — legacy / dev convenience.
+ *          Short-lived; surfaces `invalid_rapt` when ADC expires.
+ *       3. Bare ADC (whatever `gcloud auth application-default login` set).
+ *     To flip back to Vertex: unset (or comment out) `ANTHROPIC_API_KEY` in
+ *     `os-api/.env`; auto-routing picks Vertex on next module load.
  *
  * Both backends support:
  *   - Prompt caching on stable system blocks (ephemeral `cache_control`)
@@ -69,14 +80,13 @@ let _backend: "direct" | "vertex" | null = null;
  * Returns the active Anthropic client, lazily constructed.
  *
  * Backend selection (top-level):
- *   1. ANTHROPIC_API_KEY set → direct `@anthropic-ai/sdk` (defensive
- *      fallback; not used in production per Tim's 10d-pre direction).
- *   2. else → `@anthropic-ai/vertex-sdk` (Vertex AI on bran-479523).
+ *   1. ANTHROPIC_API_KEY set → direct `@anthropic-ai/sdk`. PRIMARY path
+ *      (Tim's 2026-04-19 pivot).
+ *   2. else → `@anthropic-ai/vertex-sdk` (Vertex AI on bran-479523). Fallback.
  *
- * Vertex auth precedence (within Vertex branch):
+ * Vertex auth precedence (within Vertex branch, preserved from 10d-pre):
  *   a. GOOGLE_APPLICATION_CREDENTIALS → service-account JSON via GoogleAuth
  *      ({keyFile}). Headless-safe; no interactive reauth (`invalid_rapt`).
- *      THE PREFERRED PATH (10d-pre, 2026-04-17).
  *   b. VERTEX_API_KEY → OAuth access token. Legacy/dev; short-lived.
  *   c. Bare ADC.
  */
@@ -201,7 +211,10 @@ export async function callClaude(
 ): Promise<OrchestratorCallResponse> {
   const client = getAnthropicClient();
   const model = request.model ?? DEFAULT_MODEL;
-  const temperature = request.temperature ?? 0.1;
+  // Temperature is opt-in: Claude Opus 4.7 on direct Anthropic API deprecated
+  // the field (responds 400 `invalid_request_error` if present). Vertex
+  // tolerated it. Only forward when caller explicitly set it.
+  const temperature = request.temperature;
   const maxTokens = request.maxTokens ?? 4096;
 
   // Assemble tools array if the caller opted in to web_search
@@ -214,7 +227,7 @@ export async function callClaude(
       const response = await client.messages.create({
         model,
         max_tokens: maxTokens,
-        temperature,
+        ...(temperature !== undefined ? { temperature } : {}),
         system: [
           {
             type: "text",

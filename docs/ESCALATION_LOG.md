@@ -275,6 +275,61 @@ Brief: `~/agent-vault/briefs/escalation-ladder-autonomous-ops.md` Rule 1.
 
 ---
 
+## Step 10c-3 CLOSED — Direct Anthropic pivot (2026-04-19)
+
+**Context:** 10d-pre closed 10c-1 (SSE escalation forwarding) + 10c-2 (Vertex SA auth) but left 10c-3 (web_search live-verified with `toolUses[]`) partial — auth was ✅ on Vertex via SA, but Claude Opus 4.7 returned persistent 429 on `bran-479523` global endpoint. 2026-04-18 session diagnosed the 429 as regional-quota=0 (NOT Model Garden enablement as 2026-04-17 initially thought); `us-east5` returned a specific quota-exceeded message instead of the generic "resource exhausted". Tim filled 3 US multi-region quota-increase forms in GCP console but paused before submitting (system update). Rather than wait on Google's approval cycle, Tim pivoted 2026-04-19: switch the orchestrator backend to direct Anthropic API with a $50 starter credit.
+
+**What shipped (pending commit at time of log entry):**
+
+- `ANTHROPIC_API_KEY` set in `os-api/.env`. `getAnthropicClient()` at `os-api/src/anthropic.ts:85-90` auto-routes to `@anthropic-ai/sdk` when the key is present, with zero code change needed for the flip itself. All Vertex infra (SA key at `~/agent-vault/secrets/vertex-anthropic-bran-479523.json`, `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_API_KEY`) preserved as fallback — reactivates by unsetting `ANTHROPIC_API_KEY`.
+- **Surface-drift bug surfaced by the pivot (real value-add):** Claude Opus 4.7 on direct Anthropic API returns 400 `invalid_request_error: temperature is deprecated for this model` when `temperature` is sent. Vertex used to accept and silently ignore the field on this model. `callClaude()` in `os-api/src/anthropic.ts` now treats `temperature` as opt-in (only forwarded when the caller explicitly passes a value). `orchestrator.ts:62` call-site dropped its hardcoded `temperature: 0.1`. Determinism for decision-making is still fine — web_search + JSON-structured output do most of the constraining.
+- `brand-engine/.env` cleaned: `ANTHROPIC_API_KEY` removed (brand-engine is Python, uses Gemini + Cohere only, never calls Claude — key was dead weight there, and less env drift = less future leakage surface).
+- Module docstrings in `os-api/src/anthropic.ts` flipped: direct = PRIMARY, Vertex = fallback. Future readers (Karl, Jackie, a fresh Brandy) won't be misled by the 2026-04-17-PM "stay on Vertex" language that has now been inverted.
+
+**Probe result (direct path):**
+
+```
+=== BACKEND ===
+backend: direct
+authMode: direct_api_key
+project: bran-479523   # echo only; unused on direct path
+region: global          # echo only; unused on direct path
+model: claude-opus-4-7
+getBackend(): direct
+
+=== SUCCESS ===
+model:         claude-opus-4-7
+stopReason:    end_turn
+text:          The current GA Opus model is `claude-opus-4-7` (Claude Opus 4.7, generally available). Source: https://code.claude.com/docs/en/model-config
+tokensIn/Out:  495 / 180
+cost:          0.062944
+latencyMs:     5021
+webSearchCount: 1
+toolUses:      [ { name: "web_search", id: "srvtoolu_01T7...", input: { query: "Anthropic API Claude Opus model id current GA 2026" } } ]
+
+=== ASSERTIONS PASSED ===
+✓ web_search was invoked
+✓ toolUses[] populated
+✓ response text present
+```
+
+**Cost math for 10d (the autonomous 30-shot re-validation):**
+- $0.063/call observed (with 1 web_search), ~10 orchestrator calls/shot expected, 30 shots = **~$19 worst case on orchestrator alone**. Realistic is <$15 once caching kicks in on the stable system block. Veo generation still dominates per-shot cost (~$3.20/shot × 30 = $96 for a complete re-gen; historical shows ~50% of shots reuse existing assets).
+- $50 starter credit covers the orchestrator side comfortably. Tim can top up mid-run if Veo budget needs headroom.
+- **No per-production budget cap implemented** — deliberately deferred. Per-shot `PER_SHOT_HARD_CAP_USD=4` still bites. Monitor live via `SELECT SUM(cost_usd) FROM orchestration_decisions WHERE run_id = ...`. Decision: build a production-level cap later if live data says we need one, with the right thresholds informed by actual spend.
+
+**Gates (green at closeout):**
+- `npx tsc --noEmit -p os-api`: clean
+- 10a readiness: 17/17
+- 10c1 SSE escalation forward: 18/18
+- Live direct-path probe: SUCCESS + ASSERTIONS PASSED
+
+**10d is UNBLOCKED.** Next fresh session resume: probe → single-shot `/api/runs` dry run → scale to 30. Explicit non-goal in the closure session: do NOT start 10d's full autonomous run — kickoff is a separate session.
+
+**Superseded handoff:** `~/proto_front/.claude/handoffs/2026-04-18-step-10d-pre-quota-pending.md` — quota request was never submitted; Vertex path shelved (preserved as fallback, not being actively pursued).
+
+---
+
 ## Maintenance
 
 - **Living DB:** query via `SELECT * FROM known_limitations ORDER BY times_encountered DESC;`
