@@ -313,9 +313,11 @@ toolUses:      [ { name: "web_search", id: "srvtoolu_01T7...", input: { query: "
 ✓ response text present
 ```
 
-**Cost math for 10d (the autonomous 30-shot re-validation):**
-- $0.063/call observed (with 1 web_search), ~10 orchestrator calls/shot expected, 30 shots = **~$19 worst case on orchestrator alone**. Realistic is <$15 once caching kicks in on the stable system block. Veo generation still dominates per-shot cost (~$3.20/shot × 30 = $96 for a complete re-gen; historical shows ~50% of shots reuse existing assets).
-- $50 starter credit covers the orchestrator side comfortably. Tim can top up mid-run if Veo budget needs headroom.
+**Cost math for 10d (reuse-first pipeline validation against existing 30-shot catalog):**
+- **What 10d actually does:** run each of Drift MV's 30 shots through the productized orchestrator pipeline. Per-shot, the orchestrator decides: reuse existing passing asset, regen via L1/L2/L3 where borderline/failing, or HITL. NOT a from-scratch 30-shot generation.
+- Orchestrator calls: $0.063/call × ~10 calls/shot × 30 shots = **~$15-19**, under $15 once system-block caching kicks in.
+- Veo re-gen: only where the orchestrator decides to regen. Historical (Steps 1-9) shows ~50% of shots had passing assets after the manual escalation ladder; expect ~5-8 re-gens in 10d = $16-26.
+- **Realistic 10d total: $35-45**, not the $100+ a from-scratch run would cost. $50 starter credit covers this band. Top up only if re-gen rate runs much higher than projected.
 - **No per-production budget cap implemented** — deliberately deferred. Per-shot `PER_SHOT_HARD_CAP_USD=4` still bites. Monitor live via `SELECT SUM(cost_usd) FROM orchestration_decisions WHERE run_id = ...`. Decision: build a production-level cap later if live data says we need one, with the right thresholds informed by actual spend.
 
 **Gates (green at closeout):**
