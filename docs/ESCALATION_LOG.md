@@ -195,7 +195,7 @@ First end-to-end exercise of the productized pipeline with all 10a + 10b hardeni
 
 **Commit:** `a961b3b` (`feat(orchestrator): 10d-pre — Vertex SA auth + SSE escalation forwarding + probe assertions`).
 
-Tim's session-start pivot inverted the 10c-2 "drop ANTHROPIC_API_KEY" plan: stay on Vertex (NOT direct Anthropic). Real fix = service-account JSON for headless-stable Vertex auth. Closes 10c-1 + 10c-2 from the Step 10c gap list; 10c-3 partial (Tim GCP action remains).
+Tim's session-start pivot inverted the 10c-2 "drop ANTHROPIC_API_KEY" plan: stay on Vertex (NOT direct Anthropic). Real fix = service-account JSON for headless-stable Vertex auth. Closes 10c-1 + 10c-2 from the Step 10c gap list; 10c-3 partial (Tim GCP action remains). **[SUPERSEDED 2026-04-19 — see "Step 10c-3 CLOSED — Direct Anthropic pivot" section below. Vertex Opus 4.7 regional quota=0 drove re-inversion to direct Anthropic. Vertex path preserved as fallback, reactivates by unsetting ANTHROPIC_API_KEY.]**
 
 ### What landed
 

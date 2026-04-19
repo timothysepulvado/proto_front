@@ -1,8 +1,14 @@
 /**
- * 10d-pre — bare Vertex Claude probe (no tools, minimal call).
- * Diagnoses whether the 429 in the web_search probe is quota-on-the-model
- * (general Anthropic Vertex quota for bran-479523) vs quota-on-tools
- * (web_search-specific limit). If THIS still 429s, it's the model.
+ * 10d-pre — bare Claude orchestrator probe (no tools, minimal call).
+ *
+ * Originally written to diagnose Vertex Claude Opus 4.7 429s on bran-479523
+ * (model-quota vs tool-quota). After the 2026-04-19 direct Anthropic pivot,
+ * this probe still works: it uses callClaude() which auto-routes per env.
+ * When ANTHROPIC_API_KEY is set → direct path; unset → Vertex fallback.
+ *
+ * Note: `temperature` removed because Claude Opus 4.7 on direct API
+ * deprecated the field (400 invalid_request_error). callClaude() now treats
+ * it as opt-in. See anthropic.ts.
  */
 import dotenv from "dotenv";
 import path from "path";
@@ -19,7 +25,6 @@ async function main() {
     const res = await callClaude({
       systemCached: "Respond with one word.",
       userMessage: "Say 'pong'.",
-      temperature: 0.0,
       maxTokens: 16,
       enableWebSearch: false,
     });
