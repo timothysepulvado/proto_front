@@ -111,21 +111,30 @@ This report + `2026-04-19-step-10d-kickoff.md` handoff + ROADMAP/MISSION/status 
 
 ## 10d Prerequisites (must resolve before full 30-shot run)
 
-1. **Seed the 29 missing Drift MV deliverables in Supabase.** The 30-shot reuse-first regression needs 30 `campaign_deliverables` rows tied to a Drift MV campaign, each linked to its existing video artifact + `localPath` metadata pointing at the on-disk output. Today only Shot 20 is seeded. Action: write a seeder that reads `~/Temp-gen/productions/drift-mv/` shot list, upserts deliverables + artifacts, verifies `metadata.localPath` on each.
-2. **Add a "regrade existing artifact" runner path.** The current runner only grades video produced by a fresh `executeGenerateVideoStage`. The brief's reuse-first plan implicitly assumes a path that says: "for each deliverable, if artifact exists + passes grade, mark complete; else escalate." Options:
-   - (a) Add a new `mode: "regrade"` that iterates deliverables and calls `runVideoQAWithEscalation` on the latest artifact. Smallest change.
-   - (b) Extend `mode: video` with a "skip-if-artifact-exists-and-passes" branch. Messier.
-3. **Grade the 2 existing Shot 20 artifacts.** Both currently `grade=null`. Running the new regrade path (or a one-off brand-engine `/grade_video` call) will produce ground-truth grades. Use the higher-scored one as the canonical artifact for Shot 20.
-4. **Optionally:** raise or remove the per-shot $4 cap's cost-estimate signal for the 10d run now that cost math is accurate — the prior overstatement would have prematurely tripped the cap on the real 30-shot run.
+**Split into two sessions (decided 2026-04-20)** to avoid context-crowding during the live 30-shot run:
+- **Session A — prereqs + re-verify:** seeder + regrade runner path + Shot 20 smoke test + gate re-verification. Handoff: `~/proto_front/.claude/handoffs/2026-04-20-step-10d-session-a-prereqs.md`. Expected duration ~4-6 hr.
+- **Session B — 10d launch:** live 30-shot regrade run with SSE + cost monitoring. Handoff: `~/proto_front/.claude/handoffs/2026-04-20-step-10d-session-b-launch.md`. Expected duration ~1.5-2 hr wall-clock + overlap.
+- Old single-session handoff (`2026-04-19-step-10d-kickoff.md`) is banner-superseded in place.
+
+1. ⏳ **Seed the 29 missing Drift MV deliverables in Supabase.** *(Session A)* Action: write `~/proto_front/os-api/scripts/seed-drift-mv.ts` that reads `~/Temp-gen/productions/drift-mv/` shot list (Tim confirmed 2026-04-20 this is the correct source-of-truth for this run), upserts deliverables + artifacts into a new campaign `Drift MV — 30-shot catalog regression (10d)`, populates `metadata.localPath` on each artifact row. Idempotent via composite-key upsert.
+2. ⏳ **Add a "regrade existing artifact" runner path.** *(Session A)* Recommended: new `mode: "regrade"` that iterates deliverables for a campaign and calls `runVideoQAWithEscalation` on the latest artifact per deliverable. Idempotent — skip deliverables already `status=completed`. Unit test: `os-api/tests/10d-regrade-runner.ts`.
+3. ⏳ **Grade the 2 existing Shot 20 artifacts** via single-shot regrade smoke test. *(Session A)* Target: the existing 10c dry-run campaign (`b6691def-…`, single deliverable `1d7c52f1-…`, bounded cost). Produces ground-truth grades + validates the new `regrade` mode end-to-end on a real artifact before scaling.
+4. **Optional:** raise or remove the per-shot $4 cap's cost-estimate signal for the 10d run now that cost math is accurate — the prior overstatement would have prematurely tripped the cap on the real 30-shot run. *(Defer to Session B if it actually bites; Session A doesn't need to touch it.)*
+
+## Deferred: asset-storage architecture (flagged 2026-04-20)
+
+For this test run, Session A seeds directly from `~/Temp-gen/productions/drift-mv/` filesystem paths (dev-only shortcut). For multi-client production, where client asset catalogs should live is an unsolved architectural question with six open sub-questions (canonical storage tier, proto_front read path, Temp-gen write path, production-manifest DB shape, client onboarding workflow, per-tenant isolation). Parked for post-10d ADR work — see `~/agent-vault/domains/brandstudios/ROADMAP.md` §Deferred §"Production asset storage architecture". **Do NOT attempt to solve this during Session A or Session B.** Staying on the dev-filesystem path is the right move for the 10d validation run.
 
 ## Go / No-Go for 10d
 
-**GO** — once prerequisites above are addressed. The direct-Anthropic pivot, caching, tool-use, cost tracking, SSE wire, and runner machinery are all verified. The gaps are scoping gaps (catalog not seeded, runner lacks regrade mode), not pipeline gaps.
+**GO** — via Session A → Session B. The direct-Anthropic pivot, caching, tool-use, cost tracking, SSE wire, and runner machinery are all verified at the pipeline level. The remaining gaps are scoping gaps (catalog not seeded, runner lacks regrade mode), both addressed by Session A.
 
-Projected 10d spend at accurate pricing: orchestrator-side ~$5-8 for 30 shots × 2-3 calls × ~$0.08/call (with dynamic filtering on web_search_20260209 running high on output tokens). Well inside the $50 starter credit. Veo regen cost only applies if artifacts need regen after reuse-path grade failures.
+Projected 10d spend at accurate pricing: orchestrator-side ~$5-8 for 30 shots × 2-3 calls × ~$0.08/call (with dynamic filtering on `web_search_20260209` running high on output tokens). Well inside the $50 starter credit. Veo regen cost only applies if artifacts need regen after reuse-path grade failures — estimate $0-$25 depending on reuse hit rate.
 
-## Commits
+## Commits (pre-flight)
 
-- **proto_front:** caching patches + `web_search_20260209` upgrade + explicit `@anthropic-ai/sdk` dep + `PREFLIGHT_REPORT.md` + `10d-pre-cache-hit-probe.ts` + `10d-pre-data-sanity.ts` + 10a gate update.
-- **brandy-agent-team (agent-vault):** ROADMAP + MISSION + status + daily log updates.
-- **Handoff file** (`.claude/handoffs/2026-04-19-step-10d-kickoff.md`) is gitignored.
+- **proto_front `09370a5`** — `feat(orchestrator): 10d pre-flight — caching optimizations + dry-run verified`
+- **proto_front `48dfec0`** — `docs: 10d pre-flight follow-up — stale-ref cleanup across ESCALATION_LOG + .env.example + anthropic.ts + probe`
+- **agent-vault `bef0a38`** — `docs(brandstudios): 10d pre-flight complete — direct path verified, caching optimized`
+- **agent-vault `fbb8054`** — `docs(brandstudios): 10d pre-flight follow-up — pull-forward stale refs across MISSION / MODEL_INTELLIGENCE / brief / ROADMAP 10c-3`
+- **Handoff files** (`.claude/handoffs/2026-04-20-step-10d-session-{a-prereqs,b-launch}.md` + old `2026-04-19-step-10d-kickoff.md`) are gitignored.
