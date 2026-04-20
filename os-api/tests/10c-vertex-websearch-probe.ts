@@ -1,21 +1,32 @@
 /**
- * 10c-vertex-websearch-probe — minimum-cost call to verify Vertex accepts the
- * web_search_20250305 tool declaration for bran-479523, AND actually invokes it.
+ * 10c-websearch-probe — minimum-cost call to verify the active orchestrator
+ * backend accepts the configured web_search tool declaration AND actually
+ * invokes it. Name retains the "10c-vertex-" prefix for git history continuity
+ * — the probe is backend-agnostic.
  *
- * Hardened in 10d-pre (2026-04-17): now exits non-zero with explicit failure
+ * Tool upgraded to `web_search_20260209` in 10d pre-flight (2026-04-19). The
+ * newer version enables dynamic filtering on Opus 4.7 — the model spins up
+ * `code_execution` alongside `web_search` to filter results before they enter
+ * context. Expect `toolUses[]` to contain a mix of `web_search` and
+ * `code_execution` blocks; assertion thresholds still gate on
+ * `webSearchCount >= 1` + `toolUses.length >= 1`.
+ *
+ * Hardened in 10d-pre (2026-04-17): exits non-zero with explicit failure
  * messages if web_search isn't invoked. Closes gap 10c-3.
  *
  * Usage:
  *   cd ~/proto_front
- *   npx tsx os-api/tests/10c-vertex-websearch-probe.ts | tee /tmp/10d-pre-3-probe.log
+ *   npx tsx os-api/tests/10c-vertex-websearch-probe.ts | tee /tmp/probe.log
  *
  * Expected: SUCCESS block, then ASSERTIONS PASSED block.
  *   - webSearchCount >= 1
  *   - toolUses.length >= 1
  *   - text non-empty + cites a current Anthropic model id
  *
- * Pre-flight: getVertexConfig() should report backend="vertex" +
- * authMode="service_account" after the 10d-pre SA wiring.
+ * Backend: since the 10c-3 direct pivot (2026-04-19), getVertexConfig()
+ * should report backend="direct" + authMode="direct_api_key" when
+ * ANTHROPIC_API_KEY is set. Vertex path (backend="vertex",
+ * authMode="service_account") remains viable as fallback.
  */
 import dotenv from "dotenv";
 import path from "path";

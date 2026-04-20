@@ -188,7 +188,7 @@ export interface OrchestratorCallRequest {
 }
 
 export interface OrchestratorToolUse {
-  /** 'web_search' for web_search_20250305, or a client-defined name. */
+  /** 'web_search' for web_search_20260209, or a client-defined name. */
   name: string;
   /** The tool call id from the model. */
   id: string;

@@ -330,6 +330,42 @@ toolUses:      [ { name: "web_search", id: "srvtoolu_01T7...", input: { query: "
 
 **Superseded handoff:** `~/proto_front/.claude/handoffs/2026-04-18-step-10d-pre-quota-pending.md` — quota request was never submitted; Vertex path shelved (preserved as fallback, not being actively pursued).
 
+**Superseded in part (2026-04-19 PM):** the tool version + cost math in this section are pre-10d-pre-flight:
+- `web_search_20250305` → `web_search_20260209` (commit `09370a5`; enables dynamic filtering on Opus 4.7 — model spins up `code_execution` alongside `web_search`).
+- Pricing constants $15/$75 per M → $5/$25 per M (Opus 4.7 actual).
+- Cost formula: prior formula subtracted cache tokens from `input_tokens`, producing negative `cost_usd` on repeat calls; `input_tokens` is already the non-cached remainder in the modern API (fixed).
+- Updated projections: orchestrator spend ~$5-8 / shot-run (was ~$15-19 here); total 10d band still $15-45 depending on Veo regen rate.
+- Post-upgrade probe cost: ~$0.09/call (up from $0.063 — dynamic filtering uses more output tokens, but per-shot savings dominate).
+
+See `~/proto_front/docs/PREFLIGHT_REPORT.md` (2026-04-19) for the full readiness state.
+
+---
+
+## Step 10d Pre-Flight CLOSED (2026-04-19 PM)
+
+**Commit:** proto_front `09370a5` (`feat(orchestrator): 10d pre-flight — caching optimizations + dry-run verified`) + agent-vault `bef0a38` (ROADMAP/MISSION updates).
+
+**Brief:** `~/agent-vault/briefs/10d-preflight-check.md` — all 5 phases executed.
+**Authoritative readiness doc:** `~/proto_front/docs/PREFLIGHT_REPORT.md`.
+**10d kickoff handoff (gitignored):** `~/proto_front/.claude/handoffs/2026-04-19-step-10d-kickoff.md`.
+
+**Patches landed:**
+- `anthropic.ts` — cost-formula double-subtract fixed; pricing $15/$75 → $5/$25 per M; `web_search_20250305` → `web_search_20260209`; docstring updates.
+- `os-api/package.json` — `@anthropic-ai/sdk` promoted from transitive (via vertex-sdk) to explicit dependency (PRIMARY path hygiene).
+- 10a readiness gate updated to assert new tool id — 17/17 still green.
+- New reusable probes: `10d-pre-cache-hit-probe.ts` (cache write/read on the 5,214-token `SYSTEM_PROMPT` — ASSERTIONS PASSED live) and `10d-pre-data-sanity.ts` (project-scoped Supabase sanity).
+
+**Live evidence:**
+- Websearch probe post-upgrade: `cost=$0.091`, dynamic filtering observed (`code_execution` + `web_search` tool-use blocks).
+- Cache-hit probe: Call 1 cacheWrite=5214 / cacheRead=0; Call 2 cacheWrite=0 / cacheRead=5214. 5-min ephemeral TTL confirmed working on Opus 4.7 direct.
+- Runner dry-run (`mode: ingest` on client_drift-mv): 6s wall-clock, $0 cost, 12 SSE log events, 0 orchestrator calls (as expected for ingest mode), run status `completed`.
+
+**10d gates flipped from UNBLOCKED → GATED.** Two pre-flight-surfaced prereqs remain (not pre-flight blockers — must be resolved before launching the 30-shot run):
+1. **Seed the 29 missing Drift MV deliverables in Supabase** — only Shot 20 (from the 10c dry-run) is currently seeded; 30-shot regression needs the full catalog.
+2. **Add a "regrade existing artifact" runner path** — the current runner only grades video inside `executeGenerateVideoStage` (fresh gen); the reuse-first 10d plan needs a mode that grades existing artifacts without regenerating.
+
+See PREFLIGHT_REPORT.md §10d Prerequisites for the detailed remediation plan.
+
 ---
 
 ## Maintenance
