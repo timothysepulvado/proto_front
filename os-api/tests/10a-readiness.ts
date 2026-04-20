@@ -6,7 +6,7 @@
  *   npx tsx os-api/tests/10a-readiness.ts
  *
  * Covers:
- *   - _buildTools shape (web_search_20250305 declaration, max_uses, extra tools)
+ *   - _buildTools shape (web_search_20260209 declaration, max_uses, extra tools)
  *   - buildUserMessage: today's date injection, BUDGET STATE section, budget +
  *     loop warnings, consensus annotation
  *   - _countConsecutiveSamePromptRegens behavior
@@ -43,7 +43,7 @@ function check(name: string, run: () => void): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 1. _buildTools — web_search_20250305 declaration shape
+// 1. _buildTools — web_search_20260209 declaration shape
 // ─────────────────────────────────────────────────────────────────────────
 
 check("_buildTools enableWebSearch=false returns []", () => {
@@ -55,14 +55,14 @@ check("_buildTools enableWebSearch=false returns []", () => {
   assert.equal(tools.length, 0);
 });
 
-check("_buildTools enableWebSearch=true declares web_search_20250305", () => {
+check("_buildTools enableWebSearch=true declares web_search_20260209", () => {
   const tools = _buildTools({
     systemCached: "sys",
     userMessage: "user",
     enableWebSearch: true,
   }) as Array<Record<string, unknown>>;
   assert.equal(tools.length, 1);
-  assert.equal(tools[0].type, "web_search_20250305");
+  assert.equal(tools[0].type, "web_search_20260209");
   assert.equal(tools[0].name, "web_search");
   assert.equal(tools[0].max_uses, 3);
 });
@@ -85,7 +85,7 @@ check("_buildTools merges extraTools with web_search", () => {
     extraTools: [{ type: "custom_tool", name: "foo" }],
   }) as Array<Record<string, unknown>>;
   assert.equal(tools.length, 2);
-  assert.equal(tools[0].type, "web_search_20250305");
+  assert.equal(tools[0].type, "web_search_20260209");
   assert.equal(tools[1].type, "custom_tool");
 });
 

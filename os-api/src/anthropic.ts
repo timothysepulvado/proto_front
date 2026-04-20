@@ -55,10 +55,17 @@ const DEFAULT_REGION = process.env.VERTEX_REGION ?? "global";
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
-// Opus 4.7 pricing (USD / 1M tokens) — override via env if billing changes
-// Cache-write is billed at input rate × 1.25; cache-read at × 0.1
-const INPUT_COST_PER_M = Number(process.env.CLAUDE_INPUT_COST_PER_M ?? "15.00");
-const OUTPUT_COST_PER_M = Number(process.env.CLAUDE_OUTPUT_COST_PER_M ?? "75.00");
+// Opus 4.7 pricing (USD / 1M tokens) — per Anthropic's public pricing as of
+// 2026-04-19 (Opus 4.7 = $5/M input, $25/M output). Prior defaults ($15/$75)
+// were stale and produced 3× cost overstatements in orchestration_decisions.
+// Override via env if Anthropic changes billing or if we switch models.
+// Cache pricing (ephemeral 5-min TTL default):
+//   - cache-write: input rate × 1.25
+//   - cache-read:  input rate × 0.10
+// 1-hour TTL (opt-in via cache_control.ttl = "1h") would be × 2.0 write; we do
+// not currently use it — 5-min fits the 10d workload (burst-then-idle per shot).
+const INPUT_COST_PER_M = Number(process.env.CLAUDE_INPUT_COST_PER_M ?? "5.00");
+const OUTPUT_COST_PER_M = Number(process.env.CLAUDE_OUTPUT_COST_PER_M ?? "25.00");
 const CACHE_WRITE_MULT = 1.25;
 const CACHE_READ_MULT = 0.1;
 
@@ -151,15 +158,23 @@ export interface OrchestratorCallRequest {
   /** Max output tokens. */
   maxTokens?: number;
   /**
-   * If true, declare Anthropic's server-executed `web_search_20250305` tool so
+   * If true, declare Anthropic's server-executed `web_search_20260209` tool so
    * the orchestrator can verify model ids / tool versions / external facts
    * before proposing them (staleness discipline). Server-side execution — no
    * client-side tool loop needed; results come back inline in the response.
    *
-   * Vertex support as of SDK 0.16.0: types present (WebSearchTool20250305).
-   * If Vertex rejects the tool at runtime, callers should treat the failure as
+   * Upgraded from `web_search_20250305` on 2026-04-19 (10d pre-flight). The
+   * newer version adds **dynamic filtering** on Opus 4.7 / 4.6 / Sonnet 4.6:
+   * Claude writes and runs filter code against search results before they
+   * enter the context window, improving accuracy and token efficiency.
+   * Backward-compatible declaration shape (same `name: "web_search"`, same
+   * `max_uses` field). Activates automatically on Opus 4.7 direct API.
+   *
+   * SDK coverage: @anthropic-ai/sdk 0.90.0 defines both types (WebSearchTool
+   * 20250305 and 20260209). Vertex SDK 0.16.0 also accepts the newer literal.
+   * If either backend rejects at runtime, callers should treat the failure as
    * "web search disabled" and continue — the gate is the arg-shape, not the
-   * live call. See 10a handoff: web-search is low-importance for first run.
+   * live call.
    */
   enableWebSearch?: boolean;
   /** Max web_search tool uses per call. Default 3. */
@@ -284,11 +299,20 @@ export async function callClaude(
       const webSearchCount = serverToolUsage?.web_search_requests
         ?? toolUses.filter((t) => t.name === "web_search").length;
 
-      // Cost calc (USD) — input/output tokens only. Web search has its own
-      // per-request pricing ($0.01/request typical); we surface count but don't
-      // add it to the input-token cost figure (keeps the "model cost" clean).
+      // Cost calc (USD) — input/output tokens + cache activity.
+      //
+      // Critical: `usage.input_tokens` is ALREADY the non-cached remainder in
+      // the Anthropic API response. Total prompt size =
+      //   input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+      // Subtracting cache_* from tokensIn (as the prior formula did) double-
+      // counts and produces negative costs once cacheRead tokens exceed the
+      // uncached remainder — which is the common case on repeated calls.
+      //
+      // Web search has its own per-request pricing ($0.01/request typical);
+      // we surface count but don't add it to the input-token cost figure
+      // (keeps the "model cost" clean and comparable to prior records).
       const cost =
-        ((tokensIn - cacheReadTokens - cacheWriteTokens) * INPUT_COST_PER_M
+        (tokensIn * INPUT_COST_PER_M
           + cacheWriteTokens * INPUT_COST_PER_M * CACHE_WRITE_MULT
           + cacheReadTokens * INPUT_COST_PER_M * CACHE_READ_MULT
           + tokensOut * OUTPUT_COST_PER_M) / 1_000_000;
@@ -323,12 +347,16 @@ export async function callClaude(
 // ── Internals ─────────────────────────────────────────────────────────────
 
 /**
- * Build the tools array for a call. Right now this declares Anthropic's
- * server-executed `web_search_20250305` tool when `enableWebSearch` is set,
- * plus any extra tools the caller passed.
+ * Build the tools array for a call. Declares Anthropic's server-executed
+ * `web_search_20260209` tool when `enableWebSearch` is set, plus any extra
+ * tools the caller passed.
  *
- * Shape reference (@anthropic-ai/sdk 0.16 ToolUnion):
- *   { name: "web_search", type: "web_search_20250305", max_uses?: number, ... }
+ * Upgraded to 20260209 on 2026-04-19 (10d pre-flight) — same name, same
+ * max_uses field; adds dynamic filtering on Opus 4.7 / 4.6 / Sonnet 4.6.
+ *
+ * Shape reference (@anthropic-ai/sdk 0.90.0 WebSearchTool20260209):
+ *   { name: "web_search", type: "web_search_20260209", max_uses?: number,
+ *     allowed_domains?, blocked_domains?, allowed_callers? }
  *
  * Returns unknown[] because we want to tolerate Vertex-side SDK variance
  * without tightly binding the call site to ToolUnion's exact shape.
@@ -337,7 +365,7 @@ export function _buildTools(request: OrchestratorCallRequest): unknown[] {
   const out: unknown[] = [];
   if (request.enableWebSearch) {
     out.push({
-      type: "web_search_20250305",
+      type: "web_search_20260209",
       name: "web_search",
       max_uses: request.maxWebSearchUses ?? 3,
     });
