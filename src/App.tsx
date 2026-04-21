@@ -19,7 +19,6 @@ import {
 } from "lucide-react";
 import hudData from "../hud.json";
 import type { HudRoot } from "./types/hud";
-import desktopBg from "./assets/desktop-bg.png";
 import noiseTexture from "./assets/noise.svg";
 import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
@@ -579,15 +578,7 @@ export default function App() {
   }, [currentRun]);
 
   return (
-    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#080a0c]">
-      <div className="absolute inset-0 z-0">
-        <img
-          src={desktopBg}
-          className="w-full h-full object-cover opacity-100"
-          alt="hud background"
-        />
-      </div>
-
+    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#141821]">
       <div
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
