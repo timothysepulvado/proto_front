@@ -131,7 +131,7 @@ Session A paused 2026-04-20 PM with all code shipped + gates green but commits +
   - `10d-pre-cache-hit-probe` — Call 1 wrote 5214 cache tokens; Call 2 read 5214 cache tokens. `=== ASSERTIONS PASSED ===`.
 - **Unit gates** (carry-forward from 2026-04-20): 10a 17/17 · 10c1 18/18 · 10d-regrade-runner 14/14 · `tsc --noEmit -p os-api` clean.
 
-**Commits:** proto_front `<pending>` (feat(orchestrator): 10d Session A — regrade runner path + Drift MV catalog seeder) + agent-vault `<pending>` (docs(brandstudios): 10d Session A closeout — prereqs ✅). _Backfilled post-commit._
+**Commits:** proto_front `23b41f4` (feat(orchestrator): 10d Session A — regrade runner path + Drift MV catalog seeder) + agent-vault `bed2a43` (docs(brandstudios): 10d Session A closeout — prereqs 6+7 ✅).
 
 **Session B unblocked.** Launch handoff at `.claude/handoffs/2026-04-20-step-10d-session-b-launch.md` is filled with the catalog campaign id; reads Session A's work via this document.
 
