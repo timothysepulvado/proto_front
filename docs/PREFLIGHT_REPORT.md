@@ -116,10 +116,24 @@ This report + `2026-04-19-step-10d-kickoff.md` handoff + ROADMAP/MISSION/status 
 - **Session B — 10d launch:** live 30-shot regrade run with SSE + cost monitoring. Handoff: `~/proto_front/.claude/handoffs/2026-04-20-step-10d-session-b-launch.md`. Expected duration ~1.5-2 hr wall-clock + overlap.
 - Old single-session handoff (`2026-04-19-step-10d-kickoff.md`) is banner-superseded in place.
 
-1. ⏳ **Seed the 29 missing Drift MV deliverables in Supabase.** *(Session A)* Action: write `~/proto_front/os-api/scripts/seed-drift-mv.ts` that reads `~/Temp-gen/productions/drift-mv/` shot list (Tim confirmed 2026-04-20 this is the correct source-of-truth for this run), upserts deliverables + artifacts into a new campaign `Drift MV — 30-shot catalog regression (10d)`, populates `metadata.localPath` on each artifact row. Idempotent via composite-key upsert.
-2. ⏳ **Add a "regrade existing artifact" runner path.** *(Session A)* Recommended: new `mode: "regrade"` that iterates deliverables for a campaign and calls `runVideoQAWithEscalation` on the latest artifact per deliverable. Idempotent — skip deliverables already `status=completed`. Unit test: `os-api/tests/10d-regrade-runner.ts`.
-3. ⏳ **Grade the 2 existing Shot 20 artifacts** via single-shot regrade smoke test. *(Session A)* Target: the existing 10c dry-run campaign (`b6691def-…`, single deliverable `1d7c52f1-…`, bounded cost). Produces ground-truth grades + validates the new `regrade` mode end-to-end on a real artifact before scaling.
+1. ✅ **Seeded 30 Drift MV deliverables in Supabase.** *(Session A — 2026-04-20)* `os-api/scripts/seed-drift-mv.ts` lands a new catalog campaign **`42f62a1d-b9df-57d8-8197-470692733391`** · `"Drift MV — 30-shot catalog regression (10d)"` · 30/30 `campaign_deliverables` + 30/30 `artifacts` with `metadata.localPath` populated (`~/Temp-gen/productions/drift-mv/shots/shot_NN.mp4`). Deterministic uuid-v5 ids; re-runs no-op (`SEED_DRIFT_MV_DRY=1` for print-only). Synthetic seed run: `bfe328c8-069a-57c7-886c-e65af2107309`. Data-sanity probe post-seed: 30/30 ✓.
+2. ✅ **`mode: "regrade"` runner path landed.** *(Session A — 2026-04-20)* `supabase/migrations/008_regrade_run_mode.sql` extends the `run_mode` enum (applied live via Management API). `os-api/src/types.ts` / `db.ts` / `runner.ts` add `RunMode += "regrade"`, `STAGE_DEFINITIONS.regrade`, `getLatestArtifactByDeliverable`, pure helpers `_shouldSkipDeliverable` + `_decideRegradeStatusTransition`, `regradeOneDeliverable`, `executeRegradeStage`. Idempotent — skips `status=completed`. Confirmed `runVideoQAWithEscalation` has no hard coupling to `executeGenerateVideoStage` (no refactor needed). Unit test `os-api/tests/10d-regrade-runner.ts` 14/14 green.
+3. ✅ **Shot 20 smoke test passed.** *(Session A — 2026-04-20)* Run `2bce7bc9-6dbf-47a3-a4fc-754ccd2e73c8` against the 10c dry-run campaign (`b6691def-…`) — `/grade_video` returned PASS 4.9 on the first call, zero orchestrator calls, $0 cost, wall-clock ~35s. Artifact `35fe6dd6-…` graded PASS, deliverable `1d7c52f1-…` flipped `reviewing → approved`. Reuse-first worked exactly as designed.
 4. **Optional:** raise or remove the per-shot $4 cap's cost-estimate signal for the 10d run now that cost math is accurate — the prior overstatement would have prematurely tripped the cap on the real 30-shot run. *(Defer to Session B if it actually bites; Session A doesn't need to touch it.)*
+
+## Session A close (2026-04-21)
+
+Session A paused 2026-04-20 PM with all code shipped + gates green but commits + docs + probe re-verification pending. Resumed 2026-04-21 on a new machine:
+
+- **Env sanity (new-machine pre-check):** `os-api/.env` intact with `ANTHROPIC_API_KEY`, Node v22.22.0 active via nvm, `status.sh` present. `gh auth` token invalid — not a blocker (local commits only this session).
+- **Live probes re-verified:**
+  - `10c-vertex-websearch-probe` — `backend=direct`, `authMode=direct_api_key`, `webSearchCount=2`, `code_execution` tool-use observed (dynamic filtering on `web_search_20260209` active), `toolUses[]` populated, cited URL in response. `=== ASSERTIONS PASSED ===`. Cost $0.075/call, latency 17.7s.
+  - `10d-pre-cache-hit-probe` — Call 1 wrote 5214 cache tokens; Call 2 read 5214 cache tokens. `=== ASSERTIONS PASSED ===`.
+- **Unit gates** (carry-forward from 2026-04-20): 10a 17/17 · 10c1 18/18 · 10d-regrade-runner 14/14 · `tsc --noEmit -p os-api` clean.
+
+**Commits:** proto_front `<pending>` (feat(orchestrator): 10d Session A — regrade runner path + Drift MV catalog seeder) + agent-vault `<pending>` (docs(brandstudios): 10d Session A closeout — prereqs ✅). _Backfilled post-commit._
+
+**Session B unblocked.** Launch handoff at `.claude/handoffs/2026-04-20-step-10d-session-b-launch.md` is filled with the catalog campaign id; reads Session A's work via this document.
 
 ## Deferred: asset-storage architecture (flagged 2026-04-20)
 

@@ -297,6 +297,32 @@ export async function getArtifactsByRun(runId: string): Promise<Artifact[]> {
   return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
 }
 
+/**
+ * Returns the most-recent artifact of the given type for a deliverable, or
+ * null if none exists. Used by the regrade runner path (Step 10d) to pick the
+ * artifact to re-grade when no fresh generation has been fired. Ordered by
+ * created_at DESC so callers always see the newest successor from any prior
+ * escalation loop.
+ */
+export async function getLatestArtifactByDeliverable(
+  deliverableId: string,
+  type?: Artifact["type"],
+): Promise<Artifact | null> {
+  let query = supabase
+    .from("artifacts")
+    .select("*")
+    .eq("deliverable_id", deliverableId)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (type) query = query.eq("type", type);
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    throw new Error(`Failed to get latest artifact: ${error.message}`);
+  }
+  if (!data) return null;
+  return mapDbArtifactToArtifact(data as DbArtifact);
+}
+
 export async function getArtifactById(artifactId: string): Promise<Artifact | null> {
   const { data, error } = await supabase
     .from("artifacts")

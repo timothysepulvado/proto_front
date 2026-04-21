@@ -2,7 +2,21 @@ import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
 import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable, VideoGradeResult } from "./types.js";
-import { updateRun, addLog, updateClientLastRun, addArtifact, addDriftMetric, addDriftAlert, getActiveBaseline, getCampaign, getPendingDeliverables, updateDeliverableStatus, listKnownLimitations } from "./db.js";
+import {
+  updateRun,
+  addLog,
+  updateClientLastRun,
+  addArtifact,
+  addDriftMetric,
+  addDriftAlert,
+  getActiveBaseline,
+  getCampaign,
+  getPendingDeliverables,
+  getDeliverablesByCampaign,
+  getLatestArtifactByDeliverable,
+  updateDeliverableStatus,
+  listKnownLimitations,
+} from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import { handleQAFailure, markEscalationResolved } from "./escalation_loop.js";
 import { v4 as uuidv4 } from "uuid";
@@ -1373,6 +1387,239 @@ export async function runVideoQAWithEscalation(params: {
   return result;
 }
 
+// ─── Pure helpers — exported for unit testing (10d-regrade-runner.ts) ──
+// These are the parts of the regrade logic that don't touch Supabase, the
+// filesystem, the brand-engine sidecar, or Temp-gen. Keeps the test surface
+// small and independent of project-scoped env + network state.
+
+/**
+ * Idempotency predicate — returns true if the deliverable is already in a
+ * terminal-good state that regrade should not disturb. Only `approved`
+ * qualifies today; `rejected` deliverables are explicitly re-graded (that's
+ * the happy path: a rejected deliverable gets its new-prompt regen graded).
+ */
+export function _shouldSkipDeliverable(d: CampaignDeliverable): boolean {
+  return d.status === "approved";
+}
+
+/**
+ * Decide the terminal status transition for a regraded deliverable.
+ * Returns null if no transition should fire (the caller leaves the
+ * deliverable wherever it is — typically `reviewing` for HITL-bound cases).
+ *
+ * Expected invariant: callers have already stepped the deliverable through
+ * `pending → generating → reviewing` before invoking the grader, so
+ * `liveStatus` should be `reviewing` by the time this is called. We still
+ * handle off-path inputs defensively.
+ */
+export function _decideRegradeStatusTransition(
+  outcome: "resolved" | "hitl_required" | "failed",
+  liveStatus: CampaignDeliverable["status"],
+): { from: CampaignDeliverable["status"]; to: CampaignDeliverable["status"]; reason?: string } | null {
+  if (liveStatus !== "reviewing") return null;
+  switch (outcome) {
+    case "resolved":
+      return { from: "reviewing", to: "approved" };
+    case "failed":
+      return {
+        from: "reviewing",
+        to: "rejected",
+        reason: "Regrade escalation failed",
+      };
+    case "hitl_required":
+      // Intentionally no transition — the deliverable stays in `reviewing`
+      // and the Review Gate surfaces it for manual approval/rejection.
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * ── Step 10d Session A ───────────────────────────────────────────────────
+ * Regrade existing video artifacts for a campaign without firing fresh
+ * Temp-gen generation up-front. Iterates the campaign's deliverables, picks
+ * each deliverable's most-recent video artifact, and hands it to
+ * runVideoQAWithEscalation — which owns the grade → L1/L2/L3 → regen loop.
+ *
+ * Reuse-first semantics:
+ *   - `approved` deliverables are skipped (idempotent).
+ *   - Non-approved + has artifact → grade → escalate (orchestrator decides
+ *     whether to regen; if the orchestrator decides L2 regen, Temp-gen cost
+ *     kicks in then, not at stage entry).
+ *   - Non-approved + no artifact → log warning + flip deliverable to HITL
+ *     (no artifact to grade; can't infer intent from here). The Review Gate
+ *     surfaces these for manual triage.
+ *
+ * Status walk:
+ *   seeded deliverables come in at `pending`. The existing VALID transition
+ *   map requires `pending → generating → reviewing` before a terminal
+ *   (approved/rejected) flip. We step through those two synthetic states
+ *   (no generation actually fires) and let the outcome dictate the final.
+ */
+async function regradeOneDeliverable(
+  run: Run,
+  deliverable: CampaignDeliverable,
+  campaign: Campaign | null,
+  stageId: string,
+): Promise<"resolved" | "hitl_required" | "failed" | "skipped" | "missing_artifact"> {
+  // 1. Idempotency — skip deliverables already in terminal-good state.
+  if (_shouldSkipDeliverable(deliverable)) {
+    await emitLog(
+      run.runId,
+      stageId,
+      "info",
+      `Skipping deliverable ${deliverable.id.slice(0, 8)}… (already ${deliverable.status})`,
+    );
+    return "skipped";
+  }
+
+  // 2. Fetch most-recent video artifact for this deliverable.
+  const artifact = await getLatestArtifactByDeliverable(deliverable.id, "video");
+  if (!artifact) {
+    await emitLog(
+      run.runId,
+      stageId,
+      "warn",
+      `Deliverable ${deliverable.id.slice(0, 8)}… has no video artifact — flagging HITL`,
+    );
+    // Best-effort status nudge: step pending → generating → reviewing so the
+    // HITL panel surfaces it. If already past pending, leave it alone.
+    if (deliverable.status === "pending") {
+      try {
+        const g = await updateDeliverableStatus(deliverable.id, "pending", "generating");
+        await updateDeliverableStatus(g.id, "generating", "reviewing");
+      } catch (err) {
+        await emitLog(run.runId, stageId, "warn",
+          `Could not step status for ${deliverable.id.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // Request run-level HITL for any deliverable in this state; Review Gate
+    // consumers can triage. Non-fatal — continue other deliverables.
+    await updateRun(run.runId, { hitlRequired: true });
+    return "missing_artifact";
+  }
+
+  // 3. Step status pending → generating → reviewing for the critic call.
+  //    If the deliverable is already mid-state (e.g. reviewing from a prior
+  //    regrade attempt), leave it where it is — runVideoQAWithEscalation
+  //    doesn't depend on the column, just on artifact + deliverable shape.
+  let liveStatus: CampaignDeliverable["status"] = deliverable.status;
+  if (liveStatus === "pending") {
+    try {
+      const g = await updateDeliverableStatus(deliverable.id, "pending", "generating");
+      liveStatus = g.status;
+    } catch (err) {
+      // Don't hard-fail on status walk — the grade call is the important work.
+      await emitLog(run.runId, stageId, "warn",
+        `Status walk (pending→generating) failed for ${deliverable.id.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (liveStatus === "generating") {
+    try {
+      const r = await updateDeliverableStatus(deliverable.id, "generating", "reviewing");
+      liveStatus = r.status;
+    } catch (err) {
+      await emitLog(run.runId, stageId, "warn",
+        `Status walk (generating→reviewing) failed for ${deliverable.id.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // 4. Grade + escalate — this is where reuse-first logic lives. If the clip
+  //    already passes consensus critic, escalation_loop never fires and the
+  //    cost is ~$0.05 (one /grade_video call).
+  const heroStill =
+    deliverable.referenceImages && deliverable.referenceImages.length > 0
+      ? deliverable.referenceImages[0]
+      : undefined;
+  const result = await runVideoQAWithEscalation({
+    run,
+    artifact,
+    deliverable,
+    campaign,
+    stageId,
+    narrative: deliverable.description ?? campaign?.prompt,
+    heroStillPath: heroStill,
+  });
+
+  // 5. Reflect outcome on deliverable.status (pure decision → DB write).
+  const transition = _decideRegradeStatusTransition(result.outcome, liveStatus);
+  if (transition) {
+    try {
+      await updateDeliverableStatus(deliverable.id, transition.from, transition.to,
+        transition.reason ? { rejectionReason: transition.reason } : undefined);
+    } catch (err) {
+      await emitLog(run.runId, stageId, "warn",
+        `Final status flip ${transition.from}→${transition.to} failed for ${deliverable.id.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // hitl_required: no transition — Review Gate picks it up from `reviewing`.
+
+  // 6. Surface run-level hitl flag if any deliverable needs review.
+  if (result.outcome === "hitl_required") {
+    await updateRun(run.runId, { hitlRequired: true });
+  }
+
+  return result.outcome;
+}
+
+async function executeRegradeStage(run: Run): Promise<boolean> {
+  const stageId = "regrade";
+  run = await updateStageStatus(run, stageId, "running");
+  await emitLog(run.runId, stageId, "info", "Starting reuse-first regrade...");
+
+  if (!run.campaignId) {
+    await emitLog(run.runId, stageId, "error",
+      "regrade mode requires run.campaignId — aborting stage.");
+    run = await updateStageStatus(run, stageId, "failed", "Missing campaignId");
+    return false;
+  }
+
+  const campaign = await getCampaign(run.campaignId);
+  if (!campaign) {
+    await emitLog(run.runId, stageId, "error",
+      `Campaign ${run.campaignId} not found — aborting stage.`);
+    run = await updateStageStatus(run, stageId, "failed", "Campaign not found");
+    return false;
+  }
+
+  const deliverables = await getDeliverablesByCampaign(run.campaignId);
+  await emitLog(run.runId, stageId, "info",
+    `Campaign "${campaign.name}" has ${deliverables.length} deliverable(s) to regrade`);
+
+  const tally = { resolved: 0, hitl: 0, failed: 0, skipped: 0, missingArtifact: 0 };
+  for (const d of deliverables) {
+    try {
+      const outcome = await regradeOneDeliverable(run, d, campaign, stageId);
+      switch (outcome) {
+        case "resolved": tally.resolved++; break;
+        case "hitl_required": tally.hitl++; break;
+        case "failed": tally.failed++; break;
+        case "skipped": tally.skipped++; break;
+        case "missing_artifact": tally.missingArtifact++; break;
+      }
+    } catch (err) {
+      await emitLog(run.runId, stageId, "error",
+        `Uncaught error regrading ${d.id.slice(0, 8)}…: ${err instanceof Error ? err.message : String(err)}`);
+      tally.failed++;
+    }
+  }
+
+  await emitLog(run.runId, stageId, "info",
+    `Regrade summary — resolved=${tally.resolved} hitl=${tally.hitl} ` +
+    `failed=${tally.failed} skipped=${tally.skipped} missingArtifact=${tally.missingArtifact}`);
+
+  // Stage is "completed" even if some deliverables need HITL or failed — the
+  // runner surfaces those via hitlRequired + deliverable statuses. Stage only
+  // FAILS if we couldn't enumerate deliverables or every single one raised.
+  const fatalFail = tally.failed > 0 && tally.failed === deliverables.length;
+  run = await updateStageStatus(run, stageId,
+    fatalFail ? "failed" : "completed",
+    fatalFail ? "All deliverables failed regrade" : undefined,
+  );
+  return !fatalFail;
+}
+
 // Main run executor
 export async function executeRun(run: Run): Promise<void> {
   await emitLog(run.runId, "system", "info", `Starting run ${run.runId} in mode: ${run.mode}`);
@@ -1415,6 +1662,10 @@ export async function executeRun(run: Run): Promise<void> {
 
       case "export":
         success = await executeExportStage(run);
+        break;
+
+      case "regrade":
+        success = await executeRegradeStage(run);
         break;
     }
 

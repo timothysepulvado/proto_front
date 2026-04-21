@@ -1,4 +1,15 @@
-export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export";
+/**
+ * Run modes accepted by the runner.
+ *
+ * `regrade` (added 2026-04-20 for Step 10d) iterates the deliverables of a
+ * campaign and re-grades each deliverable's most-recent video artifact via the
+ * consensus critic + escalation loop, WITHOUT firing fresh Temp-gen generation
+ * up-front. Reuse-first: if the existing artifact already passes, the
+ * deliverable flips straight to approved. Regen only fires when the
+ * orchestrator asks for it (L1/L2/L3). Idempotent at the deliverable level —
+ * deliverables already in terminal-good state (`approved`) are skipped.
+ */
+export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade";
 
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 
@@ -494,5 +505,8 @@ export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> 
   ],
   export: [
     { id: "export", name: "Export Package" },
+  ],
+  regrade: [
+    { id: "regrade", name: "Regrade Existing Artifacts" },
   ],
 };
