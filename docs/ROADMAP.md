@@ -1,6 +1,9 @@
 # BrandStudios OS — Roadmap & State of Play
 
-> Last updated: 2026-04-12 | Maintainer: Brandy
+> **⚠ SUPERSEDED 2026-04-22 — use `~/agent-vault/domains/brandstudios/ROADMAP.md` as the source of truth.**
+> That file tracks 10c-3, 10d-pre, Session A/B, and Chunks 1+2+3 of the Drift MV context-aware grading rollout in full. This in-repo doc is preserved as a frozen historical snapshot from 2026-04-12 covering the pre-Step-10 state (Phases 1-13 through Cloudinary + Temp-gen sidecar). Do NOT update this file in isolation — update the vault ROADMAP and let this one age out.
+>
+> Last meaningful update of this file: 2026-04-12 | Current state: see vault ROADMAP | Maintainer: Brandy
 
 ---
 

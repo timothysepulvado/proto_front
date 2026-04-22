@@ -21,7 +21,9 @@ proto_front/
 │   ├── lib/supabase.ts     ← Supabase config
 │   └── components/
 │       ├── ReviewPanel.tsx          ← HITL review UI
-│       ├── DeliverableTracker.tsx   ← Campaign deliverable lifecycle
+│       ├── DeliverableTracker.tsx   ← Campaign deliverable lifecycle + shot L-badge/cost/click-to-drawer
+│       ├── ShotDetailDrawer.tsx     ← Per-shot drawer — Narrative/Critic/Orchestrator/Timeline tabs (Chunk 2)
+│       ├── WatcherSignalsPanel.tsx  ← Live SSE watcher — cost + loop alerts + cancel (Chunk 2)
 │       ├── DriftAlertPanel.tsx      ← Drift alerts + acknowledgment
 │       ├── BaselinePanel.tsx        ← Brand baseline snapshots
 │       └── PromptEvolutionPanel.tsx ← Prompt performance + evolution
@@ -44,7 +46,7 @@ proto_front/
 │   ├── api/server.py       ← FastAPI sidecar on :8100
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 7 migrations (001-007) — 007 adds known_limitations + asset_escalations + orchestration_decisions
+├── supabase/migrations/    ← 8 migrations (001-008) — 007 adds known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements
 ```
