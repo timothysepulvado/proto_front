@@ -368,6 +368,84 @@ See PREFLIGHT_REPORT.md §10d Prerequisites for the detailed remediation plan.
 
 ---
 
+## Step 10d Session A LANDED (2026-04-20 → 2026-04-21 close)
+
+**Commits:** proto_front `23b41f4` (`feat(orchestrator): 10d Session A — regrade runner path + Drift MV catalog seeder`) + agent-vault `bed2a43`.
+
+**What shipped:**
+- `supabase/migrations/008_regrade_run_mode.sql` — `ALTER TYPE run_mode ADD VALUE 'regrade'` (applied live via Management API).
+- `os-api/scripts/seed-drift-mv.ts` — seeds campaign `42f62a1d-b9df-57d8-8197-470692733391` ("Drift MV — 30-shot catalog regression (10d)") with 30/30 `campaign_deliverables` + 30/30 `artifacts` (deterministic uuid-v5 ids, `metadata.localPath` to `~/Temp-gen/productions/drift-mv/shots/shot_NN.mp4`, synthetic seed run `bfe328c8-…`).
+- Runner + types additions: `RunMode += "regrade"`, `STAGE_DEFINITIONS.regrade`, pure helpers `_shouldSkipDeliverable` + `_decideRegradeStatusTransition`, `regradeOneDeliverable`, `executeRegradeStage`, `getLatestArtifactByDeliverable`. Idempotent (skips `status=approved`).
+- Gate: `10d-regrade-runner.ts` — 14/14.
+- Live Shot 20 smoke (`2bce7bc9-…`): PASS 4.9 on first `/grade_video` call, $0 orchestrator cost, wall-clock 35s. Reuse-first path proven.
+
+---
+
+## Step 10d Session B CANCELLED — root cause surfaced (2026-04-21 PM)
+
+**Run:** `d5999b91-…` launched 22:30 UTC against the 30-shot catalog; cancelled 23:48 UTC at 9/30 deliverables.
+
+**Spend:** $1.56 orchestrator (19 decisions, L1×7 / L2×3 / L3×9 — 5 consensus tiebreaks fired live) + ~$41.60 Veo regens (13 clips × ~$3.20) = ~$43.16.
+
+**Cancellation trigger:** Tim asked *"is it grading for the music video story or just individual video with no context?"*. Research agent confirmed: critic + orchestrator graded each shot in isolation. Only narrative signal was `deliverable.description` — no shot number, beat, song timing, neighbor shots, or music-video story awareness. Strict technical criteria (morphing / scale_creep / character_drift / atmospheric_creep) misapplied to intentional cinematic stylization. False-failure cascades on shots where stylization was deliberate (Shot 20 front-left lighting, Shot 27 scene-content haze, etc.).
+
+**Positive signals preserved:**
+- SSE `watcher_signal` + `escalation` forwarding verified in production (5 escalation events, 2 watcher_signals observed per run).
+- Rule 1 consensus path proven live — 5 tiebreaks fired on genuinely borderline shots (Session A only had smoke-level exposure).
+- Cost tracking accurate (post-pre-flight patches): orchestrator ~$0.08/call average, within the $5-8 budget projection.
+
+**Schema observation (for follow-up):** `orchestration_decisions.cost` is the live column; 6 docs (PREFLIGHT_REPORT, ESCALATION_LOG, ROADMAP, brief, etc.) reference `cost_usd`. Correction deferred to Chunk 3 close-out per plan.
+
+**Replan:** Session B work scrapped and the 10d arc restructured into three chunks (plan `~/.claude/plans/streamed-watching-cosmos.md`, APPROVED):
+1. **Chunk 1 — Backend context awareness** (below).
+2. **Chunk 2 — HUD observability MVP** — DeliverableTracker enhancement + ShotDetailDrawer + WatcherSignalsPanel so the operator can watch + pull the plug during Chunk 3.
+3. **Chunk 3 — 30-shot regrade relaunch** — reset statuses on the 9 already-touched shots, launch against the new prompts, monitor, close.
+
+---
+
+## Step 10d Chunk 1 LANDED (2026-04-22) — context-aware grading backend
+
+**Commits:** proto_front `9729b04` (`feat(orchestrator): chunk 1 — context-aware grading (narrative envelope + critic/orchestrator prompts)`) + agent-vault `a102e25`.
+
+**Plan:** `~/.claude/plans/happy-dreaming-manatee.md` (Chunk-1 refinement of the parent plan; validated against live code state before writing).
+
+**Data layer (no migration — rides existing JSONB columns):**
+- `artifacts.metadata.narrative_context` on each of 30 seeded video artifacts — `{ shot_number, beat_name, song_start_s, song_end_s, visual_intent, characters[], previous_shot, next_shot, stylization_allowances[], manifest_sha256, ingested_at }`.
+- `campaigns.guardrails.music_video_context` on campaign `42f62a1d-…` — `{ title, synopsis, reference_tone, total_shots: 30, track_duration_s, shot_list_summary[30] (≤80 chars each), manifest_sha256, ingested_at }`.
+- Ingester: `os-api/scripts/ingest-drift-mv-narrative.ts` — reads `manifest.json` + `qa_prompt_evolution.md`, idempotent via manifest sha256, `DRY=1` + `FORCE=1` flags. Stylization allowances extracted for shots 5/7/15/18/20/27 (v4 overrides v3).
+
+**Design note:** `campaign_deliverables.metadata` + `campaigns.metadata` don't exist in the live schema (only `artifacts.metadata` per migration 004). Approved plan boundary was "no migration" — landed on `artifacts.metadata` + `campaigns.guardrails` instead. This becomes the convention for future music-video campaigns.
+
+**Gemini 3.1 Pro critic (brand-engine):**
+- `_build_rails_prompt` + `grade` + `grade_video_with_consensus` + `_frame_extraction_fallback` signatures extended with `narrative_context` + `music_video_synopsis`.
+- Self-awareness preamble (only when narrative present): identifies model as Gemini 3.1 Pro, flags known borderline-score variance, directs to STYLIZATION BUDGET before scoring morphing/character_drift/scale_creep as catastrophic.
+- `## SHOT POSITION IN MUSIC VIDEO` section (shot N of 30, beat, song timing, visual intent + previous + next summaries).
+- `## STYLIZATION BUDGET FOR THIS SHOT` section when allowances non-empty — bullet list + explicit *"VERDICT RULES stay fixed"* rail.
+- VERDICT RULES + CRITERIA + OUTPUT SCHEMA are byte-identical with/without narrative (test `test_narrative_preserves_rubric_unchanged`).
+- `VideoGradeRequest` Pydantic schema extended; `NarrativeContext` + `NeighborShotSlim` Pydantic mirrors added.
+
+**Claude Opus 4.7 orchestrator (os-api):**
+- `SYSTEM_PROMPT` constant → `buildSystemPrompt(musicVideoContext?)` function with self-awareness preamble prepended. `SYSTEM_PROMPT` alias preserved for backwards compat.
+- `MUSIC VIDEO CONTEXT` section appended to SYSTEM prompt when mvc provided (synopsis + reference tone + `Full shot list` — 30 entries, cache-stable prefix across per-shot calls).
+- `buildUserMessage` extended with `narrativeContext` param → injects `SHOT POSITION`, `NEIGHBOR SHOTS`, `STYLIZATION BUDGET` sections after `CAMPAIGN CONTEXT`.
+- Continuity rule appended to `YOUR TASK` footer (prefer L3 accept when neighbors already PASS, unless BLOCKING failure_mode).
+- Runner threads `narrative_context` + `music_video_synopsis` into `/grade_video` payload (runner.ts line 1164); escalation_loop threads `narrativeContext` + `musicVideoContext` into `OrchestratorInput` (line 226).
+- Envelope extraction helpers `_extractNarrativeContext` / `_extractMusicVideoContext` (shape guards, defensive against missing/malformed envelopes).
+
+**Verification — 8 gate buckets green:**
+- `10a-readiness` 17/17.
+- `10d-pre-cache-hit-probe` — cache write 5387 / read 5387 tokens (preamble added ~173 tokens to cache-stable prefix; still 12% of uncached cost across 59 per-shot reads).
+- `10d-regrade-runner` 14/14.
+- **New** `_10d-narrative-prompt-shape` 17/17 — buildSystemPrompt MV + non-MV modes, buildUserMessage with/without narrative, shot 1 + shot 30 edge cases, section ordering, allowances-empty omission, `SYSTEM_PROMPT` alias match.
+- **New** `_10d-narrative-ingest-probe` 19/19 — campaign mvc + all 30 artifact envelopes + shot_number consistency + previous/next null-edge + stylization allowances on shots 5/7/15/18/20/27 + manifest_sha256 consistency + localPath preservation from seed.
+- **New** `_10d-narrative-live-probe` — Shot 20 PASS 5.0 (Session A was 4.9 — **no regression**; prompt shaping did not degrade the critic).
+- `pytest` 36/36 (26 existing + 10 new `test_narrative_prompt.py` — rubric-unchanged invariant, shot 1 + shot 30 null-neighbor handling, frame-strip tiebreak path also gets envelope).
+- `tsc --noEmit -p os-api` clean.
+
+**Next:** Chunk 2 (HUD observability MVP) — handoff at `.claude/handoffs/2026-04-21-chunk-2-front-end-observability.md` (gitignored). Ready-for-`/clear`. Chunk 3 (regrade relaunch) follows.
+
+---
+
 ## Maintenance
 
 - **Living DB:** query via `SELECT * FROM known_limitations ORDER BY times_encountered DESC;`

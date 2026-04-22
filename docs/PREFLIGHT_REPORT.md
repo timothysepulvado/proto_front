@@ -152,3 +152,48 @@ Projected 10d spend at accurate pricing: orchestrator-side ~$5-8 for 30 shots ×
 - **agent-vault `bef0a38`** — `docs(brandstudios): 10d pre-flight complete — direct path verified, caching optimized`
 - **agent-vault `fbb8054`** — `docs(brandstudios): 10d pre-flight follow-up — pull-forward stale refs across MISSION / MODEL_INTELLIGENCE / brief / ROADMAP 10c-3`
 - **Handoff files** (`.claude/handoffs/2026-04-20-step-10d-session-{a-prereqs,b-launch}.md` + old `2026-04-19-step-10d-kickoff.md`) are gitignored.
+
+## Session B → Chunk 1 replan (2026-04-21 PM → 2026-04-22)
+
+**Session B cancelled.** Run `d5999b91-…` launched 30-shot regrade at 22:30 UTC, cancelled 23:48 UTC at 9/30 deliverables. Spend: $1.56 orchestrator (19 decisions) + ~$41.60 Veo regens = ~$43.16. Root cause: critic + orchestrator graded each shot in isolation — only narrative signal was `deliverable.description`. No shot number, beat, song timing, neighbors, or music-video story awareness. Strict technical criteria misapplied to intentional cinematic stylization.
+
+**Positive outcomes preserved:** SSE watcher/escalation forwarding verified in production, Rule 1 consensus path fired 5 times on genuinely borderline shots, cost tracking (post-pre-flight patches) accurate within projected $5-8 orchestrator band.
+
+**10d restructured into 3 chunks** (parent plan `~/.claude/plans/streamed-watching-cosmos.md`, APPROVED):
+1. Backend context awareness (Chunk 1 — below).
+2. HUD observability MVP (Chunk 2 — handoff written, gitignored).
+3. 30-shot regrade relaunch (Chunk 3 — after Chunk 2).
+
+## Chunk 1 LANDED (2026-04-22) — context-aware grading backend
+
+**Commits:** proto_front `9729b04` · agent-vault `a102e25`.
+
+**Plan:** `~/.claude/plans/happy-dreaming-manatee.md` (Chunk-1 refinement; validated against live code + source docs before execution — 3 deviations surfaced and fixed: no `NARRATIVE.md`/`LYRICS.md` on disk so ingester reads manifest.sections[]; `BeatName` widened to 9 entries to include `final_hook`; Phase 6 file/line refs corrected from handoff guess to actuals).
+
+**Storage convention (no migration):**
+- Per-shot `NarrativeContext` → `artifacts.metadata.narrative_context` (30 seeded video artifacts on campaign `42f62a1d-…`).
+- Per-campaign `MusicVideoContext` → `campaigns.guardrails.music_video_context` (cache-stable 30-entry shot list + synopsis + reference tone).
+- Ingester: `os-api/scripts/ingest-drift-mv-narrative.ts`, idempotent via manifest sha256.
+- Decision rationale: `campaign_deliverables.metadata` + `campaigns.metadata` don't exist in live schema; approved plan disallows migration; landed on existing `artifacts.metadata` + `campaigns.guardrails` JSONB columns.
+
+**Prompt layer:**
+- Gemini 3.1 Pro critic (`brand-engine/brand_engine/core/video_grader.py`): self-awareness preamble + `## SHOT POSITION IN MUSIC VIDEO` + `## STYLIZATION BUDGET FOR THIS SHOT` sections when narrative present. Signatures of `_build_rails_prompt` + `grade` + `grade_video_with_consensus` + `_frame_extraction_fallback` all accept `narrative_context` + `music_video_synopsis` kwargs. VERDICT RULES + CRITERIA + OUTPUT SCHEMA byte-identical with/without narrative (rubric does not widen).
+- Claude Opus 4.7 orchestrator: `SYSTEM_PROMPT` const → `buildSystemPrompt(musicVideoContext?)` function with preamble + MUSIC VIDEO CONTEXT + 30-entry Full shot list (cache-stable prefix). `buildUserMessage` extended with `narrativeContext` → SHOT POSITION + NEIGHBOR SHOTS + STYLIZATION BUDGET sections + Continuity rule. Runner threads envelopes into `/grade_video` payload (runner.ts line 1164) + OrchestratorInput (escalation_loop.ts line 226).
+
+**Gates — 8 buckets green:**
+- `10a-readiness` 17/17
+- `10d-pre-cache-hit-probe` — cache write 5387 / read 5387 tokens (preamble grew stable prefix by ~173 tokens; still 12% cost for 59 per-shot reads)
+- `10d-regrade-runner` 14/14
+- **new** `_10d-narrative-prompt-shape` 17/17
+- **new** `_10d-narrative-ingest-probe` 19/19
+- **new** `_10d-narrative-live-probe` — Shot 20 PASS 5.0 (Session A was 4.9 — **no regression**; prompt change improved the critic slightly)
+- `pytest` 36/36 (26 existing + new `test_narrative_prompt.py` 10/10 — `test_narrative_preserves_rubric_unchanged` enforces VERDICT RULES byte-identity)
+- `tsc --noEmit -p os-api` clean
+
+**Cost-column naming drift (deferred):** `orchestration_decisions` column is `cost` (not `cost_usd`) — 6 docs reference `cost_usd` historically. Cleanup slated for Chunk 3 close-out per plan.
+
+## Go / No-Go for Chunk 2
+
+**GO** for HUD observability MVP. Backend is narrative-aware, regression probes all green, ingestion idempotent and reversible (no-op on re-run, `FORCE=1` to rebuild). Chunk 2 handoff at `.claude/handoffs/2026-04-21-chunk-2-front-end-observability.md` (gitignored).
+
+**NOT YET** for Chunk 3 regrade relaunch — should wait until Chunk 2 lands so Tim can watch + cancel mid-run (the whole point of the replan).
