@@ -1160,6 +1160,25 @@ async function gradeAndEscalateVideo(params: {
       (currentArtifact.metadata?.localPath as string | undefined) ??
       currentArtifact.path;
 
+    // Chunk 1: thread narrative_context + music_video_synopsis into the critic
+    // call when present. NarrativeContext lives on artifact.metadata and
+    // MusicVideoContext lives on campaign.guardrails — see
+    // os-api/scripts/ingest-drift-mv-narrative.ts. Non-MV campaigns fall
+    // through with both as null and critic uses baseline prompts.
+    const artifactMeta =
+      (currentArtifact.metadata as Record<string, unknown> | undefined) ?? {};
+    const narrativeContext =
+      (artifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
+      null;
+    const campaignGuardrails =
+      (campaign?.guardrails as Record<string, unknown> | null | undefined) ?? null;
+    const musicVideoContext =
+      (campaignGuardrails?.music_video_context as
+        | { synopsis?: string }
+        | null
+        | undefined) ?? null;
+    const musicVideoSynopsis = musicVideoContext?.synopsis ?? null;
+
     const gradeResult = await callBrandEngine<VideoGradeResult>(
       "/grade_video",
       {
@@ -1181,6 +1200,8 @@ async function gradeAndEscalateVideo(params: {
         // Pass explicitly rather than relying on the brand-engine default so a
         // future default-flip can't silently break critic variance handling.
         consensus: true,
+        narrative_context: narrativeContext,
+        music_video_synopsis: musicVideoSynopsis,
       },
       run.runId,
       stageId,

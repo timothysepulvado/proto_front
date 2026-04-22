@@ -1,7 +1,57 @@
 """Pydantic models for brand engine inputs and outputs."""
 
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
+
+
+# ============ Narrative envelope (Chunk 1 — context-aware grading) ============
+# Mirrors os-api/src/types.ts NarrativeContext + NeighborShotSlim. Consumed by
+# _build_rails_prompt when a caller passes `narrative_context=<dict>` through
+# /grade_video. Field names stay snake_case to match the JSONB envelope as
+# stored in campaign_deliverables.metadata.narrative_context.
+
+BeatName = Literal[
+    "intro",
+    "hook_1",
+    "verse_1",
+    "hook_2",
+    "verse_2",
+    "bridge",
+    "hook_3",
+    "final_hook",
+    "outro",
+]
+
+
+class NeighborShotSlim(BaseModel):
+    """Slim neighbor-shot summary — fed into critic SHOT POSITION section."""
+    shot_number: int
+    beat_name: BeatName
+    visual_intent_summary: str = Field(
+        max_length=80,
+        description="≤ 80 chars — truncated visual intent for cache-stable summaries.",
+    )
+
+
+class NarrativeContext(BaseModel):
+    """Per-shot narrative envelope ingested from Drift MV manifest + qa docs."""
+    shot_number: int
+    beat_name: BeatName
+    song_start_s: float
+    song_end_s: float
+    visual_intent: str = Field(description="Full per-shot visual description.")
+    characters: list[dict] = Field(
+        default_factory=list,
+        description="[{slug, role, color_code?}] — looked up from manifest.characters.",
+    )
+    previous_shot: Optional[NeighborShotSlim] = None
+    next_shot: Optional[NeighborShotSlim] = None
+    stylization_allowances: list[str] = Field(
+        default_factory=list,
+        description="Per-shot intentional-stylization notes (from qa_prompt_evolution.md).",
+    )
+    ingested_at: str = Field(description="ISO timestamp of ingestion.")
+    manifest_sha256: str
 
 
 # ============ Embedding Models ============
@@ -219,6 +269,24 @@ class VideoGradeRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description="Distance around a verdict boundary (3.0 FAIL/WARN, 4.0 WARN/PASS) that is considered 'borderline' and triggers a second consensus call. Only applied when consensus=true.",
+    )
+    # ─── Chunk 1: narrative envelope ────────────────────────────────────
+    narrative_context: Optional[dict] = Field(
+        default=None,
+        description=(
+            "NarrativeContext-shape dict (see NarrativeContext model above). When "
+            "provided, the critic prompt gets a self-awareness preamble, a SHOT "
+            "POSITION IN MUSIC VIDEO section, and a STYLIZATION BUDGET section. "
+            "VERDICT RULES stay fixed — stylization budget widens the input, not the rubric."
+        ),
+    )
+    music_video_synopsis: Optional[str] = Field(
+        default=None,
+        description=(
+            "3-4 sentence music-video synopsis — rendered into the SHOT POSITION "
+            "section as the top line so the critic knows what story this shot "
+            "serves. Sourced from campaign.metadata.music_video_context.synopsis."
+        ),
     )
 
 

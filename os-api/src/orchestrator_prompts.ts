@@ -20,6 +20,8 @@ import type {
   CampaignDeliverable,
   EscalationLevel,
   KnownLimitation,
+  MusicVideoContext,
+  NarrativeContext,
   PromptHistoryEntry,
   VideoGradeResult,
 } from "./types.js";
@@ -28,7 +30,19 @@ import type {
 // System prompt — CACHED
 // ───────────────────────────────────────────────────────────────────────────
 
-export const SYSTEM_PROMPT = `You are the orchestration brain of BrandStudios.AI — the autonomous decision engine that responds to generation failures in the client production pipeline.
+/**
+ * Self-awareness preamble — always present. Tells the orchestrator who it is,
+ * what it can/can't see, and where to look for continuity context. Chunk 1
+ * addition (2026-04-21) after the 10d Session B isolation-grading root cause.
+ */
+const SYSTEM_PROMPT_PREAMBLE = `You are Claude Opus 4.7 running the BrandStudios escalation ladder. You have access to web_search_20260209 for staleness checks. You CANNOT see the video clip — defer visual judgment to the Gemini 3.1 Pro critic's verdict; focus on ladder reasoning (L1/L2/L3, prompt fix vs approach change vs redesign/accept). Your context is limited to THIS shot + slim neighbor summaries. When a music-video shot list is provided below, use it for continuity decisions.`;
+
+/**
+ * Core system prompt body — doctrine / 21 rules / decision matrix / JSON schema.
+ * Cache-stable across all calls. Wrapped by buildSystemPrompt() which prepends
+ * the preamble and (optionally) appends MUSIC VIDEO CONTEXT per campaign.
+ */
+const SYSTEM_PROMPT_CORE = `You are the orchestration brain of BrandStudios.AI — the autonomous decision engine that responds to generation failures in the client production pipeline.
 
 When an asset (image or video) fails auto-QA, you receive:
   - The failing artifact and its QA verdict
@@ -204,6 +218,45 @@ If you propose a new limitation:
 
 Begin.`;
 
+/**
+ * Build the full system prompt. When `musicVideoContext` is provided (Drift MV
+ * and future music-video campaigns), a cache-stable MUSIC VIDEO CONTEXT
+ * section is appended — synopsis + reference tone + 30-entry shot list. This
+ * prefix is stable across every per-shot call within a campaign, so Anthropic
+ * prompt caching amortizes the ~2400-token shot-list cost.
+ *
+ * When called with no args, emits the non-MV prompt (self-awareness preamble
+ * + core doctrine only). This is what the `SYSTEM_PROMPT` backwards-compat
+ * alias uses, so existing callers keep working.
+ */
+export function buildSystemPrompt(musicVideoContext?: MusicVideoContext): string {
+  const parts: string[] = [SYSTEM_PROMPT_PREAMBLE, "", SYSTEM_PROMPT_CORE];
+  if (musicVideoContext) {
+    parts.push("");
+    parts.push(`## MUSIC VIDEO CONTEXT`);
+    parts.push(
+      `**${musicVideoContext.title}** (${musicVideoContext.total_shots} shots, ${musicVideoContext.track_duration_s}s runtime)`,
+    );
+    parts.push(`**Synopsis:** ${musicVideoContext.synopsis}`);
+    parts.push(`**Reference tone:** ${musicVideoContext.reference_tone}`);
+    parts.push("");
+    parts.push(`### Full shot list`);
+    for (const s of musicVideoContext.shot_list_summary) {
+      parts.push(
+        `- Shot ${s.shot_number} (${s.beat_name}): ${s.visual_intent_summary}`,
+      );
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Backwards-compat alias — any legacy import of `SYSTEM_PROMPT` still works.
+ * Emits the non-music-video prompt (preamble + core). For music-video
+ * campaigns, call `buildSystemPrompt(musicVideoContext)` explicitly.
+ */
+export const SYSTEM_PROMPT = buildSystemPrompt();
+
 // ───────────────────────────────────────────────────────────────────────────
 // User message builder — NOT cached
 // ───────────────────────────────────────────────────────────────────────────
@@ -228,6 +281,12 @@ export function buildUserMessage(params: {
   levelsUsed?: EscalationLevel[];
   /** True iff QA verdict has already been cross-validated via Rule 1 consensus. */
   consensusResolved?: boolean;
+  /**
+   * Chunk 1: per-shot narrative envelope. When provided, the user message gets
+   * SHOT POSITION + NEIGHBOR SHOTS + STYLIZATION BUDGET sections after
+   * CAMPAIGN CONTEXT. Optional so non-music-video campaigns still work.
+   */
+  narrativeContext?: NarrativeContext;
 }): string {
   const sections: string[] = [];
 
@@ -288,6 +347,55 @@ export function buildUserMessage(params: {
   }
   sections.push("");
 
+  // ─── Chunk 1: SHOT POSITION + NEIGHBOR SHOTS + STYLIZATION BUDGET ──────
+  if (params.narrativeContext) {
+    const nc = params.narrativeContext;
+    sections.push(`## SHOT POSITION`);
+    sections.push(`- Shot ${nc.shot_number} of 30`);
+    sections.push(`- Beat: ${nc.beat_name}`);
+    sections.push(
+      `- Song: ${nc.song_start_s.toFixed(1)}s–${nc.song_end_s.toFixed(1)}s`,
+    );
+    sections.push(`- Visual intent: ${nc.visual_intent}`);
+    sections.push("");
+
+    sections.push(`## NEIGHBOR SHOTS`);
+    if (nc.previous_shot) {
+      sections.push(
+        `### Previous — Shot ${nc.previous_shot.shot_number} (${nc.previous_shot.beat_name})`,
+      );
+      sections.push(nc.previous_shot.visual_intent_summary);
+      sections.push("");
+    } else {
+      sections.push("(no previous shot — this is shot 1)");
+      sections.push("");
+    }
+    if (nc.next_shot) {
+      sections.push(
+        `### Next — Shot ${nc.next_shot.shot_number} (${nc.next_shot.beat_name})`,
+      );
+      sections.push(nc.next_shot.visual_intent_summary);
+      sections.push("");
+    } else {
+      sections.push("(no next shot — this is shot 30)");
+      sections.push("");
+    }
+
+    if (nc.stylization_allowances.length > 0) {
+      sections.push(`## STYLIZATION BUDGET`);
+      sections.push("Intentional visual effects for this shot:");
+      for (const allow of nc.stylization_allowances) {
+        sections.push(`- ${allow}`);
+      }
+      sections.push(
+        "When detecting a criterion deficit that matches a stylization " +
+          "allowance above, treat it as intentional per the budget. VERDICT " +
+          "RULES stay fixed — this widens the input, not the rubric.",
+      );
+      sections.push("");
+    }
+  }
+
   sections.push(`## QA VERDICT`);
   if (params.consensusResolved) {
     sections.push(`> consensus_resolved: true — this verdict reflects critic-consensus resolution per Rule 1. Treat as authoritative; do not recommend re-running QA.`);
@@ -327,7 +435,15 @@ export function buildUserMessage(params: {
   sections.push("");
 
   sections.push(`# YOUR TASK`);
-  sections.push(`Diagnose, classify, decide. Output EXACTLY ONE JSON object matching the OrchestratorDecision schema. No prose outside JSON.`);
+  sections.push(
+    `Diagnose, classify, decide. Output EXACTLY ONE JSON object matching the OrchestratorDecision schema. No prose outside JSON.`,
+  );
+  if (params.narrativeContext) {
+    sections.push("");
+    sections.push(
+      `**Continuity rule:** If neighbor shots have a PASSING verdict already, prefer L3 accept over regen to preserve sequence continuity — unless this shot has a BLOCKING failure_mode.`,
+    );
+  }
 
   return sections.join("\n");
 }

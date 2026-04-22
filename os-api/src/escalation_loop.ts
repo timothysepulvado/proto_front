@@ -40,6 +40,8 @@ import type {
   Campaign,
   EscalationAction,
   EscalationLevel,
+  MusicVideoContext,
+  NarrativeContext,
   OrchestratorDecision,
   OrchestrationDecisionRecord,
   VideoGradeResult,
@@ -220,6 +222,21 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
     );
   }
 
+  // ── Chunk 1: narrative envelope ────────────────────────────────────────
+  // Per-shot NarrativeContext lives on artifact.metadata.narrative_context
+  // (written by os-api/scripts/ingest-drift-mv-narrative.ts). Campaign-level
+  // MusicVideoContext lives on campaign.guardrails.music_video_context. Both
+  // optional — non-music-video campaigns fall through to baseline behavior.
+  const narrativeContext = _extractNarrativeContext(artifact);
+  const musicVideoContext = _extractMusicVideoContext(campaign);
+  if (narrativeContext) {
+    await logger(
+      "info",
+      `Narrative envelope present: shot ${narrativeContext.shot_number} (${narrativeContext.beat_name}), ` +
+        `allowances=${narrativeContext.stylization_allowances.length}`,
+    );
+  }
+
   // 4. Call orchestrator
   let decisionResult;
   try {
@@ -241,6 +258,8 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       consecutiveSamePromptRegens: consecutiveSameRegens,
       levelsUsed,
       consensusResolved,
+      narrativeContext,
+      musicVideoContext,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -517,4 +536,51 @@ function _nullDecision(): OrchestratorDecision {
     confidence: 0.0,
     new_candidate_limitation: null,
   };
+}
+
+// ── Chunk 1: narrative envelope extraction ─────────────────────────────────
+// These helpers dig NarrativeContext + MusicVideoContext out of the JSONB
+// columns populated by os-api/scripts/ingest-drift-mv-narrative.ts. Defensive
+// against missing/malformed envelopes — returns undefined so orchestrator
+// falls back to the baseline prompt.
+
+/** Shape guard — returns true when the value looks like a NarrativeContext. */
+function _isNarrativeContext(v: unknown): v is NarrativeContext {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.shot_number === "number" &&
+    typeof o.beat_name === "string" &&
+    typeof o.visual_intent === "string" &&
+    Array.isArray(o.stylization_allowances)
+  );
+}
+
+function _isMusicVideoContext(v: unknown): v is MusicVideoContext {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.title === "string" &&
+    typeof o.synopsis === "string" &&
+    Array.isArray(o.shot_list_summary)
+  );
+}
+
+export function _extractNarrativeContext(
+  artifact: Artifact,
+): NarrativeContext | undefined {
+  const meta = artifact.metadata;
+  if (!meta || typeof meta !== "object") return undefined;
+  const nc = (meta as Record<string, unknown>).narrative_context;
+  return _isNarrativeContext(nc) ? nc : undefined;
+}
+
+export function _extractMusicVideoContext(
+  campaign: Campaign | null,
+): MusicVideoContext | undefined {
+  if (!campaign) return undefined;
+  const g = campaign.guardrails;
+  if (!g || typeof g !== "object") return undefined;
+  const mvc = (g as Record<string, unknown>).music_video_context;
+  return _isMusicVideoContext(mvc) ? mvc : undefined;
 }

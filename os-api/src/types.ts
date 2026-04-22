@@ -354,6 +354,77 @@ export interface VideoGradeResult {
   consensus_note?: string | null;
 }
 
+// ─── Narrative envelope (Chunk 1 — context-aware grading) ───────────────
+// Both critic + orchestrator consume these so every per-shot call knows its
+// position in the 30-shot Drift MV music video + what stylization is
+// intentional. Ingested from ~/Temp-gen/productions/drift-mv/manifest.json
+// + qa_prompt_evolution.md into metadata.narrative_context (per deliverable)
+// + metadata.music_video_context (on campaign row).
+
+export type BeatName =
+  | "intro"
+  | "hook_1"
+  | "verse_1"
+  | "hook_2"
+  | "verse_2"
+  | "bridge"
+  | "hook_3"
+  | "final_hook"
+  | "outro";
+
+export interface NeighborShotSlim {
+  shot_number: number;
+  beat_name: BeatName;
+  /** ≤ 80 chars — truncated visual intent for cache-stable neighbor summaries. */
+  visual_intent_summary: string;
+}
+
+export interface NeighborShotRich extends NeighborShotSlim {
+  /** Full prose visual-intent description from manifest. */
+  visual_intent_full: string;
+  /** Notes from qa_prompt_evolution.md if present for this shot. */
+  stylization_notes?: string;
+}
+
+export interface NarrativeContext {
+  shot_number: number;
+  beat_name: BeatName;
+  song_start_s: number;
+  song_end_s: number;
+  /** The full per-shot visual description (from manifest.shots[i].visual). */
+  visual_intent: string;
+  characters: Array<{ slug: string; role: string; color_code?: string }>;
+  previous_shot: NeighborShotSlim | null;
+  next_shot: NeighborShotSlim | null;
+  /** Per-shot intentional-stylization notes (from qa_prompt_evolution.md). */
+  stylization_allowances: string[];
+  /** ISO timestamp of ingestion. */
+  ingested_at: string;
+  manifest_sha256: string;
+}
+
+export interface MusicVideoContext {
+  title: string;
+  /** 3-4 sentence story synopsis — cache-stable. */
+  synopsis: string;
+  /** e.g. "Jay-Z/Kanye 'Run This Town' meets The Matrix Revolutions..." */
+  reference_tone: string;
+  total_shots: number;
+  track_duration_s: number;
+  /**
+   * Cache-stable shot list. Appended into SYSTEM_PROMPT once per campaign; the
+   * 30-entry × 80-char-summary payload is ~2400 tokens and benefits from
+   * Anthropic prompt caching across per-shot orchestrator calls.
+   */
+  shot_list_summary: Array<{
+    shot_number: number;
+    beat_name: BeatName;
+    visual_intent_summary: string;
+  }>;
+  ingested_at: string;
+  manifest_sha256: string;
+}
+
 // ─── Orchestrator (Claude Opus 4.7) input/output contract ────────────────
 export interface PromptHistoryEntry {
   iteration: number;
@@ -407,6 +478,23 @@ export interface OrchestratorInput {
    * not suggest re-running QA.
    */
   consensusResolved?: boolean;
+  // ─── Chunk 1: narrative envelope ──────────────────────────────────────
+  /**
+   * Per-shot narrative envelope — shot_number, beat, song timing, neighbor
+   * summaries, stylization_allowances. Ingested into
+   * `deliverable.metadata.narrative_context`. When present, the orchestrator
+   * prompt gets SHOT POSITION + NEIGHBOR SHOTS + STYLIZATION BUDGET sections
+   * in the user message. Optional so non-music-video campaigns still work.
+   */
+  narrativeContext?: NarrativeContext;
+  /**
+   * Campaign-level music-video envelope — title, synopsis, reference tone,
+   * 30-entry cache-stable shot list. Ingested into
+   * `campaign.metadata.music_video_context`. When present, the SYSTEM_PROMPT
+   * is built via `buildSystemPrompt(musicVideoContext)` so the cache-stable
+   * prefix gets the music-video context appended once per campaign.
+   */
+  musicVideoContext?: MusicVideoContext;
 }
 
 export interface OrchestratorDecision {

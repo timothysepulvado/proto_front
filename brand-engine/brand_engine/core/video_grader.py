@@ -169,6 +169,8 @@ def _build_rails_prompt(
     failure_modes_to_check: Optional[list[str]],
     media_kind: Literal["video", "frame_strip"] = "video",
     frame_strip_count: Optional[int] = None,
+    narrative_context: Optional[dict] = None,
+    music_video_synopsis: Optional[str] = None,
 ) -> str:
     """Construct the system-level rails for the Gemini video critic.
 
@@ -179,6 +181,12 @@ def _build_rails_prompt(
     When `media_kind="frame_strip"` the intro is swapped to tell Gemini it's
     seeing a tile grid of 1fps samples — used by the consensus tiebreaker
     (escalation-ops Rule 1) when two raw video calls disagree.
+
+    Chunk 1 (2026-04-21): when `narrative_context` is provided, three extra
+    sections are rendered — a self-awareness preamble, ## SHOT POSITION IN
+    MUSIC VIDEO, and ## STYLIZATION BUDGET FOR THIS SHOT. VERDICT RULES +
+    CRITERIA + OUTPUT SCHEMA are deliberately NOT modified — stylization
+    budget widens the input, not the rubric.
     """
     lines: list[str] = []
     if media_kind == "frame_strip":
@@ -200,6 +208,19 @@ def _build_rails_prompt(
         lines.append("You are a multimodal brand-QA critic for the BrandStudios orchestration engine.")
         lines.append("Your job: watch the attached video clip and produce a structured verdict in JSON.")
         lines.append("")
+
+    # ─── Chunk 1: self-awareness preamble (only for music-video shots) ────
+    if narrative_context:
+        shot_n = narrative_context.get("shot_number")
+        lines.append(
+            f"You are Gemini 3.1 Pro scoring shot {shot_n} of 30 in the BrandStudios "
+            f"'Drift' music video. You have known variance on borderline scores (within "
+            f"±0.3 of 3.0 or 4.0) — Rule 1 consensus tiebreak will fire automatically if "
+            f"your aggregate lands there. Trust your judgment but note genuine uncertainty "
+            f"in `reasoning`. Before scoring morphing, character_drift, or scale_creep as "
+            f"catastrophic, check the STYLIZATION BUDGET section below."
+        )
+        lines.append("")
     lines.append("## OUTPUT DISCIPLINE")
     lines.append("- Respond ONLY with valid JSON matching the VideoGradeResult schema.")
     lines.append("- No prose outside JSON. No markdown. No code fences around the JSON.")
@@ -216,6 +237,31 @@ def _build_rails_prompt(
     if deliverable_context:
         lines.append("## NARRATIVE CONTEXT")
         lines.append(deliverable_context.strip())
+        lines.append("")
+
+    # ─── Chunk 1: SHOT POSITION IN MUSIC VIDEO ────────────────────────────
+    if narrative_context:
+        nc = narrative_context
+        lines.append("## SHOT POSITION IN MUSIC VIDEO")
+        if music_video_synopsis:
+            lines.append(f"**Music video:** {music_video_synopsis}")
+        lines.append(
+            f"**Shot {nc['shot_number']} of 30** | beat: `{nc['beat_name']}` | "
+            f"song: {nc['song_start_s']:.1f}s–{nc['song_end_s']:.1f}s"
+        )
+        lines.append(f"**Visual intent:** {nc['visual_intent']}")
+        if nc.get("previous_shot"):
+            ps = nc["previous_shot"]
+            lines.append(
+                f"**Previous shot ({ps['shot_number']}, {ps['beat_name']}):** "
+                f"{ps['visual_intent_summary']}"
+            )
+        if nc.get("next_shot"):
+            ns = nc["next_shot"]
+            lines.append(
+                f"**Next shot ({ns['shot_number']}, {ns['beat_name']}):** "
+                f"{ns['visual_intent_summary']}"
+            )
         lines.append("")
 
     lines.append("## CRITERIA (score each 0.0-5.0)")
@@ -244,6 +290,23 @@ def _build_rails_prompt(
         lines.append("## SPECIFICALLY PROBE FOR")
         for fm in failure_modes_to_check:
             lines.append(f"- {fm}")
+        lines.append("")
+
+    # ─── Chunk 1: STYLIZATION BUDGET FOR THIS SHOT ────────────────────────
+    if narrative_context and narrative_context.get("stylization_allowances"):
+        lines.append("## STYLIZATION BUDGET FOR THIS SHOT")
+        lines.append(
+            "The following visual effects are INTENTIONAL for this shot's narrative role:"
+        )
+        for allowance in narrative_context["stylization_allowances"]:
+            lines.append(f"- {allowance}")
+        lines.append("")
+        lines.append(
+            "When detecting a criterion deficit that matches a stylization allowance above, "
+            "note this in `reasoning` ('intentional per stylization budget') and do NOT "
+            "auto-FAIL on that criterion alone. "
+            "**VERDICT RULES stay fixed** — this widens the input, not the rubric."
+        )
         lines.append("")
 
     lines.append("## VERDICT RULES")
@@ -379,6 +442,8 @@ class VideoGrader:
         hero_still_path: Optional[str] = None,
         known_limitations: Optional[list[dict]] = None,
         failure_modes_to_check: Optional[list[str]] = None,
+        narrative_context: Optional[dict] = None,
+        music_video_synopsis: Optional[str] = None,
     ) -> VideoGradeResult:
         """Grade a video clip. Returns structured VideoGradeResult."""
         t0 = time.time()
@@ -392,6 +457,8 @@ class VideoGrader:
             deliverable_context=deliverable_context,
             known_limitations_context=known_limitations,
             failure_modes_to_check=failure_modes_to_check,
+            narrative_context=narrative_context,
+            music_video_synopsis=music_video_synopsis,
         )
 
         # Video delivery depends on backend. AI Studio has the File API (large
@@ -554,6 +621,8 @@ class VideoGrader:
         failure_modes_to_check: Optional[list[str]] = None,
         n_runs: int = 2,
         threshold_band: float = CONSENSUS_THRESHOLD_BAND,
+        narrative_context: Optional[dict] = None,
+        music_video_synopsis: Optional[str] = None,
     ) -> VideoGradeResult:
         """Grade a video with Rule-1 consensus discipline.
 
@@ -584,6 +653,8 @@ class VideoGrader:
             hero_still_path=hero_still_path,
             known_limitations=known_limitations,
             failure_modes_to_check=failure_modes_to_check,
+            narrative_context=narrative_context,
+            music_video_synopsis=music_video_synopsis,
         )
 
         if not _is_borderline(first.aggregate_score, threshold_band):
@@ -605,6 +676,8 @@ class VideoGrader:
             hero_still_path=hero_still_path,
             known_limitations=known_limitations,
             failure_modes_to_check=failure_modes_to_check,
+            narrative_context=narrative_context,
+            music_video_synopsis=music_video_synopsis,
         )
 
         if first.verdict == second.verdict:
@@ -631,6 +704,8 @@ class VideoGrader:
             known_limitations=known_limitations,
             failure_modes_to_check=failure_modes_to_check,
             original_verdicts=(first, second),
+            narrative_context=narrative_context,
+            music_video_synopsis=music_video_synopsis,
         )
         return tiebreak
 
@@ -644,6 +719,8 @@ class VideoGrader:
         known_limitations: Optional[list[dict]] = None,
         failure_modes_to_check: Optional[list[str]] = None,
         original_verdicts: Optional[tuple[VideoGradeResult, VideoGradeResult]] = None,
+        narrative_context: Optional[dict] = None,
+        music_video_synopsis: Optional[str] = None,
     ) -> VideoGradeResult:
         """Tile 1fps ffmpeg extracts into a grid image and grade as single image.
 
@@ -721,6 +798,8 @@ class VideoGrader:
             failure_modes_to_check=failure_modes_to_check,
             media_kind="frame_strip",
             frame_strip_count=frame_count,
+            narrative_context=narrative_context,
+            music_video_synopsis=music_video_synopsis,
         )
 
         grid_part = genai_types.Part.from_bytes(data=grid_bytes, mime_type="image/jpeg")

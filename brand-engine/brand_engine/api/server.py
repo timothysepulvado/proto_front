@@ -197,6 +197,8 @@ async def grade_video(request: VideoGradeRequest):
                 known_limitations=request.known_limitations_context,
                 failure_modes_to_check=request.failure_modes_to_check,
                 threshold_band=request.consensus_threshold_band,
+                narrative_context=request.narrative_context,
+                music_video_synopsis=request.music_video_synopsis,
             )
         else:
             result = grader.grade(
@@ -206,6 +208,8 @@ async def grade_video(request: VideoGradeRequest):
                 hero_still_path=request.hero_still_path,
                 known_limitations=request.known_limitations_context,
                 failure_modes_to_check=request.failure_modes_to_check,
+                narrative_context=request.narrative_context,
+                music_video_synopsis=request.music_video_synopsis,
             )
         return result
     except FileNotFoundError as e:
