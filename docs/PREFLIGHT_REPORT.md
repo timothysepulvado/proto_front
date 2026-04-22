@@ -37,7 +37,7 @@ Caching fixes applied this session are worth an estimated **~3× reduction** in 
 |---|---|---|---|---|
 | 1 | Cache-hit IS working — 5,214 tokens cached/read on Opus 4.7 | Ephemeral (5-min) | — | No change. Verified live via new `10d-pre-cache-hit-probe`. |
 | 2 | **Cost formula double-subtracts cache tokens** — `input_tokens` is already the non-cached remainder; subtracting `cache_read` + `cache_write` produces negative costs | `(tokensIn - cacheRead - cacheWrite) * rate + …` | `tokensIn * rate + cacheWrite * rate * 1.25 + cacheRead * rate * 0.10 + …` | **Patched** (`os-api/src/anthropic.ts`). |
-| 3 | **Pricing constants stale** — `$15/M input, $75/M output` in code; actual Opus 4.7 is `$5/$25` per M | $15 / $75 | $5 / $25 | **Patched** (env-overridable). 3× cost overstatement fixed in `orchestration_decisions.cost_usd` going forward. |
+| 3 | **Pricing constants stale** — `$15/M input, $75/M output` in code; actual Opus 4.7 is `$5/$25` per M | $15 / $75 | $5 / $25 | **Patched** (env-overridable). 3× cost overstatement fixed in `orchestration_decisions.cost` going forward. |
 | 4 | `web_search_20260209` available on Opus 4.7 direct, adds dynamic filtering; SDK 0.90.0 supports both literals | `web_search_20250305` | `web_search_20260209` | **Upgraded** in `_buildTools`. Re-run probe shows dynamic filtering active (model spins up `code_execution` to filter results — latency 8s → 23s, accuracy +). |
 | 5 | `@anthropic-ai/sdk` was **transitive-only** via vertex-sdk — latent risk for PRIMARY direct path | Transitive (`@anthropic-ai/vertex-sdk` → `@anthropic-ai/sdk@0.90.0`) | Explicit dep | **Patched** `os-api/package.json`. |
 | 6 | Multi-breakpoint splitting (split system into stable-core + semi-stable + dynamic) | Single breakpoint on whole system block | — | **Deferred.** Our SYSTEM_PROMPT is already 100% stable; extra breakpoints fragment without measurable gain for our call pattern (1-3 calls per shot within a 5-min window). 5-min ephemeral TTL fits the workload. 1-hour TTL opt-in reserved if wall-clock between shots balloons. |
@@ -59,7 +59,7 @@ cacheReadTokens:   5214    ← read
 Probe at `os-api/tests/10d-pre-cache-hit-probe.ts` — reusable gate, survives pre-flight.
 
 **Estimated 10d savings from Phase 2 patches:**
-- Cost-formula + pricing fixes: `orchestration_decisions.cost_usd` now reports accurate $USD. Prior records overstated by ~3× plus the double-subtraction artifact. **Not a real-cost savings** (Anthropic billing was always correct) — but our in-run cost tracking and per-shot $4 cap will now fire on the right numbers.
+- Cost-formula + pricing fixes: `orchestration_decisions.cost` now reports accurate $USD. Prior records overstated by ~3× plus the double-subtraction artifact. **Not a real-cost savings** (Anthropic billing was always correct) — but our in-run cost tracking and per-shot $4 cap will now fire on the right numbers.
 - Cached prefix savings: 5,214 tokens × $5/M × (1 - 0.10) = $0.0235 per shot saved after first call (versus uncached). For 30-shot × ~2 calls/shot = ~$0.70 saved across run. Small absolute — caching was already working.
 - **Net: the pre-flight saved us from a wildly wrong budget display during 10d, more than a real billing reduction.**
 
@@ -190,10 +190,53 @@ Projected 10d spend at accurate pricing: orchestrator-side ~$5-8 for 30 shots ×
 - `pytest` 36/36 (26 existing + new `test_narrative_prompt.py` 10/10 — `test_narrative_preserves_rubric_unchanged` enforces VERDICT RULES byte-identity)
 - `tsc --noEmit -p os-api` clean
 
-**Cost-column naming drift (deferred):** `orchestration_decisions` column is `cost` (not `cost_usd`) — 6 docs reference `cost_usd` historically. Cleanup slated for Chunk 3 close-out per plan.
+**Cost-column naming drift (resolved 2026-04-22, Chunk 3 close):** `orchestration_decisions` column is `cost`. Historical docs referenced `cost_usd` in 6 places (PREFLIGHT_REPORT, ESCALATION_LOG, ROADMAP, MISSION, 2 briefs). Fixed in Chunk 3 close-out batch. Code-internal variable names in `anthropic.ts` / `orchestrator.ts` left alone (they're local vars, not DB column refs).
 
 ## Go / No-Go for Chunk 2
 
 **GO** for HUD observability MVP. Backend is narrative-aware, regression probes all green, ingestion idempotent and reversible (no-op on re-run, `FORCE=1` to rebuild). Chunk 2 handoff at `.claude/handoffs/2026-04-21-chunk-2-front-end-observability.md` (gitignored).
 
 **NOT YET** for Chunk 3 regrade relaunch — should wait until Chunk 2 lands so Tim can watch + cancel mid-run (the whole point of the replan).
+
+---
+
+## POST-RUN (Chunk 3 close — 2026-04-22)
+
+### Projected vs Actual
+
+| Metric | Projected (plan §3.4) | Actual (session of 3 runs) |
+|---|---|---|
+| Reuse rate | ≥ 60% | ~4% (1 reuse-PASS on 24 eligible) |
+| Orchestrator spend | < $5 | $0.87 (7 decisions) |
+| Total session spend | < $30 | ~$26-29 |
+| Consensus tiebreak firings | ≥ 3 shots | 0 observed (consensus single-call path on all grades) |
+| Cross-shot continuity in orch reasoning | ≥ 1 | TBD (decisions not inspected at close) |
+| Max per-shot loop depth | ≤ 2 | 3-4 on shot 2 intro (Run 1 kill-switch trigger) |
+| Run status | completed / needs_review | all 3 runs CANCELLED — orchestrator loop bug (#3) prevents convergence |
+
+### Behavior surprises
+
+- **Critic is stricter than manual acceptance.** Non-stylized Drift MV production videos (accepted 2026-03 during Phase 2) score 1.3-1.8 on the current critic with narrative context. This is unexpected and the root cause of the low reuse rate — the production catalog didn't meet the narrative-aware critic's rubric even though humans had manually accepted these shots. Could be (a) critic rubric calibration drift post-Chunk-1 prompt changes (unlikely — `test_narrative_preserves_rubric_unchanged` enforces byte-identity), (b) pre-Chunk-1 manual acceptance was generous, or (c) Veo 3.1 quality drift since 2026-03. Needs investigation.
+- **Orchestrator correctly uses narrative context for decisions.** Run 2's shot 2 got L3 redesign at confidence 0.86 — decisive action with narrative-aware reasoning. Session B's context-blind baseline on the same shot was L2 loop without convergence. The upgrade is real.
+- **L3 redesign does not monotonically improve the video.** Run 2 shot 2: grade went 1.3 → 0.9 (WORSE) after L3 redesign. The critic detected a new failure class (`mid_clip_scene_replacement`) on the regen. Redesign doesn't mean better.
+- **Image generation side-path fails noisily.** Temp-gen `/generate/image` returned HTTP 500 on L3 redesign hero-still requests. Runner fell back to `/generate/video` directly (no hero still → Veo uses text-only prompt). Graceful-degrade worked but the 500 is worth investigating.
+
+### Bugs surfaced + disposition (summary — full detail in ESCALATION_LOG §Step 10d Chunk 3 PARTIAL)
+
+1. **Session B escalation short-circuit** — FIXED via Phase 1c DELETE (preserved audit trail in run_logs + orchestration_decisions).
+2. **narrative_context lost on loop iterations 2+** — FIXED via `runner.ts` capture-once + deliverable-level fallback.
+3. **Cross-artifact escalation history resets** — KNOWN LIMITATION, inline-commented in `runner.ts`. Follow-up: aggregate escalation history by `deliverable_id` (not `artifact_id`) so the orchestrator's `consecSameRegens` has cross-iteration signal.
+
+### Drive-by fixes (during Chunk 3 close)
+
+- `_shouldSkipDeliverable` extended to skip `reviewing` status (HITL queue owns those). Test updated.
+- `cost_usd` → `cost` doc references corrected across this file + ESCALATION_LOG + ROADMAP + MISSION + briefs + MODEL_INTELLIGENCE (SQL examples + column-name assertions). Code-internal `cost_usd` variable names in `anthropic.ts` / `orchestrator.ts` left alone.
+
+### Go / No-Go for Step 11
+
+**NOT YET.** Step 10d remains PARTIALLY OPEN. Blockers:
+1. Bug #3 fix (cross-artifact escalation history) — needed for autonomous 30-shot convergence.
+2. Critic-vs-production-video gap — either accept HITL as primary path, widen rubric, or add per-shot stylization allowances.
+3. Re-launch autonomous 30-shot run with bug #3 fix + whatever critic-gap decision is reached.
+
+Until those three are resolved, Step 11 (gen_assembly.py + presentation) stays gated.

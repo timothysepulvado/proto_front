@@ -67,8 +67,13 @@ check("_shouldSkipDeliverable skips approved", () => {
 check("_shouldSkipDeliverable does NOT skip pending", () => {
   assert.equal(_shouldSkipDeliverable(mkDeliverable("pending")), false);
 });
-check("_shouldSkipDeliverable does NOT skip reviewing", () => {
-  assert.equal(_shouldSkipDeliverable(mkDeliverable("reviewing")), false);
+check("_shouldSkipDeliverable SKIPS reviewing (HITL queue owns these)", () => {
+  // Updated 2026-04-22 during Chunk 3 Run 2 close-out: when a prior regrade
+  // flags a shot HITL (status=reviewing), the next regrade must not
+  // re-trigger its escalation loop. The shot's video may genuinely fail the
+  // critic and the orchestrator can't self-detect a cross-artifact loop
+  // (bug filed in runner.ts doc block). Skip until human reviews.
+  assert.equal(_shouldSkipDeliverable(mkDeliverable("reviewing")), true);
 });
 check("_shouldSkipDeliverable does NOT skip generating", () => {
   assert.equal(_shouldSkipDeliverable(mkDeliverable("generating")), false);

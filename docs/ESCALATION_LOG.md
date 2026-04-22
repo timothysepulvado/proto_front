@@ -318,7 +318,7 @@ toolUses:      [ { name: "web_search", id: "srvtoolu_01T7...", input: { query: "
 - Orchestrator calls: $0.063/call × ~10 calls/shot × 30 shots = **~$15-19**, under $15 once system-block caching kicks in.
 - Veo re-gen: only where the orchestrator decides to regen. Historical (Steps 1-9) shows ~50% of shots had passing assets after the manual escalation ladder; expect ~5-8 re-gens in 10d = $16-26.
 - **Realistic 10d total: $35-45**, not the $100+ a from-scratch run would cost. $50 starter credit covers this band. Top up only if re-gen rate runs much higher than projected.
-- **No per-production budget cap implemented** — deliberately deferred. Per-shot `PER_SHOT_HARD_CAP_USD=4` still bites. Monitor live via `SELECT SUM(cost_usd) FROM orchestration_decisions WHERE run_id = ...`. Decision: build a production-level cap later if live data says we need one, with the right thresholds informed by actual spend.
+- **No per-production budget cap implemented** — deliberately deferred. Per-shot `PER_SHOT_HARD_CAP_USD=4` still bites. Monitor live via `SELECT SUM(cost) FROM orchestration_decisions WHERE run_id = ...`. Decision: build a production-level cap later if live data says we need one, with the right thresholds informed by actual spend.
 
 **Gates (green at closeout):**
 - `npx tsc --noEmit -p os-api`: clean
@@ -394,7 +394,7 @@ See PREFLIGHT_REPORT.md §10d Prerequisites for the detailed remediation plan.
 - Rule 1 consensus path proven live — 5 tiebreaks fired on genuinely borderline shots (Session A only had smoke-level exposure).
 - Cost tracking accurate (post-pre-flight patches): orchestrator ~$0.08/call average, within the $5-8 budget projection.
 
-**Schema observation (for follow-up):** `orchestration_decisions.cost` is the live column; 6 docs (PREFLIGHT_REPORT, ESCALATION_LOG, ROADMAP, brief, etc.) reference `cost_usd`. Correction deferred to Chunk 3 close-out per plan.
+**Schema observation (resolved 2026-04-22, Chunk 3 close):** `orchestration_decisions.cost` is the live column. The 6 doc references to `cost_usd` have been corrected to `cost` (SQL examples + column-name assertions). Code-internal `cost_usd` variable names in `anthropic.ts` / `orchestrator.ts` left alone (local vars, not DB column refs).
 
 **Replan:** Session B work scrapped and the 10d arc restructured into three chunks (plan `~/.claude/plans/streamed-watching-cosmos.md`, APPROVED):
 1. **Chunk 1 — Backend context awareness** (below).
@@ -443,6 +443,93 @@ See PREFLIGHT_REPORT.md §10d Prerequisites for the detailed remediation plan.
 - `tsc --noEmit -p os-api` clean.
 
 **Next:** Chunk 2 (HUD observability MVP) — handoff at `.claude/handoffs/2026-04-21-chunk-2-front-end-observability.md` (gitignored). Ready-for-`/clear`. Chunk 3 (regrade relaunch) follows.
+
+---
+
+## Step 10d Chunk 2 LANDED (2026-04-22) — HUD shot-level observability MVP
+
+**Commits:** proto_front `a6be2f9` (`feat(hud): chunk 2 — shot-level observability for 30-shot regrade`) + agent-vault (ROADMAP update).
+
+**Plan:** parent plan `~/.claude/plans/streamed-watching-cosmos.md` §Chunk 2; brief `~/agent-vault/briefs/2026-04-21-chunk2-hud-observability.md` (Karl delegation for Phases 2-4).
+
+**Backend (Brandy):**
+- `ShotSummary` TS interface + frontend mirror in `src/api.ts`. Exposes per-shot: status, shotNumber, beatName, songStart/End, latestEscalation {level, status, cost}, lastVerdict, lastScore, orchestratorCallCount, cumulativeCost, artifactCount, latestArtifactId.
+- `getShotSummaries(campaignId, runId?)` in `os-api/src/db.ts` — 4 parallel Supabase fetches (deliverables + artifacts + asset_escalations + orchestration_decisions) stitched in-memory; filtered by run_id when provided; sorted by shotNumber with nulls last.
+- `GET /api/campaigns/:campaignId/shot-summaries?run_id=...` route — joins narrative_context extraction from latest artifact + latest escalation level + cumulative orchestrator cost + latest qa_verdict.
+- Realtime helpers `subscribeToOrchestrationDecisions` + `subscribeToArtifacts` in `src/api.ts` for live HUD refresh.
+
+**Frontend (Karl, brief-led):**
+- `DeliverableTracker.tsx` — shot-number prefix (`#N`), beat badge, L1/L2/L3 escalation badge (cyan/amber/red), cost badge (red when >$4 per-shot cap), total-cost header (red when >$45), click-to-drawer `onShotClick`, realtime refetch on `orchestration_decisions` INSERT filtered by runId. Extracted `ShotCard` subcomponent.
+- `ShotDetailDrawer.tsx` (new) — right-side 480px drawer, focus-trap dialog with Esc+backdrop close, 4 tabs: **Narrative** (beat + shot N/30 + song timing + visual intent + prev/next neighbors + amber stylization-allowances box + characters), **Critic** (verdict badge + large score + per-criterion bars 0-5 + failure-class pills + reasoning + consensus_note italic), **Orchestrator** (newest-first list of `orchestration_decisions`, expandable rows with prompt diff vs prior iteration, web_search count surfaced, confidence bar), **Timeline** (merged run_logs + decisions + artifacts sorted chronologically with icon + type label).
+- `WatcherSignalsPanel.tsx` (new) — 280px top-right panel, EventSource subscribes to `/api/runs/:runId/logs`, filters `type === "escalation"` frames, narrows to `watcher_signal` payloads via schema guard (cumulativeCost / consecutiveSameRegens / warnBudget / warnLoop / levelsUsed), also handles raw AssetEscalation payloads for current-shot title. Two-step cancel button (first click → "Confirm cancel?" red state, second click → POST `/api/runs/:runId/cancel` with `api.cancelRun` fallback). Hidden on terminal run statuses.
+- `App.tsx` — `selectedShot` state, drawer rendered at root, WatcherSignalsPanel hosted top-right in main with z-30, new `hydrateCampaignRun` effect auto-loads latest campaign run on client switch (so creative view shows observability without a live trigger), shot selection resets on run change.
+
+**Verification — 6 gate buckets green:**
+- **New** `_10d-shot-summaries` 16/16 — row count, shape, narrative join, sort semantics, escalation invariants, qa_verdict extraction, per-run filter narrows not excludes.
+- `10a-readiness` 17/17 · `10d-regrade-runner` 14/14 · `_10d-narrative-prompt-shape` 17/17 · `_10d-narrative-ingest-probe` 19/19.
+- brand-engine `pytest -q` 36/36.
+- `tsc --noEmit` clean on root + os-api · `npm run build` clean (489KB bundle, 891ms).
+
+**Aesthetic preserved:** dark HUD palette (cyan/amber/emerald/red accents on `bg-white/[0.02]`) throughout; no drift to landing-page warm palette.
+
+**Invariant held:** zero backend prompt changes — Chunk 1 critic + orchestrator prompts locked.
+
+**Smoke-test gap (closed in Chunk 3):** WatcherSignalsPanel populated-state was not end-to-end verified in Chunk 2 close (hidden/idle + tab switching + drawer open/close were). The live budget-warning cancel flow was exercised during Chunk 3 Run 1 when the manual kill-switch fired on `max/shot > 3`.
+
+**Open follow-up tracked for Chunk 3 close:** `orchestration_decisions.cost` column is referenced as `cost_usd` in 6 docs — fix during close-out batch.
+
+---
+
+## Step 10d Chunk 3 PARTIAL (2026-04-22) — regrade relaunch + 3 bugs surfaced
+
+**Commits:** TBD (this close-out batch).
+
+**Plan file:** `~/.claude/plans/fresh-context-today-jaunty-elephant.md` (detailed run-by-run record + outcome analysis).
+
+**Three runs — all cancelled early:**
+| Run | ID | Ended | Orch $ | Est Total | Outcome |
+|---|---|---|---|---|---|
+| 1 | `11c857b7-…` | 2026-04-22T22:23:39Z | $0.45 (4 decisions) | $13.25 | kill-switch — shot looped >3× escalations due to Session B short-circuit bug |
+| 2 | `428f014d-…` | 2026-04-22T22:50:54Z | $0.26 (2 decisions) | $6.66 | narrative worked but L3 redesign looped (bug #3 surfaced) |
+| 3 | `6821c3ef-…` | 2026-04-22T23:00:08Z | $0.16 (1 decision) | $3.36 | confirmed bug #3 pattern; stopped before budget burn |
+
+**Session totals:** 7 orch decisions on direct Anthropic · $0.87 · ~$25-28 Vertex/Veo · **~$26-29 total session spend** (just under $30 budget target).
+
+### Three bugs surfaced + disposition
+
+**Bug #1 — Session B `hitl_required` escalations short-circuit new runs.** Plan §1.2 flipped 13 Session B `in_progress` escalations to `hitl_required` as "cleanliness, not correctness". But `os-api/src/db.ts` `getEscalationByArtifact` matches by `artifact_id` regardless of `run_id` (line 1392), and `escalation_loop.ts:113` uses whatever row comes back as "existing escalation". Session B regen artifacts (now forward-copied with narrative_context in Phase 1.3) are the LATEST artifacts on 8 deliverables → Session B `hitl_required` escalations became the "existing escalation" for new runs → runner flagged HITL without invoking the orchestrator. **Fix:** Phase 1c DELETE all 23 Drift MV escalations (preserved audit trail in `run_logs` + `orchestration_decisions`). Future plan text must say DELETE, not flip.
+
+**Bug #2 — narrative_context lost across loop iterations (fixed).** Runner read `narrative_context` from `currentArtifact.metadata.narrative_context` on every iteration. Mid-loop regens produce NEW artifacts via `createArtifactWithUpload` without carrying metadata forward → iterations 2+ graded context-blind. That's why Run 1's shot 2 loop never converged — the critic kept evaluating with narrative context MISSING, defaulting to strict technical rubric on videos that needed stylization tolerance. **Fix:** `runner.ts` `runVideoQAWithEscalation` now captures `initialNarrativeContext` ONCE from `params.artifact` BEFORE the escalation loop, with a fallback to the deliverable's OLDEST narrative-bearing artifact if the starting artifact lacks it. Comment block in `runner.ts` ties back to this incident.
+
+**Bug #3 — cross-artifact escalation history resets (known limitation).** `escalation_loop.ts:113` calls `getEscalationByArtifact(artifact.id)` at the top of every iteration. Since each regen creates a new `artifact_id`, `getEscalationByArtifact` returns null for the new artifact → a FRESH escalation row is created with `iterationCount=0` + `history_size=0`. The orchestrator's Rule 2 self-detection (`consecSameRegens`) resets to 0 each iteration. Evidence: Run 2's shot 2 called L3 redesign twice (iter 1 → 2) without the orchestrator recognizing the repetition. Run 3's shot 8 about to hit the same pattern when cancelled. **Follow-up:** track escalation history by `deliverable_id` (walk `predecessor_artifact_id` chain or aggregate per-deliverable history into the orchestrator's input state). This is the next runner patch. KNOWN LIMITATION inline-commented in `runner.ts`.
+
+### Also shipped during Chunk 3 (drive-by fixes)
+- `_shouldSkipDeliverable` extended to also skip `status === "reviewing"` — HITL queue owns those deliverables; re-running the auto-regen loop on them defeats the point. Tests updated (`10d-regrade-runner.ts` 14/14 still passing).
+- `cost_usd` → `cost` doc references corrected across PREFLIGHT_REPORT + ESCALATION_LOG + ROADMAP + MISSION + briefs + MODEL_INTELLIGENCE (SQL examples + column-name assertions). Code-internal `cost_usd` variable names in `anthropic.ts` / `orchestrator.ts` left alone (local vars, not DB column refs).
+
+### What Chunk 3 PROVED
+- **Narrative envelope flows end-to-end.** SSE logs showed `Narrative envelope present: shot N (beat), allowances=M` firing on every orchestrator input across Runs 1-3.
+- **Orchestrator makes different decisions with narrative context.** Run 2's shot 2 got L3 redesign at confidence 0.86 (decisive action with narrative-aware reasoning) — unlike Session B's context-blind L2 loops on the same shot.
+- **Runner narrative forwarding works after bug #2 fix.** Iteration 2+ carry the envelope through.
+- **`_shouldSkipDeliverable` reviewing-skip works.** Run 3 correctly skipped deliverable `6e6fb6a0…` with status=reviewing.
+- **Kill-switch + SSE monitoring + cancel flow are live.** Run 1 auto-killed on `>3 escalations on one shot`; Watcher Panel cancel flow exercised live.
+
+### What Chunk 3 DID NOT PROVE
+- **Reuse rate ≥ 60%.** Observed ~4% (1 reuse-PASS from Run 1 of 24 non-pre-approved). Most shots fail the critic without stylization allowances. Production videos (2026-03 Phase-2 accepted) score 1.3-1.8 on the current critic — large gap between manual acceptance and critic rubric.
+- **Cross-shot continuity citation.** Decisions not inspected for narrative-aware reasoning; TBD.
+- **Full autonomous 30-shot resolution.** Blocked on bug #3 (cross-artifact history reset) — orchestrator can't converge on genuinely-difficult shots because it can't recognize its own repetition.
+
+### Deliverable state at Chunk 3 close
+- 7 `approved` (6 preserved from Session B + 1 new reuse-PASS in Run 1 with narrative context on first grade)
+- 22 `pending` (never successfully processed beyond grading)
+- 1 `reviewing` — `6e6fb6a0…` / shot 2 intro (genuinely fails critic, no stylization allowance, loops indefinitely)
+
+### Next up (follow-up session)
+1. **Bug #3 fix** — aggregate escalation history by `deliverable_id` in `escalation_loop.ts`; make `consecSameRegens` a deliverable-level signal.
+2. **Reconcile critic vs manual acceptance** — inspect the failing production videos against the failure class detections. Either widen the rubric (add per-production tolerance), add stylization allowances to more shots, or accept HITL as the primary resolution path for non-stylized shots.
+3. **Re-launch autonomous 30-shot run** once bug #3 is fixed.
+
+Step 10d remains **partially open** — pipeline PROVEN wired, not yet PROVEN autonomous.
 
 ---
 

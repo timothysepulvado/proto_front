@@ -19,6 +19,7 @@ import {
 } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import { handleQAFailure, markEscalationResolved } from "./escalation_loop.js";
+import { supabase } from "./supabase.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation
@@ -1145,6 +1146,64 @@ async function gradeAndEscalateVideo(params: {
   let currentArtifact = params.artifact;
   const brandSlug = run.clientId.replace("client_", "");
 
+  // Chunk 1 / 10d Chunk 3 fix: capture narrative_context + music_video_synopsis
+  // ONCE from the initial (seeded) artifact before the escalation loop. Mid-loop
+  // regens produce NEW artifacts via createArtifactWithUpload that do NOT carry
+  // forward metadata.narrative_context, so reading from `currentArtifact.metadata`
+  // per iteration silently yielded null on iterations 2+, causing the critic to
+  // grade context-blind and the orchestrator to loop without convergence.
+  // See ESCALATION_LOG Step 10d LANDED for the live incident (2026-04-22).
+  //
+  // Additional fallback: when the starting artifact itself lacks
+  // narrative_context (because it was a regen from a prior failed run), look
+  // up the OLDEST artifact for this deliverable that DOES have it — that's
+  // the seeded ingest entry from os-api/scripts/ingest-drift-mv-narrative.ts.
+  //
+  // KNOWN FOLLOW-UP (bug #3 from Chunk 3 — see ESCALATION_LOG Step 10d):
+  // The escalation_loop creates a NEW escalation row per artifact (via
+  // getEscalationByArtifact on the new artifact_id after regen), which means
+  // the orchestrator's `consecSameRegens` / history context resets to 0 on
+  // each iteration. The orchestrator therefore can't self-detect that it's
+  // repeating the same action across iterations on the same SHOT. Track
+  // history by deliverable_id (or prior escalations via
+  // `predecessor_artifact_id`) in a follow-up pass. The Shot 2 and Shot 8
+  // L3-redesign loops in Runs 2 and 3 are the live evidence.
+  const initialArtifactMeta =
+    (params.artifact.metadata as Record<string, unknown> | undefined) ?? {};
+  let initialNarrativeContext =
+    (initialArtifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
+    null;
+  if (initialNarrativeContext === null && deliverable.id) {
+    try {
+      const { data: seedArts } = await supabase
+        .from("artifacts")
+        .select("metadata")
+        .eq("deliverable_id", deliverable.id)
+        .eq("type", "video")
+        .order("created_at", { ascending: true });
+      for (const a of seedArts ?? []) {
+        const nc = (a.metadata as any)?.narrative_context;
+        if (nc) {
+          initialNarrativeContext = nc;
+          await emitLog(run.runId, stageId, "info",
+            `narrative_context fallback: pulled from seeded artifact for deliverable ${deliverable.id.slice(0, 8)}…`);
+          break;
+        }
+      }
+    } catch (e) {
+      await emitLog(run.runId, stageId, "warn",
+        `narrative_context fallback lookup failed for deliverable ${deliverable.id.slice(0, 8)}: ${(e as Error).message}`);
+    }
+  }
+  const campaignGuardrails =
+    (campaign?.guardrails as Record<string, unknown> | null | undefined) ?? null;
+  const musicVideoContext =
+    (campaignGuardrails?.music_video_context as
+      | { synopsis?: string }
+      | null
+      | undefined) ?? null;
+  const musicVideoSynopsis = musicVideoContext?.synopsis ?? null;
+
   for (let loop = 0; loop < ESCALATION_LOOP_MAX; loop++) {
     // 1. Grade the current video
     await emitLog(run.runId, stageId, "info", `Grading video artifact ${currentArtifact.id} (loop ${loop + 1}/${ESCALATION_LOOP_MAX})`);
@@ -1160,24 +1219,15 @@ async function gradeAndEscalateVideo(params: {
       (currentArtifact.metadata?.localPath as string | undefined) ??
       currentArtifact.path;
 
-    // Chunk 1: thread narrative_context + music_video_synopsis into the critic
-    // call when present. NarrativeContext lives on artifact.metadata and
-    // MusicVideoContext lives on campaign.guardrails — see
-    // os-api/scripts/ingest-drift-mv-narrative.ts. Non-MV campaigns fall
-    // through with both as null and critic uses baseline prompts.
-    const artifactMeta =
+    // Prefer current artifact's narrative_context if present (supports the
+    // forward-copy path from Phase 1.3 for pre-existing regens), else fall
+    // back to the initial-artifact capture above so iterations 2+ keep the
+    // envelope even when mid-loop regens produce context-less artifacts.
+    const currentArtifactMeta =
       (currentArtifact.metadata as Record<string, unknown> | undefined) ?? {};
     const narrativeContext =
-      (artifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
-      null;
-    const campaignGuardrails =
-      (campaign?.guardrails as Record<string, unknown> | null | undefined) ?? null;
-    const musicVideoContext =
-      (campaignGuardrails?.music_video_context as
-        | { synopsis?: string }
-        | null
-        | undefined) ?? null;
-    const musicVideoSynopsis = musicVideoContext?.synopsis ?? null;
+      (currentArtifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
+      initialNarrativeContext;
 
     const gradeResult = await callBrandEngine<VideoGradeResult>(
       "/grade_video",
@@ -1420,7 +1470,13 @@ export async function runVideoQAWithEscalation(params: {
  * the happy path: a rejected deliverable gets its new-prompt regen graded).
  */
 export function _shouldSkipDeliverable(d: CampaignDeliverable): boolean {
-  return d.status === "approved";
+  // Skip terminal / already-HITL deliverables so the regrade doesn't burn
+  // budget re-processing them. `approved` = done. `reviewing` = already in a
+  // human review queue; the runner shouldn't auto-regenerate around that.
+  // Added `reviewing` during Chunk 3 Run 2 diagnosis (2026-04-22) — without
+  // it, shots flagged HITL by a prior regrade re-enter the loop and, when the
+  // shot truly can't pass the critic, burn Veo regens indefinitely.
+  return d.status === "approved" || d.status === "reviewing";
 }
 
 /**
