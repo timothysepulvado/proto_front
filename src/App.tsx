@@ -22,6 +22,8 @@ import type { HudRoot } from "./types/hud";
 import noiseTexture from "./assets/noise.svg";
 import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
+import ShotDetailDrawer from "./components/ShotDetailDrawer";
+import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
 import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
@@ -35,6 +37,7 @@ import {
   subscribeToClients,
   getPendingReviewRuns,
   getPendingReviewCount,
+  getClientRuns,
   type Run,
   type RunLog,
   type RunMode,
@@ -282,6 +285,7 @@ export default function App() {
 
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
+  const [selectedShot, setSelectedShot] = useState<{ n: number | null; id: string | null }>({ n: null, id: null });
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
@@ -325,6 +329,32 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (!activeClient) return;
+    let cancelled = false;
+
+    async function hydrateCampaignRun() {
+      try {
+        const runs = await getClientRuns(activeClient);
+        if (cancelled) return;
+        const latestCampaignRun = runs.find((run) => run.campaignId);
+        setCurrentRun((previous) => {
+          if (previous?.clientId === activeClient && previous.campaignId) {
+            return previous;
+          }
+          return latestCampaignRun ?? previous;
+        });
+      } catch {
+        // Non-critical — creative view can still operate without a hydrated run.
+      }
+    }
+
+    void hydrateCampaignRun();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeClient]);
 
   // Fetch pending HITL reviews for the active client + global count
   useEffect(() => {
@@ -427,6 +457,22 @@ export default function App() {
     }, 3000);
     return () => window.clearInterval(interval);
   }, [isExpanded, activeClient, isRunning]);
+
+  useEffect(() => {
+    setSelectedShot({ n: null, id: null });
+  }, [currentRun?.runId]);
+
+  useEffect(() => {
+    let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.type = "image/svg+xml";
+    link.href =
+      "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0b0f'/%3E%3Cpath d='M18 32h28' stroke='%2322d3ee' stroke-width='6' stroke-linecap='round'/%3E%3Cpath d='M24 20v24' stroke='%2322d3ee' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E";
+  }, []);
 
   // Cleanup SSE subscription on unmount
   useEffect(() => {
@@ -741,6 +787,21 @@ export default function App() {
           </div>
 
           <main className="flex-1 p-6 md:p-10 flex flex-col items-start justify-start relative overflow-y-auto min-h-0">
+            {currentRun?.runId && (
+              <div className="pointer-events-auto absolute right-6 top-6 z-30">
+                <WatcherSignalsPanel
+                  runId={currentRun.runId}
+                  runStatus={currentRun.status}
+                  onCancelled={() => {
+                    setIsRunning(false);
+                    setCurrentStage(null);
+                    setCurrentRun((previous) => (
+                      previous ? { ...previous, status: "cancelled" } : previous
+                    ));
+                  }}
+                />
+              </div>
+            )}
             <div className="absolute inset-0 pointer-events-none opacity-20 flex items-center justify-center overflow-hidden">
               <div className="w-[800px] h-[800px] border border-cyan-500/10 rounded-full absolute animate-[ping_10s_linear_infinite]" />
               <div className="w-[1200px] h-[1200px] border border-cyan-500/5 rounded-full absolute" />
@@ -836,9 +897,13 @@ export default function App() {
                     </p>
                   ) : activePillar === "creative" && activeClient ? (
                     <>
-                      <PromptEvolutionPanel clientId={activeClient} />
+                      {!currentRun?.campaignId && <PromptEvolutionPanel clientId={activeClient} />}
                       {currentRun?.campaignId && (
-                        <DeliverableTracker campaignId={currentRun.campaignId} />
+                        <DeliverableTracker
+                          campaignId={currentRun.campaignId}
+                          runId={currentRun.runId}
+                          onShotClick={(n, id) => setSelectedShot({ n, id })}
+                        />
                       )}
                     </>
                   ) : activePillar === "creative" ? (
@@ -1050,6 +1115,13 @@ export default function App() {
           <OverlayEffects />
         </aside>
       </div>
+
+      <ShotDetailDrawer
+        shotNumber={selectedShot.n}
+        deliverableId={selectedShot.id}
+        runId={currentRun?.runId}
+        onClose={() => setSelectedShot({ n: null, id: null })}
+      />
 
       {showReviewPanel && currentRun && currentClient && (
         <ReviewPanel

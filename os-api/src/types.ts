@@ -538,6 +538,45 @@ export interface OrchestratorCallResult {
   webSearchCount?: number;
 }
 
+// ─── Chunk 2: Shot-level observability summary ──────────────────────────
+// Surfaced by GET /api/campaigns/:campaignId/shot-summaries. One row per
+// deliverable on a campaign, joined in-code from campaign_deliverables +
+// latest artifact (for narrative_context + artifact count) + asset_escalations
+// (for current level + status) + orchestration_decisions (for cumulative cost
+// + call count + last verdict/score). When optional `runId` filter is passed,
+// artifacts/escalations/decisions are narrowed to that run so the HUD can
+// show "this-run" metrics during a live regrade without cross-run pollution.
+//
+// Nullables represent "no data yet" rather than "unknown" — e.g.
+// `lastVerdict` is null for shots that passed without any escalation (no
+// orchestration_decisions recorded, so there's no persisted qa_verdict).
+export interface ShotSummary {
+  deliverableId: string;
+  /** From latest artifact.metadata.narrative_context.shot_number (1-30 for Drift MV). */
+  shotNumber: number | null;
+  /** From latest artifact.metadata.narrative_context.beat_name. */
+  beatName: BeatName | null;
+  status: DeliverableStatus;
+  retryCount: number;
+  /** Latest asset_escalation.current_level if any escalation exists. */
+  escalationLevel: EscalationLevel | null;
+  /** Latest asset_escalation.status. */
+  escalationStatus: EscalationStatus | null;
+  /** Latest asset_escalation.id — used by drawer to fetch full decision list. */
+  latestEscalationId: string | null;
+  /** Sum of orchestration_decisions.cost for this deliverable's escalations. */
+  cumulativeCost: number;
+  /** Count of orchestration_decisions across this deliverable's escalations. */
+  orchestratorCallCount: number;
+  /** From latest orchestration_decisions.input_context.qa_verdict.verdict. */
+  lastVerdict: "PASS" | "WARN" | "FAIL" | null;
+  /** From latest orchestration_decisions.input_context.qa_verdict.aggregate_score. */
+  lastScore: number | null;
+  /** Count of artifacts tied to this deliverable (optionally narrowed to runId). */
+  artifactCount: number;
+  latestArtifactId: string | null;
+}
+
 // ─── Run-level escalation report (Final HITL) ────────────────────────────
 export interface DeliverableEscalationTrail {
   deliverable: CampaignDeliverable;

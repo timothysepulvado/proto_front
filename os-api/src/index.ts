@@ -48,6 +48,7 @@ import {
   listEscalationsByRun,
   getOrchestrationDecisions,
   getOrchestrationDecisionsByRun,
+  getShotSummaries,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
@@ -709,6 +710,28 @@ app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Res
     res.json(deliverables);
   } catch (err) {
     console.error("GET /api/campaigns/:campaignId/deliverables error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/shot-summaries - Shot-level observability
+//
+// Chunk 2 (HUD observability MVP) — aggregates campaign_deliverables +
+// latest artifact.metadata.narrative_context + asset_escalations +
+// orchestration_decisions into one row per deliverable so the HUD's
+// DeliverableTracker can render shot numbers, L-badges, cost badges, and
+// verdict state without 4 round-trips per card.
+//
+// Optional ?run_id=<uuid> filter narrows artifacts / escalations / decisions
+// to that run so a live regrade's metrics don't bleed across prior runs.
+app.get("/api/campaigns/:campaignId/shot-summaries", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const runId = typeof req.query.run_id === "string" ? req.query.run_id : undefined;
+    const summaries = await getShotSummaries(campaignId, runId);
+    res.json(summaries);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/shot-summaries error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

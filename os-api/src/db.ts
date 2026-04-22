@@ -6,6 +6,7 @@ import type {
   KnownLimitation, KnownLimitationSeverity,
   AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
   OrchestrationDecisionRecord, PromptHistoryEntry,
+  BeatName, ShotSummary,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
@@ -1584,6 +1585,192 @@ export async function getOrchestrationDecisionsByRun(runId: string): Promise<Orc
     .order("created_at", { ascending: true });
   if (error) throw new Error(`Failed to get run orchestration decisions: ${error.message}`);
   return (data as DbOrchestrationDecision[]).map(mapOrchestrationDecision);
+}
+
+// ── Shot summaries (Chunk 2 — HUD observability) ────────────────────────
+//
+// Aggregates campaign_deliverables + artifacts.metadata.narrative_context +
+// asset_escalations + orchestration_decisions into one row per deliverable so
+// the HUD's DeliverableTracker can render L-badges, cost badges, and verdicts
+// without 4 separate round-trips per card.
+//
+// Rationale:
+// - Supabase PostgREST can't join cross-table in one call without a view;
+//   creating a view is out of scope for Chunk 2 (no migrations).
+// - The dataset is bounded (≤30 deliverables for Drift MV today; similar
+//   magnitude for other music-video campaigns) — four parallel fetches +
+//   in-memory stitching is comfortably fast and avoids N+1 round-trips.
+// - Per-run filtering is optional. When `runId` is passed, artifacts /
+//   escalations / decisions are narrowed so the HUD reflects the active
+//   regrade without cross-run pollution; otherwise the summary reflects
+//   all-time state for the deliverable.
+//
+// Returned rows are sorted by shotNumber asc (nulls last) so the tracker can
+// render shots in narrative order without extra work on the consumer side.
+
+export async function getShotSummaries(
+  campaignId: string,
+  runId?: string,
+): Promise<ShotSummary[]> {
+  // 1. Deliverables for this campaign.
+  const deliverables = await getDeliverablesByCampaign(campaignId);
+  if (deliverables.length === 0) return [];
+  const deliverableIds = deliverables.map((d) => d.id);
+
+  // 2. Artifacts (optionally narrowed to runId). Sorted DESC so the first row
+  //    per deliverable is "latest".
+  let artifactsQuery = supabase
+    .from("artifacts")
+    .select("*")
+    .in("deliverable_id", deliverableIds)
+    .order("created_at", { ascending: false });
+  if (runId) artifactsQuery = artifactsQuery.eq("run_id", runId);
+  const { data: artifactRows, error: artifactsErr } = await artifactsQuery;
+  if (artifactsErr) {
+    throw new Error(`getShotSummaries: artifacts fetch failed: ${artifactsErr.message}`);
+  }
+  const artifacts = (artifactRows as DbArtifact[] | null ?? []).map(mapDbArtifactToArtifact);
+
+  // 3. Escalations (optionally narrowed to runId). Sorted DESC so first per
+  //    deliverable is the latest.
+  let escalationsQuery = supabase
+    .from("asset_escalations")
+    .select("*")
+    .in("deliverable_id", deliverableIds)
+    .order("updated_at", { ascending: false });
+  if (runId) escalationsQuery = escalationsQuery.eq("run_id", runId);
+  const { data: escalationRows, error: escalationsErr } = await escalationsQuery;
+  if (escalationsErr) {
+    throw new Error(`getShotSummaries: escalations fetch failed: ${escalationsErr.message}`);
+  }
+  const escalations = (escalationRows as DbAssetEscalation[] | null ?? []).map(mapAssetEscalation);
+  const escalationIds = escalations.map((e) => e.id);
+
+  // 4. Orchestration decisions for those escalations. Sorted ASC so iteration
+  //    ordering is natural and "latest" = last element.
+  let decisions: OrchestrationDecisionRecord[] = [];
+  if (escalationIds.length > 0) {
+    const { data: decisionRows, error: decisionsErr } = await supabase
+      .from("orchestration_decisions")
+      .select("*")
+      .in("escalation_id", escalationIds)
+      .order("iteration", { ascending: true });
+    if (decisionsErr) {
+      throw new Error(`getShotSummaries: decisions fetch failed: ${decisionsErr.message}`);
+    }
+    decisions = (decisionRows as DbOrchestrationDecision[] | null ?? []).map(mapOrchestrationDecision);
+  }
+
+  // 5. Stitch per deliverable.
+  const byDelArtifacts = new Map<string, Artifact[]>();
+  for (const a of artifacts) {
+    if (!a.deliverableId) continue;
+    const list = byDelArtifacts.get(a.deliverableId) ?? [];
+    list.push(a);
+    byDelArtifacts.set(a.deliverableId, list);
+  }
+
+  const byDelEscalations = new Map<string, AssetEscalation[]>();
+  for (const e of escalations) {
+    if (!e.deliverableId) continue;
+    const list = byDelEscalations.get(e.deliverableId) ?? [];
+    list.push(e);
+    byDelEscalations.set(e.deliverableId, list);
+  }
+
+  const byEscalationDecisions = new Map<string, OrchestrationDecisionRecord[]>();
+  for (const d of decisions) {
+    const list = byEscalationDecisions.get(d.escalationId) ?? [];
+    list.push(d);
+    byEscalationDecisions.set(d.escalationId, list);
+  }
+
+  const summaries: ShotSummary[] = deliverables.map((deliverable) => {
+    const delArtifacts = byDelArtifacts.get(deliverable.id) ?? [];
+    const delEscalations = byDelEscalations.get(deliverable.id) ?? [];
+
+    // Find the latest artifact with a narrative_context envelope (seeded
+    // shots have this; runner-created regens may not). Fall back to the
+    // newest artifact of any shape for latestArtifactId / artifactCount.
+    const latestWithNarrative = delArtifacts.find((a) => {
+      const nc = (a.metadata ?? {}) as Record<string, unknown>;
+      return nc["narrative_context"] !== undefined;
+    });
+    const nc = (latestWithNarrative?.metadata?.["narrative_context"] ?? null) as
+      | { shot_number?: unknown; beat_name?: unknown }
+      | null;
+    const shotNumber =
+      typeof nc?.shot_number === "number" ? (nc.shot_number as number) : null;
+    const beatName =
+      typeof nc?.beat_name === "string" ? (nc.beat_name as BeatName) : null;
+
+    // Latest escalation (if any) + decision roll-up across all escalations on
+    // this deliverable (surfaces total cost even when the run ran multiple
+    // escalations for the same shot).
+    const latestEscalation = delEscalations[0] ?? null;
+    let cumulativeCost = 0;
+    let orchestratorCallCount = 0;
+    let latestDecision: OrchestrationDecisionRecord | null = null;
+    for (const esc of delEscalations) {
+      const escDecisions = byEscalationDecisions.get(esc.id) ?? [];
+      for (const d of escDecisions) {
+        cumulativeCost += d.cost ?? 0;
+        orchestratorCallCount += 1;
+        if (
+          !latestDecision ||
+          new Date(d.createdAt).getTime() > new Date(latestDecision.createdAt).getTime()
+        ) {
+          latestDecision = d;
+        }
+      }
+    }
+
+    // Pull last verdict from the most-recent decision's input_context. Guard
+    // against schema drift — input_context is JSONB so we coerce defensively.
+    let lastVerdict: "PASS" | "WARN" | "FAIL" | null = null;
+    let lastScore: number | null = null;
+    if (latestDecision) {
+      const ic = latestDecision.inputContext as Record<string, unknown> | null;
+      const qa = (ic?.["qa_verdict"] ?? null) as Record<string, unknown> | null;
+      const verdictCandidate = qa?.["verdict"];
+      if (verdictCandidate === "PASS" || verdictCandidate === "WARN" || verdictCandidate === "FAIL") {
+        lastVerdict = verdictCandidate;
+      }
+      const scoreCandidate = qa?.["aggregate_score"];
+      if (typeof scoreCandidate === "number" && Number.isFinite(scoreCandidate)) {
+        lastScore = scoreCandidate;
+      }
+    }
+
+    return {
+      deliverableId: deliverable.id,
+      shotNumber,
+      beatName,
+      status: deliverable.status,
+      retryCount: deliverable.retryCount,
+      escalationLevel: latestEscalation?.currentLevel ?? null,
+      escalationStatus: latestEscalation?.status ?? null,
+      latestEscalationId: latestEscalation?.id ?? null,
+      cumulativeCost,
+      orchestratorCallCount,
+      lastVerdict,
+      lastScore,
+      artifactCount: delArtifacts.length,
+      latestArtifactId: delArtifacts[0]?.id ?? null,
+    };
+  });
+
+  // Sort: shotNumber ascending, nulls last (unseeded / runner-regen rows
+  // without narrative_context sink to the bottom so the timeline visualizes
+  // cleanly even in partial-seed scenarios).
+  summaries.sort((a, b) => {
+    if (a.shotNumber === b.shotNumber) return a.deliverableId.localeCompare(b.deliverableId);
+    if (a.shotNumber === null) return 1;
+    if (b.shotNumber === null) return -1;
+    return a.shotNumber - b.shotNumber;
+  });
+
+  return summaries;
 }
 
 // ── Prompt history helper (for orchestrator input assembly) ────────────────

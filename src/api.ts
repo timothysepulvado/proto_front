@@ -1346,3 +1346,131 @@ export function subscribeToCampaignDeliverables(
     supabase.removeChannel(channel);
   };
 }
+
+// ============ Shot Summaries (Chunk 2 — HUD observability) ============
+
+export type EscalationLevel = "L1" | "L2" | "L3";
+export type EscalationStatus =
+  | "in_progress"
+  | "resolved"
+  | "accepted"
+  | "redesigned"
+  | "replaced"
+  | "hitl_required";
+export type BeatName =
+  | "intro"
+  | "hook_1"
+  | "verse_1"
+  | "hook_2"
+  | "verse_2"
+  | "bridge"
+  | "hook_3"
+  | "final_hook"
+  | "outro";
+
+/**
+ * Per-shot observability row returned by
+ * `GET /api/campaigns/:campaignId/shot-summaries`. Drives the
+ * DeliverableTracker's L-badges, cost badges, and click-to-drawer wiring.
+ *
+ * Fields are nullable where the underlying data hasn't been produced yet —
+ * e.g. `lastVerdict`/`lastScore` are null for shots that passed without any
+ * escalation (there's no persisted qa_verdict on pass-through).
+ */
+export interface ShotSummary {
+  deliverableId: string;
+  shotNumber: number | null;
+  beatName: BeatName | null;
+  status: DeliverableStatus;
+  retryCount: number;
+  escalationLevel: EscalationLevel | null;
+  escalationStatus: EscalationStatus | null;
+  latestEscalationId: string | null;
+  cumulativeCost: number;
+  orchestratorCallCount: number;
+  lastVerdict: "PASS" | "WARN" | "FAIL" | null;
+  lastScore: number | null;
+  artifactCount: number;
+  latestArtifactId: string | null;
+}
+
+/**
+ * Fetch shot summaries for a campaign. Optional `runId` narrows
+ * artifacts / escalations / decisions to a single run so a live regrade's
+ * metrics don't bleed across prior runs.
+ */
+export async function getShotSummaries(
+  campaignId: string,
+  runId?: string,
+): Promise<ShotSummary[]> {
+  const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  const resp = await fetch(
+    `${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`,
+  );
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(body.error || `HTTP ${resp.status}`);
+  }
+  return (await resp.json()) as ShotSummary[];
+}
+
+/**
+ * Realtime bridge so the tracker can re-fetch shot summaries whenever an
+ * orchestration_decisions row is INSERTed. Optional `runId` filter narrows
+ * the subscription to events for a single run.
+ */
+export function subscribeToOrchestrationDecisions(
+  runId: string,
+  onInsert: () => void,
+): () => void {
+  const channel = supabase
+    .channel(`orchestration_decisions:${runId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "orchestration_decisions",
+        filter: `run_id=eq.${runId}`,
+      },
+      () => {
+        onInsert();
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+/**
+ * Realtime bridge for new artifacts. Used by the tracker to increment
+ * per-shot artifact counts live without a full summary refetch.
+ */
+export function subscribeToArtifacts(
+  runId: string,
+  onInsert: (artifact: Artifact) => void,
+): () => void {
+  const channel = supabase
+    .channel(`artifacts:${runId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "artifacts",
+        filter: `run_id=eq.${runId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onInsert(mapDbArtifactToArtifact(payload.new as DbArtifact));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
