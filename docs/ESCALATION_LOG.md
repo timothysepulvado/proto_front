@@ -533,6 +533,91 @@ Step 10d remains **partially open** — pipeline PROVEN wired, not yet PROVEN au
 
 ---
 
+## Step 10d Chunk 3 LANDED (2026-04-23) — bug #3 fix + Path C threshold + Path B allowances
+
+**Supersedes:** the PARTIAL close above. That section stays as archaeology.
+
+**Plan file:** `~/.claude/plans/fresh-context-today-is-glowing-harp.md` (approved 2026-04-23).
+
+**Commits:** TBD (this close-out batch).
+
+### What shipped
+
+**Phase 1 — Bug #3 fix (cross-artifact escalation history aggregation):**
+- `os-api/src/db.ts` — two new helpers:
+  - `getLatestOpenEscalationForDeliverableInRun(deliverableId, runId)` — most-recent `status='in_progress'` escalation for the (deliverable, run) pair. Used to inherit `currentLevel` + `iterationCount` when a regen produces a new artifact.
+  - `getOrchestrationDecisionsForDeliverableInRun(deliverableId, runId)` — JOIN across all escalation rows on the (deliverable, run) pair, ordered by `created_at`. Returns the full decision history across artifact boundaries.
+  - `getEscalationByArtifact(artifactId, runId?)` — added optional `runId` filter. Prevents stale escalations from prior runs (Session B bug #1 + cancelled-mid-flight runs) from short-circuiting new runs. Callers that want the cross-run latest (HUD, audit) omit `runId`; the escalation loop passes it.
+- `os-api/src/escalation_loop.ts` — three edits:
+  - ~L128: when `getEscalationByArtifact(id, runId)` returns null on a regen artifact, look up the predecessor on the same `(deliverable, run)` and inherit its `currentLevel` + `iterationCount`. `_maybePromoteLevel` now sees true history → promotes to hitl_required correctly after L3×2.
+  - ~L163: replaced per-escalation `getOrchestrationDecisions` with aggregated `getOrchestrationDecisionsForDeliverableInRun`. `_sumCost` / `_collectLevels` / `_countConsecutiveSamePromptRegens` now see full deliverable+run history. Rule 2 self-detection works across artifact boundaries.
+  - Exported `_sumCost` + `_collectLevels` for unit test assertability.
+- **NEW** `os-api/tests/_10d-escalation-history.ts` (9/9 green) — pure in-memory assertions covering single-escalation baselines + multi-escalation aggregation + 3-deep identical-prompt loop across 3 escalations.
+
+**Phase 2A — Path C: per-production QA threshold knob (orchestrator prompt LOCKED):**
+- `os-api/src/types.ts` — added `QAThreshold` interface (`pass_threshold` / `accept_threshold`), stored at `campaigns.guardrails.qa_threshold` JSONB, opt-in per campaign.
+- `os-api/src/escalation_loop.ts` — added `_extractQAThreshold(campaign)` + `_maybeBorderlineAccept(verdict, threshold, catalog)`. When score is in band `[accept_threshold, pass_threshold)` AND no detected failure class has `severity=blocking`, short-circuits to a rule-based L3 `accept` decision with `model="rule-based"`, `cost=0`, `confidence=1.0`, `action=accept`. Orchestration_decisions row recorded for audit. Critic + orchestrator prompts remain byte-identical (Chunk 1 lock held).
+- `os-api/scripts/set-qa-threshold.ts` — one-shot idempotent setter. Executed 2026-04-23 on campaign `42f62a1d-…` with `{pass_threshold: 3.0, accept_threshold: 2.5}`. `music_video_context` + all other guardrail keys preserved.
+- **NEW** `os-api/tests/_10d-qa-threshold.ts` (22/22 green) — 5 primary scenarios (above-pass / borderline-no-blocking / borderline-with-blocking / below-accept / missing-threshold) + 4 boundary conditions + 4 failure-class semantics + 2 malformed-verdict guards.
+
+**Phase 2B — Path B: v5 stylization allowances for 24 non-stylized shots:**
+- Jackie (Gemini 3.1 Pro) authored 24 v5 entries in `~/Temp-gen/productions/drift-mv/qa_prompt_evolution.md` via delegated brief at `~/agent-vault/briefs/2026-04-23-drift-mv-v5-allowances.md`.
+- **Caveat (logged for follow-up):** Jackie operated via the text-based CLI and couldn't visually ingest the MP4 clips (workspace sandbox scoped the gemini session to `brand-engine/` only). Allowances were authored from `manifest.json` visual intent + reference tone (Romain Gavras / Matrix Revolutions / Man of Steel) rather than clip-watching. This means allowances are strictly scoped to INTENTIONAL stylization per the manifest — safe (no false widening of the rubric) but potentially conservative. Re-pass with clip-watching queued for a follow-up session.
+- Re-ingest with `FORCE=1` updated 36/48 video artifacts (manifest_sha256 unchanged — only qa_prompt_evolution.md content changed).
+- **Ingester hardened:** added fallback path that matches artifacts by `metadata.narrative_context.shot_number` when `metadata.shotNumber` is absent (Session B regen artifacts from 2026-04-21 lack the top-level field — they got narrative_context from the runner's bug #2 fix but never the top-level shotNumber). First ingest pass updated 30; second pass with fallback updated 36 (all Drift MV videos covered).
+- **Extended** `os-api/tests/_10d-narrative-ingest-probe.ts` with "ALL 30 shots have non-empty stylization_allowances" assertion; retired the pre-v5 "non-documented shots have EMPTY allowances" invariant.
+
+### Gate sweep (free) — all green
+
+- `10a-readiness` 17/17 · `10d-regrade-runner` 14/14 · `_10d-narrative-prompt-shape` 17/17
+- `_10d-narrative-ingest-probe` 19/19 (extended)
+- `_10d-escalation-history` 9/9 (NEW)
+- `_10d-qa-threshold` 22/22 (NEW)
+- `_10d-shot-summaries` 16/16
+- brand-engine pytest 36/36
+- `tsc --noEmit` clean on os-api + root
+- **Total: 150/150 + tsc clean**
+
+### Live verification
+
+**Run 1 (`44447f5d-…`, 2026-04-23 23:05 UTC): CANCELLED mid-flight** — diagnostic value. Graded shot 9 (artifact `88addad8`): WARN 4.2, detected `ignored_camera_trajectory_orbit_to_pushin`. Orchestrator L2 approach_change, $0.1528 cost. Run was killed via process-kill before Veo regen started (bug #4 cancelRun endpoint still doesn't track regrade runs — deferred). **Diagnostic finding: Session B regen artifacts (5 artifacts) lacked v5 allowances because ingester only matched on top-level `metadata.shotNumber`. Fixed the ingester + re-ingested before relaunch.**
+
+**Run 2 (`92aec59f-…`, 2026-04-23 23:14 UTC): LIVE PROOF of bug #3 fix.**
+- Shot 11 (first pending in iteration order):
+  - Iter 1 critic: FAIL score=2.3, failure=`scale_jump_excessive_zoom`. Score below `accept_threshold=2.5` — threshold correctly does NOT fire (Claude path).
+  - Iter 1 orchestrator input: `level=L1, attempts=0, cumCost=$0.0000, levels=[]` — fresh state (expected for first iter on new deliverable).
+  - Iter 1 orchestrator decision: L2 approach_change, confidence 0.78.
+  - Veo regen fires, produces artifact `dbdfdb87`.
+  - **"Inherited escalation state from predecessor ba177686-...: level=L2, iteration=1"** — bug #3 fix fires on the new regen artifact.
+  - Iter 2 critic (on regen): WARN score=3.9 (improved from 2.3 — L2 regen worked), detected `hand_object_interaction_morphing` + new candidate class.
+  - **Iter 2 orchestrator input: `level=L2, attempts=1, cumCost=$0.1493, levels=[L2]`** — aggregated priorDecisions across the (deliverable, run) pair. Pre-fix this would have shown zeros.
+  - Iter 2 orchestrator decision: **L3 accept**, confidence 0.72 — shot 11 converged. Deliverable → approved.
+- *(run still in flight as of writing; progress updates below)*
+
+### What LANDED Chunk 3 PROVES (net new over PARTIAL)
+
+- **Bug #3 fix works in production.** Iter 2 orchestrator input showed inherited `level=L2, attempts=1, cumCost=$0.1493, levels=[L2]` — the exact signal that was resetting to zeros pre-fix and blinding the orchestrator's Rule 2 self-detection.
+- **Shot-level convergence via inherited state.** Shot 11: L2 approach_change (iter 1) → Veo regen → L3 accept (iter 2 with inherited state). Exactly the pattern that couldn't converge during Chunk 3 PARTIAL's 3 runs.
+- **v5 allowances flow end-to-end.** `Narrative envelope present: shot N (beat), allowances=3` firing on per-shot orchestrator input. Allowances present on both seed + forwarded regen artifacts.
+- **bug #1 pattern closed at the code level.** `getEscalationByArtifact(artifactId, runId?)` with optional `runId` filter prevents stale escalations from bleeding across runs — verified live when run 92aec59f correctly ignored the in-progress escalation left by cancelled run 44447f5d.
+- **Ingester hardened for forwarded-narrative-context artifacts.** Session B's regen artifacts (created 2026-04-21) inherited `metadata.narrative_context` via bug #2 fix but lacked the top-level `metadata.shotNumber` — ingester fallback path catches them now.
+
+### Known limitations / follow-ups
+
+- **Residual bug #2 gap: orchestrator path lacks narrative_context fallback.** The runner's bug #2 fix captured `initialNarrativeContext` at the top of the escalation loop and forwards it to the `/grade_video` call — so the critic always sees narrative on iter 2+. But the orchestrator's narrativeContext is still extracted from the current artifact's metadata via `_extractNarrativeContext` in `escalation_loop.ts`. When the regen artifact lacks `metadata.narrative_context`, the orchestrator gets `narrativeContext=undefined` on iter 2+. Fix: `handleQAFailure` should accept a `narrativeContextOverride` param, or `runVideoQAWithEscalation` should write `narrative_context` into the new artifact's metadata at upload time. Not blocking — orchestrator falls back to baseline rubric, still makes reasonable decisions.
+- **Jackie v5 allowances are manifest-derived, not clip-watched.** Safe (no false widening) but potentially conservative. Clip-watched re-pass queued for next session where sandbox permits.
+- **Bug #4 (cancelRun doesn't track regrade runs) — deferred.** Workaround: process kill + cleanup one-shot script.
+- **Bug #5 (artifact-delete FK / RLS) — not encountered this session.** Still a known limitation.
+- **Bug #6 (10d-pre-cache-hit-probe 1s sleep occasionally fails first run) — not fixed this session.** Drive-by bump to 10s queued.
+- **Bug #7 (Temp-gen /generate/image 500) — Temp-gen repo concern, separate session.**
+- **Stuck escalations from cancelled runs** — run 44447f5d left one in_progress escalation. Mitigation: new runs with different runId don't inherit it via the `getEscalationByArtifact(runId)` filter; audit/HUD still show it. Clean-up one-shot queued.
+
+### Deliverable state
+
+*(Run 2 in flight — final state appended on close.)*
+
+---
+
 ## Maintenance
 
 - **Living DB:** query via `SELECT * FROM known_limitations ORDER BY times_encountered DESC;`

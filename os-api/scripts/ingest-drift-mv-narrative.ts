@@ -332,11 +332,26 @@ async function main(): Promise<void> {
 
   console.log(`  artifacts:    ${artifacts.length} video rows found`);
 
-  // 8. Group artifacts by shotNumber (metadata.shotNumber from seed)
+  // 8. Group artifacts by shotNumber. Prefer top-level `metadata.shotNumber`
+  // (set by seed-drift-mv.ts), fall back to `metadata.narrative_context.shot_number`
+  // (set by runner.ts bug #2 fix when forwarding narrative context through
+  // regen artifacts — those regens don't get top-level shotNumber). This
+  // ensures re-ingest updates ALL artifacts on a deliverable, including
+  // forwarded regen artifacts, so v5 allowance updates reach the artifact
+  // the runner actually grades (getLatestArtifactByDeliverable picks most-
+  // recent, which is often a regen from a prior session).
   const artifactsByShot: Record<number, typeof artifacts> = {};
   for (const a of artifacts) {
     const meta = (a.metadata as Record<string, unknown> | null) ?? {};
-    const shotNum = typeof meta.shotNumber === "number" ? meta.shotNumber : null;
+    let shotNum = typeof meta.shotNumber === "number" ? meta.shotNumber : null;
+    if (shotNum === null) {
+      const nc = meta.narrative_context as
+        | { shot_number?: number }
+        | undefined;
+      if (nc && typeof nc.shot_number === "number") {
+        shotNum = nc.shot_number;
+      }
+    }
     if (shotNum === null) continue;
     if (!artifactsByShot[shotNum]) artifactsByShot[shotNum] = [];
     artifactsByShot[shotNum].push(a);

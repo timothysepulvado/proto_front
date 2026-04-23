@@ -1389,11 +1389,25 @@ export async function incrementLimitationCounter(id: string): Promise<void> {
 
 // ── asset_escalations CRUD ─────────────────────────────────────────────────
 
-export async function getEscalationByArtifact(artifactId: string): Promise<AssetEscalation | null> {
-  const { data, error } = await supabase
+export async function getEscalationByArtifact(
+  artifactId: string,
+  runId?: string,
+): Promise<AssetEscalation | null> {
+  // Optional runId narrows the lookup to the current run. Without it, this
+  // returned the latest escalation row for the artifact across ALL runs —
+  // which surfaced bug #1 in Chunk 3 (Session B escalations bled into new
+  // runs) and again in the 2026-04-23 smoke (a cancelled-mid-flight run
+  // left an in_progress L2 escalation on an artifact; the NEXT regrade
+  // picked it up as "existing" and would have short-circuited). Callers
+  // that care about the "did THIS RUN already start an escalation on this
+  // artifact?" question should pass runId. Callers that just need the most
+  // recent escalation (e.g., audit / HUD) can omit it.
+  let q = supabase
     .from("asset_escalations")
     .select("*")
-    .eq("artifact_id", artifactId)
+    .eq("artifact_id", artifactId);
+  if (runId) q = q.eq("run_id", runId);
+  const { data, error } = await q
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -1575,6 +1589,81 @@ export async function getOrchestrationDecisions(escalationId: string): Promise<O
     .order("iteration", { ascending: true });
   if (error) throw new Error(`Failed to get orchestration decisions: ${error.message}`);
   return (data as DbOrchestrationDecision[]).map(mapOrchestrationDecision);
+}
+
+/**
+ * Aggregate orchestration_decisions across ALL escalation rows for a given
+ * (deliverable, run) pair, ordered by created_at ascending.
+ *
+ * Context (bug #3 fix, 2026-04-23): `escalation_loop.ts` creates a new
+ * `asset_escalations` row whenever `getEscalationByArtifact(artifact.id)` comes
+ * back null — which happens on every regen artifact, because the new artifact
+ * has no prior escalation row. Before the fix, the orchestrator's Rule 2
+ * self-detection (`consecSameRegens`, `cumulativeCost`, `levelsUsed`) queried
+ * by `escalation_id`, so aggregated signals reset to zero on every iteration.
+ *
+ * This helper lets the escalation loop pull history across ALL predecessor
+ * escalations on the same `(deliverable, run)` — so Rule 2 sees the full
+ * per-shot-per-run decision trail and can detect genuine repetition.
+ *
+ * Two-step fetch (escalation ids → decisions) because Supabase PostgREST
+ * doesn't let us filter JOINs cleanly without a view.
+ */
+export async function getOrchestrationDecisionsForDeliverableInRun(
+  deliverableId: string,
+  runId: string,
+): Promise<OrchestrationDecisionRecord[]> {
+  // 1. Collect escalation ids for this (deliverable, run) pair.
+  const { data: escRows, error: escErr } = await supabase
+    .from("asset_escalations")
+    .select("id")
+    .eq("deliverable_id", deliverableId)
+    .eq("run_id", runId);
+  if (escErr) throw new Error(`Failed to list escalations for deliverable+run: ${escErr.message}`);
+  const escalationIds = (escRows ?? []).map((r: { id: string }) => r.id);
+  if (escalationIds.length === 0) return [];
+
+  // 2. Pull all decisions across those escalations, ordered chronologically.
+  const { data, error } = await supabase
+    .from("orchestration_decisions")
+    .select("*")
+    .in("escalation_id", escalationIds)
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`Failed to get aggregated orchestration decisions: ${error.message}`);
+  return (data as DbOrchestrationDecision[]).map(mapOrchestrationDecision);
+}
+
+/**
+ * Latest non-terminal `asset_escalations` row for a given (deliverable, run)
+ * pair. Used by escalation_loop.ts to inherit `currentLevel` + `iterationCount`
+ * when a regen produces a new artifact (bug #3 fix, 2026-04-23).
+ *
+ * "Non-terminal" = status === "in_progress". Terminal statuses
+ * (resolved/accepted/redesigned/replaced/hitl_required) are excluded — we only
+ * want to inherit from an open predecessor, not resurrect a closed one.
+ *
+ * Returns null when no predecessor exists (e.g., first artifact of a run, or
+ * deliverables with no prior escalations).
+ */
+export async function getLatestOpenEscalationForDeliverableInRun(
+  deliverableId: string,
+  runId: string,
+): Promise<AssetEscalation | null> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .eq("deliverable_id", deliverableId)
+    .eq("run_id", runId)
+    .eq("status", "in_progress")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    throw new Error(
+      `Failed to get latest open escalation for deliverable+run: ${error.message}`,
+    );
+  }
+  return data ? mapAssetEscalation(data as DbAssetEscalation) : null;
 }
 
 export async function getOrchestrationDecisionsByRun(runId: string): Promise<OrchestrationDecisionRecord[]> {

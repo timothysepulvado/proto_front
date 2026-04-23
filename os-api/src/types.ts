@@ -425,6 +425,43 @@ export interface MusicVideoContext {
   manifest_sha256: string;
 }
 
+/**
+ * Per-production QA threshold knob (Chunk 3 follow-up, 2026-04-23 — "Path C"
+ * in plan `fresh-context-today-is-glowing-harp.md`).
+ *
+ * Stored on `campaigns.guardrails.qa_threshold` (JSONB, opt-in per campaign —
+ * when absent, no short-circuit fires and the orchestrator makes every
+ * decision via Claude as before).
+ *
+ * Semantics (interpreted in `escalation_loop.ts::_maybeBorderlineAccept`):
+ *   - `aggregate_score >= pass_threshold` → the critic already said PASS,
+ *     never reaches the escalation loop (existing behavior).
+ *   - `pass_threshold > aggregate_score >= accept_threshold` AND no detected
+ *     failure class has `severity=blocking` in the known_limitations catalog
+ *     → short-circuit to a rule-based L3 `accept` decision (no Claude call).
+ *   - `aggregate_score < accept_threshold` → fall through to the Claude-backed
+ *     orchestrator decision path (existing L1/L2/L3 behavior).
+ *   - Any blocking failure class on ANY score → fall through to Claude.
+ *
+ * Rationale: non-stylized Drift MV production videos score 1.3–1.8 on the
+ * narrative-aware critic but were manually accepted in 2026-03 Phase-2 QA.
+ * The threshold knob lets a per-production setting flip borderline FAILs to
+ * accept, while still honoring blocking failure classes and strict scores.
+ *
+ * The critic prompt + orchestrator prompt remain BYTE-IDENTICAL regardless of
+ * whether the threshold is set (Chunk 1 lock held).
+ */
+export interface QAThreshold {
+  /** Score at/above which the critic already says PASS (default rubric: 3.0). */
+  pass_threshold: number;
+  /**
+   * Minimum score (inclusive) at which a non-blocking borderline FAIL/WARN
+   * can auto-accept via L3 rule-based short-circuit. Below this → Claude
+   * still decides (existing L1/L2/L3).
+   */
+  accept_threshold: number;
+}
+
 // ─── Orchestrator (Claude Opus 4.7) input/output contract ────────────────
 export interface PromptHistoryEntry {
   iteration: number;
@@ -495,6 +532,13 @@ export interface OrchestratorInput {
    * prefix gets the music-video context appended once per campaign.
    */
   musicVideoContext?: MusicVideoContext;
+  // Note: `qa_threshold` (campaign.guardrails.qa_threshold) is READ by
+  // escalation_loop.ts::_maybeBorderlineAccept to short-circuit borderline
+  // non-blocking scores BEFORE the orchestrator is called. It is NOT passed
+  // into this OrchestratorInput — the short-circuit intercepts ahead of
+  // `decideEscalation`, so when the Claude path IS invoked, the threshold has
+  // already been evaluated and ruled inapplicable. Keeping the orchestrator
+  // prompt byte-identical whether or not a threshold is configured.
 }
 
 export interface OrchestratorDecision {

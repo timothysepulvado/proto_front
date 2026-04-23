@@ -22,6 +22,7 @@ import { decideEscalation } from "./orchestrator.js";
 import {
   createEscalation,
   getEscalationByArtifact,
+  getLatestOpenEscalationForDeliverableInRun,
   updateEscalation,
   resolveEscalation,
   recordOrchestrationDecision,
@@ -32,7 +33,7 @@ import {
   getPromptHistoryForDeliverable,
   getDeliverable,
   getCampaign,
-  getOrchestrationDecisions,
+  getOrchestrationDecisionsForDeliverableInRun,
 } from "./db.js";
 import type {
   Artifact,
@@ -40,10 +41,12 @@ import type {
   Campaign,
   EscalationAction,
   EscalationLevel,
+  KnownLimitation,
   MusicVideoContext,
   NarrativeContext,
   OrchestratorDecision,
   OrchestrationDecisionRecord,
+  QAThreshold,
   VideoGradeResult,
 } from "./types.js";
 
@@ -110,15 +113,41 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   await logger("info", `[${stageId}] Escalation loop: handling QA failure for artifact ${artifact.id}`);
 
   // 1. Get or create escalation
-  const existingEscalation = await getEscalationByArtifact(artifact.id);
-  let escalation = existingEscalation
-    ?? await createEscalation({
+  //
+  // Bug #3 fix (2026-04-23): when the current artifact has no escalation row
+  // (e.g., fresh regen artifact created by L1/L2/L3 action), we need to
+  // inherit level + iteration_count from the LATEST OPEN escalation on this
+  // (deliverable, run) pair — otherwise `_maybePromoteLevel` sees
+  // iteration_count=0 on every iteration and never promotes, and the
+  // orchestrator's Rule 2 self-detection reads a fresh currentLevel="L1"
+  // instead of the actual progression. This preserves the true escalation
+  // state across artifact boundaries without changing the schema (one row
+  // per artifact, audit trail intact).
+  // Scope the "existing escalation" lookup to this run — prevents stale
+  // escalations from prior runs (Session B bug #1 + the 2026-04-23 smoke
+  // mid-flight-kill pattern) from short-circuiting fresh runs.
+  let escalation = await getEscalationByArtifact(artifact.id, runId);
+  if (!escalation) {
+    const predecessor = artifact.deliverableId
+      ? await getLatestOpenEscalationForDeliverableInRun(artifact.deliverableId, runId)
+      : null;
+    escalation = await createEscalation({
       artifactId: artifact.id,
       deliverableId: artifact.deliverableId,
       runId,
-      currentLevel: "L1",
+      currentLevel: predecessor?.currentLevel ?? "L1",
       status: "in_progress",
     });
+    if (predecessor && predecessor.iterationCount > 0) {
+      escalation = await updateEscalation(escalation.id, {
+        iterationCount: predecessor.iterationCount,
+      });
+      await logger(
+        "info",
+        `Inherited escalation state from predecessor ${predecessor.id}: level=${predecessor.currentLevel}, iteration=${predecessor.iterationCount}`,
+      );
+    }
+  }
 
   // 2. Check iteration gate — if we're exhausted at current level, promote
   escalation = await _maybePromoteLevel(escalation, logger);
@@ -160,7 +189,17 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   const promptHistory = await getPromptHistoryForDeliverable(deliverableId);
 
   // ── Watcher signals (Rule 5) — derived from prior orchestration_decisions ──
-  const priorDecisions = await getOrchestrationDecisions(escalation.id);
+  //
+  // Bug #3 fix (2026-04-23): aggregate across ALL escalation rows on this
+  // (deliverable, run) pair rather than just the current escalation row.
+  // Each regen artifact creates a new escalation row → querying by
+  // escalation.id alone returns an empty (or short) history, which was
+  // resetting consecSameRegens / cumulativeCost / levelsUsed every iteration
+  // and blinding the orchestrator's Rule 2 self-detection.
+  const priorDecisions = await getOrchestrationDecisionsForDeliverableInRun(
+    deliverableId,
+    runId,
+  );
   const cumulativeCost = _sumCost(priorDecisions);
   const levelsUsed = _collectLevels(priorDecisions);
   const consecutiveSameRegens = _countConsecutiveSamePromptRegens(priorDecisions);
@@ -235,6 +274,74 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       `Narrative envelope present: shot ${narrativeContext.shot_number} (${narrativeContext.beat_name}), ` +
         `allowances=${narrativeContext.stylization_allowances.length}`,
     );
+  }
+
+  // ── Chunk 3 follow-up: per-production QA threshold short-circuit ────────
+  // Path C of plan fresh-context-today-is-glowing-harp.md (2026-04-23).
+  // When the campaign has a `qa_threshold` guardrail AND the critic score is
+  // in the borderline band [accept_threshold, pass_threshold) AND no detected
+  // failure class has severity=blocking → flip to a rule-based L3 accept
+  // decision without calling Claude. Preserves audit trail (decision row is
+  // recorded with model="rule-based") and orchestrator prompt is untouched
+  // (Chunk 1 lock held).
+  const qaThreshold = _extractQAThreshold(campaign);
+  const borderline = _maybeBorderlineAccept(qaVerdict, qaThreshold, catalog);
+  if (borderline) {
+    await logger(
+      "info",
+      `Borderline-accept short-circuit: score=${borderline.score} in [${qaThreshold!.accept_threshold}, ${qaThreshold!.pass_threshold}), no blocking failure class → rule-based L3 accept`,
+    );
+    const ruleDecision: OrchestratorDecision = {
+      level: "L3",
+      action: "accept",
+      failure_class: borderline.failureClass,
+      known_limitation_id: null,
+      new_still_prompt: null,
+      new_veo_prompt: null,
+      new_negative_prompt: null,
+      redesign_option: null,
+      reasoning:
+        `borderline-accept per campaign qa_threshold: score=${borderline.score} ` +
+        `in [${qaThreshold!.accept_threshold}, ${qaThreshold!.pass_threshold}) ` +
+        `with no blocking failure class (detected=${borderline.detectedClasses.length ? borderline.detectedClasses.join(",") : "none"})`,
+      confidence: 1.0,
+      new_candidate_limitation: null,
+    };
+    const iter = escalation.iterationCount + 1;
+    await recordOrchestrationDecision({
+      escalationId: escalation.id,
+      runId,
+      iteration: iter,
+      inputContext: {
+        artifactId: artifact.id,
+        deliverableId,
+        attemptCount: escalation.iterationCount,
+        escalationLevel: escalation.currentLevel,
+        qaVerdict,
+        qaThreshold,
+        shortCircuit: "borderline_accept",
+      },
+      decision: ruleDecision as unknown as Record<string, unknown>,
+      model: "rule-based",
+      tokensIn: 0,
+      tokensOut: 0,
+      cost: 0,
+      latencyMs: 0,
+    });
+    escalation = await updateEscalation(escalation.id, {
+      currentLevel: "L3",
+      iterationCount: iter,
+      failureClass: borderline.failureClass ?? undefined,
+      resolutionPath: "accept",
+    });
+    escalation = await resolveEscalation(escalation.id, "accepted", ruleDecision.reasoning);
+    runEvents.emit(`escalation:${runId}`, escalation);
+    return {
+      outcome: "accepted",
+      escalation,
+      decision: ruleDecision,
+      newPrompts: null,
+    };
   }
 
   // 4. Call orchestrator
@@ -467,13 +574,16 @@ function _todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function _sumCost(decisions: OrchestrationDecisionRecord[]): number {
+// Exported for unit tests (`_10d-escalation-history.ts`) so the bug #3 fix
+// invariants are assertable against hand-crafted OrchestrationDecisionRecord
+// arrays without round-tripping Supabase.
+export function _sumCost(decisions: OrchestrationDecisionRecord[]): number {
   let total = 0;
   for (const d of decisions) total += d.cost ?? 0;
   return total;
 }
 
-function _collectLevels(decisions: OrchestrationDecisionRecord[]): EscalationLevel[] {
+export function _collectLevels(decisions: OrchestrationDecisionRecord[]): EscalationLevel[] {
   const out: EscalationLevel[] = [];
   for (const d of decisions) {
     const level = (d.decision as { level?: string } | null)?.level;
@@ -583,4 +693,75 @@ export function _extractMusicVideoContext(
   if (!g || typeof g !== "object") return undefined;
   const mvc = (g as Record<string, unknown>).music_video_context;
   return _isMusicVideoContext(mvc) ? mvc : undefined;
+}
+
+// ── Chunk 3 follow-up: QA threshold (Path C) ──────────────────────────────
+// Reads `campaign.guardrails.qa_threshold` and extracts the borderline-accept
+// policy. Feature is opt-in per campaign — when the field is absent or
+// malformed, returns undefined and the escalation loop falls through to the
+// Claude-backed decision path.
+
+export function _extractQAThreshold(
+  campaign: Campaign | null,
+): QAThreshold | undefined {
+  if (!campaign) return undefined;
+  const g = campaign.guardrails;
+  if (!g || typeof g !== "object") return undefined;
+  const t = (g as Record<string, unknown>).qa_threshold;
+  if (!t || typeof t !== "object") return undefined;
+  const pass = (t as Record<string, unknown>).pass_threshold;
+  const accept = (t as Record<string, unknown>).accept_threshold;
+  if (typeof pass !== "number" || typeof accept !== "number") return undefined;
+  if (!Number.isFinite(pass) || !Number.isFinite(accept)) return undefined;
+  // Sanity: accept must be strictly below pass; otherwise the threshold
+  // degenerates (band is empty or inverted). Disable the feature.
+  if (accept >= pass) return undefined;
+  return { pass_threshold: pass, accept_threshold: accept };
+}
+
+/**
+ * Evaluate whether a QA verdict should short-circuit to a rule-based L3
+ * `accept` decision under the per-production threshold policy.
+ *
+ * Returns the short-circuit payload when ALL of:
+ *   - a valid QAThreshold exists on the campaign
+ *   - the verdict carries a numeric aggregate_score
+ *   - score is in the borderline band `[accept_threshold, pass_threshold)`
+ *   - no detected_failure_class has severity=blocking in the known_limitations
+ *     catalog (blocking classes always fall through to Claude)
+ *
+ * Returns null otherwise. Null means "let the Claude path decide."
+ *
+ * Note: we intentionally pass through when `score >= pass_threshold` — the
+ * critic already said PASS and the escalation loop shouldn't even be running.
+ * If it IS running at that score, something upstream is confused; letting
+ * Claude decide surfaces the anomaly rather than masking it with a rule.
+ */
+export function _maybeBorderlineAccept(
+  qaVerdict: VideoGradeResult | Record<string, unknown>,
+  threshold: QAThreshold | undefined,
+  catalog: KnownLimitation[],
+): { score: number; failureClass: string | null; detectedClasses: string[] } | null {
+  if (!threshold) return null;
+  const v = qaVerdict as VideoGradeResult & { aggregate_score?: unknown };
+  const score = typeof v.aggregate_score === "number" ? v.aggregate_score : null;
+  if (score === null || !Number.isFinite(score)) return null;
+  if (score < threshold.accept_threshold) return null; // too low — Claude decides
+  if (score >= threshold.pass_threshold) return null;  // already PASS — no-op
+
+  const detected = Array.isArray(v.detected_failure_classes)
+    ? v.detected_failure_classes.filter((x): x is string => typeof x === "string")
+    : [];
+  // Blocking-severity classes always fall through to Claude even on borderline
+  // scores — these are failure modes where prompt-engineering can't fix the
+  // clip (e.g., atmospheric_creep_fire_smoke_aerial). Don't auto-accept.
+  for (const fc of detected) {
+    const match = catalog.find((k) => k.failureMode === fc);
+    if (match?.severity === "blocking") return null;
+  }
+  return {
+    score,
+    failureClass: detected[0] ?? null,
+    detectedClasses: detected,
+  };
 }

@@ -277,19 +277,40 @@ check("6 QA-documented shots have non-empty stylization_allowances", () => {
   }
 });
 
-check("non-documented shots have empty stylization_allowances", () => {
-  for (let n = 1; n <= 30; n++) {
-    if (DOCUMENTED_STYLIZATION_SHOTS.has(n)) continue;
-    for (const a of ctx.artifactsByShot[n] ?? []) {
+check("ALL 30 shots have non-empty stylization_allowances post v5 ingest (2026-04-23)", () => {
+  // Added after Phase 2B of plan `fresh-context-today-is-glowing-harp.md`:
+  // Jackie authored v5 entries for the 24 non-stylized shots so the
+  // narrative-aware critic treats intentional production stylization as
+  // within the STYLIZATION BUDGET. This assertion guards against the v5
+  // entries being removed / the ingester regressing / a fresh seed wiping
+  // allowances on any shot.
+  for (let shotNum = 1; shotNum <= 30; shotNum++) {
+    const arts = ctx.artifactsByShot[shotNum] ?? [];
+    assert.ok(arts.length > 0, `shot ${shotNum}: no artifacts found`);
+    for (const a of arts) {
       const nc = a.metadata.narrative_context as NarrativeContext;
-      assert.equal(
-        nc.stylization_allowances.length,
-        0,
-        `shot ${n}: expected empty stylization_allowances, got ${nc.stylization_allowances.length}`,
+      assert.ok(
+        nc.stylization_allowances.length > 0,
+        `shot ${shotNum}: expected non-empty stylization_allowances (v5 should have landed for non-stylized shots)`,
       );
     }
   }
 });
+
+// Pre-v5 invariant retired (2026-04-23): used to assert that ONLY shots 5, 7,
+// 15, 18, 20, 27 had allowances. Phase 2B of plan `fresh-context-today-is-
+// glowing-harp.md` added v5 allowances for the other 24 non-stylized shots
+// so the narrative-aware critic treats intentional production stylization as
+// within the STYLIZATION BUDGET. The "ALL 30 shots" assertion above replaces
+// this; the pre-v5 invariant is no longer meaningful. Kept as a commented
+// reference so the history is traceable, not re-asserted.
+//
+// check("non-documented shots have empty stylization_allowances", () => {
+//   for (let n = 1; n <= 30; n++) {
+//     if (DOCUMENTED_STYLIZATION_SHOTS.has(n)) continue;
+//     ... used to assert length === 0 ...
+//   }
+// });
 
 // ─── Seed-metadata preservation ──────────────────────────────────────────
 
