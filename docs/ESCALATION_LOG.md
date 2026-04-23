@@ -612,9 +612,28 @@ Step 10d remains **partially open** — pipeline PROVEN wired, not yet PROVEN au
 - **Bug #7 (Temp-gen /generate/image 500) — Temp-gen repo concern, separate session.**
 - **Stuck escalations from cancelled runs** — run 44447f5d left one in_progress escalation. Mitigation: new runs with different runId don't inherit it via the `getEscalationByArtifact(runId)` filter; audit/HUD still show it. Clean-up one-shot queued.
 
-### Deliverable state
+### Deliverable state at Chunk 3 LANDED close
 
-*(Run 2 in flight — final state appended on close.)*
+- **8 `approved`** (7 pre-existing + shot 11 newly converged via run 92aec59f L3 accept)
+- **4 `reviewing`** (2 pre-existing + shot 9 from cancelled run 44447f5d + shot 12 stuck mid-L3-redesign-loop from run 92aec59f)
+- **18 `pending`** (run 92aec59f processed only shots 11 + 12 before manual cancel; 18 remaining)
+
+### Run 2 (`92aec59f`) — full progression
+
+| Shot | Iter | Verdict | Score | Failure class | Decision | Notes |
+|---|---|---|---|---|---|---|
+| 11 | 1 | FAIL | 2.3 | scale_jump_excessive_zoom | L2 approach_change (Claude, conf 0.78) | Below accept_threshold — Claude path correctly fired. |
+| 11 | 2 | WARN | 3.9 | hand_object_interaction_morphing + new_candidate | **L3 accept** (Claude, conf 0.72) | **Iter 2 inherited `level=L2, attempts=1, cumCost=$0.1493, levels=[L2]`** — bug #3 fix LIVE. Shot CONVERGED. |
+| 12 | 1 | FAIL | 3.45 | multi_subject_close_up_morph_cascade + hand_object_interaction_morphing | L3 redesign (Claude, conf 0.82) | Above pass_threshold — threshold did NOT short-circuit (correct: critic still says FAIL with 2 morph classes). |
+| 12 | 2 | FAIL | 1.0 | new_candidate:crossfade_scene_replacement | L3 redesign (Claude, conf 0.74) | **Iter 2 inherited `level=L3, attempts=1, cumCost=$0.0787, levels=[L3]`** — bug #3 fix LIVE on second shot. Process killed before iter 3 (which would have triggered _maybePromoteLevel → hitl_required per L3 MAX=2). |
+
+**Session totals:** ~$6.93 spent ($0.5308 orchestrator on direct Anthropic + ~$6.40 Veo for 2 successful regens). 5 orchestration_decisions across 4 escalations on 2 deliverables. Bug #3 fix triggered twice in production with correct inherited state. Process killed proactively to preserve budget — Phase 4B at full 22-shot scale projected at ~$60-95 with current per-shot cost; revisit budgeting strategy in next session.
+
+### Run 1 (`44447f5d`) — cancelled remnants
+
+- 1 in_progress escalation on artifact `88addad8` (shot 9): L2, iter=1. Mitigated by `getEscalationByArtifact(artifact, runId)` filter — new runs with different runIds don't inherit it.
+- 1 orchestration_decision recorded: $0.1528 cost. Audit preserved.
+- Run status remains `running` in DB (sandbox prevented status-update cleanup).
 
 ---
 
