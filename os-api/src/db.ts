@@ -1601,8 +1601,9 @@ export const VEO_COST_PER_SECOND_BY_MODEL: Record<string, number> = {
   // Vertex Veo 3.1 GA standard ~ $0.40/second (placeholder per Temp-gen
   // cost_utils observed pricing; tune as Vertex publishes official rates).
   "veo-3.1-generate-001": 0.40,
-  // Vertex Veo 3.1 Fast preview ~ half of standard.
-  "veo-3.1-fast-generate-preview": 0.20,
+  // Vertex Veo 3.1 Lite (GA) ~ half of standard — matches Fast per-second rate
+  // (placeholder pending official Vertex pricing for lite; conservative-favorable).
+  "veo-3.1-lite-generate-001": 0.20,
 };
 
 export interface RunCostEstimate {
@@ -1645,9 +1646,9 @@ export async function getRunCostEstimate(runId: string): Promise<RunCostEstimate
     const meta = (a.metadata as Record<string, unknown> | null) ?? {};
     if (a.type === "video") {
       veoArtifactCount += 1;
-      const model = typeof meta.model === "string" ? meta.model : "veo-3.1-fast-generate-preview";
+      const model = typeof meta.model === "string" ? meta.model : "veo-3.1-lite-generate-001";
       const duration = typeof meta.duration_seconds === "number" ? meta.duration_seconds : 8;
-      const perSec = VEO_COST_PER_SECOND_BY_MODEL[model] ?? VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-fast-generate-preview"];
+      const perSec = VEO_COST_PER_SECOND_BY_MODEL[model] ?? VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-lite-generate-001"];
       veoUsd += perSec * duration;
     } else if (a.type === "image") {
       imageArtifactCount += 1;

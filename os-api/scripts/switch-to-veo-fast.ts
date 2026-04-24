@@ -1,6 +1,6 @@
 /**
  * One-shot script to flip existing Drift MV deliverables to use
- * `veo-3.1-fast-generate-preview` instead of `veo-3.1-generate-001`.
+ * `veo-3.1-lite-generate-001` instead of `veo-3.1-generate-001`.
  *
  * Tim's call (2026-04-23): switch to Veo Fast for the orchestrator-driven
  * regrade pipeline. Roughly half the per-shot cost; latency is also lower.
@@ -17,7 +17,7 @@
  *   CAMPAIGN_ID  — target campaign UUID (default: Drift MV regrade)
  *   FROM_MODEL   — only flip rows currently set to this model id
  *                  (default: 'veo-3.1-generate-001')
- *   TO_MODEL     — destination model id (default: 'veo-3.1-fast-generate-preview')
+ *   TO_MODEL     — destination model id (default: 'veo-3.1-lite-generate-001')
  *   DRY=1        — print intended UPDATE without writing
  */
 import { supabase } from "../src/supabase.js";
@@ -25,7 +25,7 @@ import { supabase } from "../src/supabase.js";
 const DEFAULT_CAMPAIGN_ID = "42f62a1d-b9df-57d8-8197-470692733391";
 const CAMPAIGN_ID = process.env.CAMPAIGN_ID ?? DEFAULT_CAMPAIGN_ID;
 const FROM_MODEL = process.env.FROM_MODEL ?? "veo-3.1-generate-001";
-const TO_MODEL = process.env.TO_MODEL ?? "veo-3.1-fast-generate-preview";
+const TO_MODEL = process.env.TO_MODEL ?? "veo-3.1-lite-generate-001";
 const DRY = process.env.DRY === "1";
 
 async function main(): Promise<void> {

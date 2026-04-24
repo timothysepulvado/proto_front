@@ -603,7 +603,7 @@ async function executeDeliverableGeneration(
       "/generate/video", "POST",
       {
         prompt,
-        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
+        model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
         duration_seconds: deliverable.durationSeconds ?? 8,
         aspect_ratio: deliverable.aspectRatio ?? "16:9",
         resolution: deliverable.resolution ?? "720p",
@@ -628,7 +628,7 @@ async function executeDeliverableGeneration(
           localPath: resultPath || path.join(outputDir, vidFileName),
           stage: stageId,
           metadata: {
-            model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
+            model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
             prompt,
             duration_seconds: deliverable.durationSeconds ?? 8,
             quality_tier: deliverable.qualityTier ?? "standard",
@@ -859,7 +859,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     "/generate/video", "POST",
     {
       prompt: videoPrompt,
-      model: "veo-3.1-fast-generate-preview",
+      model: "veo-3.1-lite-generate-001",
       duration_seconds: 8,
       aspect_ratio: "16:9",
       resolution: "720p",
@@ -881,7 +881,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
         name: "generated.mp4",
         localPath: resultPath || path.join(outputDir, "generated.mp4"),
         stage: stageId,
-        metadata: { model: "veo-3.1-fast-generate-preview", prompt: videoPrompt },
+        metadata: { model: "veo-3.1-lite-generate-001", prompt: videoPrompt },
       });
       run = await updateStageStatus(run, stageId, "completed");
       return true;
@@ -1209,7 +1209,7 @@ async function gradeAndEscalateVideo(params: {
     // 1. Grade the current video
     await emitLog(run.runId, stageId, "info", `Grading video artifact ${currentArtifact.id} (loop ${loop + 1}/${ESCALATION_LOOP_MAX})`);
 
-    const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview" });
+    const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-lite-generate-001" });
     const relevantFailureModes = catalog.map((k) => k.failureMode);
 
     // Prefer the on-disk path (stored in metadata by createArtifactWithUpload)
@@ -1320,15 +1320,20 @@ async function gradeAndEscalateVideo(params: {
       const newStillFileName = `still_${escalationResult.escalation.id.slice(0, 8)}_iter${escalationResult.escalation.iterationCount}.png`;
       const stillOutputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
       type ImageResp = { status: string; local_path: string | null; model: string; cost: number };
+      // Image-gen uses a Gemini image model — deliverable.aiModel is the VIDEO
+      // model id (Veo) and Temp-gen's /generate/image would reject refs against
+      // it. Pinned to the Gemini family explicitly (2026-04-24).
+      // image_size intentionally omitted — deliverable.resolution carries video
+      // res like "720p"/"1080p" which Gemini Image rejects as INVALID_ARGUMENT;
+      // aspect_ratio alone is enough for Gemini 3 Pro Image (2026-04-24).
       const stillResult = await callTempGen<ImageResp>(
         "/generate/image",
         "POST",
         {
           prompt: newPrompts.stillPrompt,
-          model: deliverable.aiModel ?? "gemini-3-pro-image-preview",
+          model: "gemini-3-pro-image-preview",
           aspect_ratio: deliverable.aspectRatio ?? "16:9",
           reference_images: deliverable.referenceImages,
-          image_size: deliverable.resolution,
           output_path: path.join(stillOutputDir, newStillFileName),
         },
         run.runId,
@@ -1358,7 +1363,21 @@ async function gradeAndEscalateVideo(params: {
       }
     }
 
-    // Fire new video generation
+    // Fire new video generation.
+    // Veo 3.1 family caps prompt at 2000 chars; orchestrator occasionally
+    // writes longer regen prompts (especially on iter 2+ with context accum).
+    // Truncate defensively so we never hit the API's 400 (2026-04-24).
+    const VEO_PROMPT_MAX = 2000;
+    let veoPrompt = newPrompts.veoPrompt ?? deliverable.currentPrompt ?? "";
+    if (veoPrompt.length > VEO_PROMPT_MAX) {
+      await emitLog(
+        run.runId,
+        stageId,
+        "warn",
+        `Veo prompt truncated from ${veoPrompt.length} to ${VEO_PROMPT_MAX} chars (Veo 2000-char cap)`,
+      );
+      veoPrompt = veoPrompt.slice(0, VEO_PROMPT_MAX);
+    }
     const newVidFileName = `video_${escalationResult.escalation.id.slice(0, 8)}_iter${escalationResult.escalation.iterationCount}.mp4`;
     const vidOutputDir = path.join(TEMP_GEN_PATH, "outputs", run.runId);
     type VideoJobResp = { job_id: string; status: string; segments_total: number };
@@ -1366,8 +1385,8 @@ async function gradeAndEscalateVideo(params: {
       "/generate/video",
       "POST",
       {
-        prompt: newPrompts.veoPrompt ?? deliverable.currentPrompt,
-        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
+        prompt: veoPrompt,
+        model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
         duration_seconds: deliverable.durationSeconds ?? 8,
         aspect_ratio: deliverable.aspectRatio ?? "16:9",
         resolution: deliverable.resolution ?? "1080p",
@@ -1403,7 +1422,7 @@ async function gradeAndEscalateVideo(params: {
       localPath: newVidPath || path.join(vidOutputDir, newVidFileName),
       stage: stageId,
       metadata: {
-        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
+        model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
         prompt: newPrompts.veoPrompt,
         negativePrompt: newPrompts.negativePrompt,
         referenceImagePath: refImagePath,

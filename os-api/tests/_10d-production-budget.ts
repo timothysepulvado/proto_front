@@ -150,16 +150,16 @@ check("extractProductionBudget: hard_stop > 100 allowed (200% safety overshoot)"
 
 // ─── VEO_COST_PER_SECOND_BY_MODEL sanity ─────────────────────────────────
 
-check("VEO_COST_PER_SECOND_BY_MODEL has both standard + fast", () => {
+check("VEO_COST_PER_SECOND_BY_MODEL has both standard + lite", () => {
   assert.ok(VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-generate-001"] > 0);
-  assert.ok(VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-fast-generate-preview"] > 0);
+  assert.ok(VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-lite-generate-001"] > 0);
 });
 
-check("Veo Fast costs less than standard (the whole point of switching)", () => {
+check("Veo Lite costs less than standard (the whole point of switching)", () => {
   assert.ok(
-    VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-fast-generate-preview"] <
+    VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-lite-generate-001"] <
       VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-generate-001"],
-    "Fast should be cheaper than standard",
+    "Lite should be cheaper than standard",
   );
 });
 

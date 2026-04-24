@@ -257,7 +257,7 @@ Plan: `~/.claude/plans/fresh-context-today-is-glowing-harp.md`. Commits: proto_f
 **Code is GO. Step 11 is gated only on a clean autonomous full-catalog run.**
 
 The pipeline is sound — bug #3 fix proven, allowances + threshold knob wired, all PARTIAL bugs addressed. As of commit `9032200` (2026-04-23 PM):
-- **Veo switched to 3.1 Fast** (`veo-3.1-fast-generate-preview`, ~half the per-clip cost).
+- **Veo switched to 3.1 Fast** (`veo-3.1-lite-generate-001`, ~half the per-clip cost).
 - **Per-production budget cap implemented** (`campaigns.guardrails.production_budget = { total_usd, warn_at_pct, hard_stop_at_pct }`). Drift MV seeded at `{$25, 60%, 100%}`. Runner halts + flags `needs_review` when hard_stop crosses.
 
 The two safety nets that were missing for a single-session full-catalog autonomous run are now in place. Cleared to launch a full 22-shot regrade as the Step-11 gating run; if it completes within budget without manual intervention, Step 11 (gen_assembly.py + presentation) is unblocked.
