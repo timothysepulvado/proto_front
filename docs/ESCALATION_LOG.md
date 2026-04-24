@@ -722,6 +722,58 @@ Plus two bonus proofs under load:
 
 ---
 
+## Step 11 IN PROGRESS — First-Client Demo Sprint (2026-04-24 → 2026-05-04)
+
+**Context shift:** Step 11 was originally scoped as `gen_assembly.py + presentation`. Mid-session 2026-04-24 Tim re-scoped it as a **first-client demo sprint** for the **full BrandStudios.AI suite** (orchestrator + brand engine + generation pipeline + observability HUD). 11-day sprint to **2026-05-04 first-client meetings**. **No shortcuts.** Plan: `~/.claude/plans/curious-whistling-walrus.md`.
+
+**Scope (locked via AskUserQuestion):**
+1. Standard Veo 3.1 regen on 3 HITL shots (Lite split-screen casualties)
+2. Final MP4 — client-grade
+3. HUD demo flow polish on Drift MV (Karl)
+4. Behind-the-scenes process reel (Brandy + Jackie)
+
+### Phase 0 LANDED (2026-04-24) — Standard Veo 3.1 regen on 3 HITL shots
+
+- **New file:** `~/Temp-gen/productions/drift-mv/regen_hitl_standard.py` — wraps `VeoModel.generate_video()` with image-to-video conditioning from `stills/shot_NN.png` + manifest-derived best-of v4 prompts. CLI: `python regen_hitl_standard.py [shot_ids...] [--dry-run]`.
+- **Shots regenerated** on `veo-3.1-generate-001` (standard Veo 3.1 GA, NOT Lite):
+  - **Shot 02** (intro · 7s) — workers cowering + OpenAI mech foot stomp. Visual QA: clean, narrative arc preserved.
+  - **Shot 16** (verse_2 · 8s) — executives stepping into protective mech formation. Visual QA: clean, no split-screen.
+  - **Shot 26** (final_hook · 7s) — Brandy walking through saluted courtyard. Visual QA: clean, character consistency held.
+- **Cost:** ~$2.10 (Veo cost reporting; actual Vertex bill TBD).
+- **Backups:** previous canonical preserved as `~/Temp-gen/productions/drift-mv/shots/shot_NN_v5_backup.mp4` (non-destructive `cp -n` first; reversible).
+- **Result:** All 30 canonical shots are now PASS quality. The 3 HITL escalations from v4 are an autonomous-pipeline data point (Lite has the split_screen_diptych_artifact tendency on crowd-heavy shots); standard Veo 3.1 doesn't.
+
+### Phase 1 LANDED (2026-04-24) — gen_assembly.py + final cut
+
+- **New file:** `~/Temp-gen/productions/drift-mv/gen_assembly.py` — 3-phase ffmpeg pipeline (trim → concat → mux + logo composite + master). Single-file Python 3 + ffmpeg, no new deps. Reuses `qa_extract_frames.py` subprocess pattern.
+- **Trim:** frame-precise re-encode (libx264 preset fast crf 16) by default; `--fast-trim` opt-in for keyframe-aligned `-c copy` (faster but accumulates ~50ms/shot drift = 1.5s misalignment over 30 shots). Frame-precise trim is critical for music sync at section boundaries.
+- **Concat:** demuxer + `-c copy` (works since trims share h264 spec).
+- **Master:** 1080p H.264 CRF 17 (visually lossless) + AAC 192k 48kHz + faststart. Brand wordmark (`brandstudios-logo.png`, navy + orange) overlaid at 40% width centered lower-third on shot 30 (last 6s, fade in/out 0.5s). Logo input bounded with `-loop 1 -t <video_duration>` to prevent infinite-loop overshoot past `-shortest`.
+- **Logo choice:** switched from album cover (`drift_cover_final_v2.png`) to wordmark — cover competed with shot 30's wireframe construct; wordmark coexists cleanly (gold wireframe + navy/orange wordmark = brand-cohesive).
+- **CLI:** `python gen_assembly.py [--dry-run] [--shots N N N] [--fast-trim] [--no-logo] [--skip-trim] [--skip-concat] [--keep-intermediates] [--shot27-freeze-from N]`.
+- **Output:** `~/Temp-gen/productions/drift-mv/assembly/drift_final.mp4` — **213.04s · 585MB · 1920×1080 h264 + aac · faststart**.
+- **Section sync verified** at t=8s (shot 02 end), t=182s (shot 26 first frame, manifest start_s=182 ✓), t=207s (shot 30 first frame, manifest start_s=207 ✓), t=213s (wordmark + wireframe close).
+- **Tim's review:** "video is actually good" — most shots OK, a couple need reshoots (TBD identification + Phase 4 polish).
+
+### Phase 2-5 status (2026-04-24 PM)
+
+- **Phase 2 (HUD demo flow polish, Karl)** — brief written at `~/agent-vault/briefs/2026-04-24-step-11-hud-demo-polish.md`. 10-step client walkthrough on `client_drift-mv` with run `9bfdf23e` loaded. Karl runs `gpt-5.5 xhigh` now (Tim bumped from 5.4 today; MODEL_INTELLIGENCE.md updated). Awaiting Tim green-light to kick off (vs Tim driving personally).
+- **Phase 3 (BTS reel, Jackie)** — not yet started; Day 6-7.
+- **Phase 4 (polish + rehearsal + reshoots)** — Tim flagged a couple shots need reshoot during his Phase 1 review. List TBD; reshoot via the same `regen_hitl_standard.py` pattern (drop new shot_ids into the `--default` list or pass explicit IDs).
+- **Phase 5 (closeout)** — at sprint end.
+
+### Pre-deadline reshoot queue (TBD)
+
+Tim's Phase 1 review flagged a handful of shots that "look worse than others" — reshoot list to be enumerated by Tim in next session. The regen tooling supports this trivially: `python regen_hitl_standard.py <shot_id_1> <shot_id_2> ...` produces v5_standard outputs in a separate dir; review then promote with backup discipline.
+
+### Commit list (this session's interim — Phase 0 + Phase 1 LANDED)
+
+- **proto_front:** `docs(escalation): Step 11 IN PROGRESS — Phase 0+1 LANDED (HITL regen + gen_assembly.py + final cut)` (this file). Plus delete of stale `_10d-monitor.ts` + `_probe-step10d-state.ts` + `_probe-hitl-shots.ts`.
+- **Temp-gen:** `feat(drift-mv): Step 11 Phase 0+1 — standard Veo HITL regen + gen_assembly.py + final cut`.
+- **agent-vault:** `docs(brandstudios): Step 11 Phase 0+1 LANDED — Karl 5.5 + brief + status`.
+
+---
+
 ## Maintenance
 
 - **Living DB:** query via `SELECT * FROM known_limitations ORDER BY times_encountered DESC;`
