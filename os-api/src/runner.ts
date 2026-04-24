@@ -27,8 +27,32 @@ import {
 import { supabase } from "./supabase.js";
 import { v4 as uuidv4 } from "uuid";
 
-// Active processes map for cancellation
+// Active processes map for cancellation (legacy non-regrade modes that spawn
+// a child process via executeRun)
 const activeProcesses = new Map<string, ChildProcess>();
+
+// Bug #4 fix (2026-04-24): cooperative cancellation flag for in-process runs.
+// regrade mode runs INLINE in the same Node process — no spawned child to
+// SIGTERM — so cancelRun marks the runId here and executeRegradeStage checks
+// the flag between deliverables and exits cleanly. The set is cleared by the
+// regrade loop when it observes the flag (so the runId can be re-used cleanly
+// for a follow-up run, though in practice runIds are uuid-fresh per launch).
+const cancelRequested = new Set<string>();
+
+/** True iff cancelRun has flagged this runId for in-process cancellation.
+ * Exported for test gates; in-runner consumers (executeRegradeStage) call it
+ * to check between deliverables.
+ */
+export function _isCancelRequested(runId: string): boolean {
+  return cancelRequested.has(runId);
+}
+
+/** Internal: clear the cancel flag for a runId. Called by the in-process loop
+ * after it observes + acts on the flag, and exposed for test cleanup.
+ */
+export function _clearCancelRequest(runId: string): boolean {
+  return cancelRequested.delete(runId);
+}
 
 // Event emitter for log streaming
 export const runEvents = new EventEmitter();
@@ -1714,7 +1738,21 @@ async function executeRegradeStage(run: Run): Promise<boolean> {
 
   const tally = { resolved: 0, hitl: 0, failed: 0, skipped: 0, missingArtifact: 0 };
   let budgetHalted = false;
+  let cancelHalted = false;
   for (const d of deliverables) {
+    // Bug #4 fix (2026-04-24): cooperative cancellation between deliverables.
+    // The legacy cancelRun path SIGTERMed a spawned child process which
+    // doesn't exist for in-process regrade runs. cancelRun now sets a flag in
+    // the cancelRequested Set; this loop observes it before starting the
+    // next deliverable. Clean exit + tally preserved + cancel flag cleared
+    // so the runId is reusable for a follow-up launch.
+    if (_isCancelRequested(run.runId)) {
+      await emitLog(run.runId, stageId, "warn",
+        `Cancellation observed — exiting regrade after ${tally.resolved} resolved / ${tally.hitl} hitl / ${tally.failed} failed / ${tally.skipped} skipped`);
+      _clearCancelRequest(run.runId);
+      cancelHalted = true;
+      break;
+    }
     // Budget check before each deliverable (post-shot, before next regen).
     // Veo regens are the lion's share of cost; halting between shots saves
     // a $1.60-3.20 bite even when per-shot cap holds.
@@ -1765,25 +1803,40 @@ async function executeRegradeStage(run: Run): Promise<boolean> {
     }
   }
 
+  const haltSuffix = cancelHalted
+    ? " [HALTED on user cancel]"
+    : budgetHalted
+    ? " [HALTED on production budget cap]"
+    : "";
   await emitLog(run.runId, stageId, "info",
     `Regrade summary — resolved=${tally.resolved} hitl=${tally.hitl} ` +
     `failed=${tally.failed} skipped=${tally.skipped} missingArtifact=${tally.missingArtifact}` +
-    (budgetHalted ? " [HALTED on production budget cap]" : ""),
+    haltSuffix,
   );
 
   if (budgetHalted) {
     // Flag the run as needs_review so the operator handles the budget call.
     await updateRun(run.runId, { status: "needs_review", hitlRequired: true });
   }
+  // Note: cancelHalted does NOT update run.status here — cancelRun already
+  // set it to "cancelled" + emitted cancel:${runId} before this loop observed
+  // the flag. Re-writing would race the cancelRun caller's response.
 
   // Stage is "completed" even if some deliverables need HITL or failed — the
   // runner surfaces those via hitlRequired + deliverable statuses. Stage only
   // FAILS if we couldn't enumerate deliverables or every single one raised.
+  // Cancellation is a clean exit, NOT a stage failure.
   const fatalFail = tally.failed > 0 && tally.failed === deliverables.length;
+  const stageReason = fatalFail
+    ? "All deliverables failed regrade"
+    : cancelHalted
+    ? "Cancelled by user"
+    : budgetHalted
+    ? "Halted on production budget cap"
+    : undefined;
   run = await updateStageStatus(run, stageId,
     fatalFail ? "failed" : "completed",
-    fatalFail ? "All deliverables failed regrade" :
-      budgetHalted ? "Halted on production budget cap" : undefined,
+    stageReason,
   );
   return !fatalFail;
 }
@@ -1886,12 +1939,28 @@ export async function executeRun(run: Run): Promise<void> {
 
 export async function cancelRun(runId: string): Promise<boolean> {
   const proc = activeProcesses.get(runId);
+  let signalled = false;
+
   if (proc) {
+    // Legacy spawned-process path (non-regrade modes that exec via child_process).
     proc.kill("SIGTERM");
     activeProcesses.delete(runId);
-    await emitLog(runId, "system", "warn", "Run cancelled by user");
-    await updateRun(runId, { status: "cancelled", completedAt: new Date().toISOString() });
-    return true;
+    signalled = true;
   }
-  return false;
+
+  // Bug #4 fix (2026-04-24): regrade mode runs in-process, no spawned proc.
+  // Always mark the cancellation flag so executeRegradeStage's between-
+  // deliverable check picks it up. Idempotent — adding to a Set twice is
+  // harmless. This means cancelRun returns true whenever there's a runId,
+  // not only when a process existed; the previous "false on no-proc" was
+  // exactly the bug.
+  cancelRequested.add(runId);
+  signalled = true;
+
+  await emitLog(runId, "system", "warn", "Run cancelled by user");
+  await updateRun(runId, { status: "cancelled", completedAt: new Date().toISOString() });
+  // Notify SSE subscribers so the HUD can flip its UI immediately rather than
+  // waiting for the next deliverable boundary.
+  runEvents.emit(`cancel:${runId}`);
+  return signalled;
 }

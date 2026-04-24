@@ -27,6 +27,9 @@ import assert from "node:assert/strict";
 import {
   _shouldSkipDeliverable,
   _decideRegradeStatusTransition,
+  _isCancelRequested,
+  _clearCancelRequest,
+  cancelRun,
 } from "../src/runner.js";
 import {
   STAGE_DEFINITIONS,
@@ -159,6 +162,40 @@ check("RunMode union includes 'regrade' (compile-time)", () => {
 });
 
 // ─── Harness ────────────────────────────────────────────────────────────
+
+// ─── 4. Bug #4 fix — cooperative cancellation flag (in-process regrade) ──
+// Note: cancelRun is async and triggers DB writes (emitLog + updateRun) that
+// fail under the stubbed SUPABASE_URL. The cancelRequested.add() side effect
+// happens SYNCHRONOUSLY before the first await, so we attach .catch() to
+// silently swallow the inevitable stub-DB rejection while still asserting on
+// the immediate flag state.
+
+check("_isCancelRequested returns false for an unflagged runId", () => {
+  const fakeRunId = "00000000-0000-0000-0000-bug4test001";
+  assert.equal(_isCancelRequested(fakeRunId), false);
+});
+
+check("cancelRun adds runId to cancelRequested set (observable via _isCancelRequested)", () => {
+  const fakeRunId = "00000000-0000-0000-0000-bug4test002";
+  cancelRun(fakeRunId).catch(() => { /* db is stubbed */ });
+  assert.equal(_isCancelRequested(fakeRunId), true);
+  _clearCancelRequest(fakeRunId);
+});
+
+check("_clearCancelRequest returns true when flag was set, false otherwise", () => {
+  const fakeRunId = "00000000-0000-0000-0000-bug4test003";
+  cancelRun(fakeRunId).catch(() => { /* db is stubbed */ });
+  assert.equal(_clearCancelRequest(fakeRunId), true);
+  assert.equal(_clearCancelRequest(fakeRunId), false);
+});
+
+check("cancelRun is idempotent (calling twice keeps the flag set)", () => {
+  const fakeRunId = "00000000-0000-0000-0000-bug4test004";
+  cancelRun(fakeRunId).catch(() => { /* db is stubbed */ });
+  cancelRun(fakeRunId).catch(() => { /* db is stubbed */ });
+  assert.equal(_isCancelRequested(fakeRunId), true);
+  _clearCancelRequest(fakeRunId);
+});
 
 function run(): void {
   let pass = 0;
