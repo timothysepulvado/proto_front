@@ -150,35 +150,54 @@ function ShotCard({
     <button
       type="button"
       onClick={() => onShotClick?.(summary.shotNumber, deliverable.id)}
-      className={`w-full rounded-xl border bg-white/[0.02] p-3 text-left transition-all ${statusStyle.border} ${
+      className={`group w-full rounded-xl border bg-white/[0.02] p-3 text-left transition-all ${statusStyle.border} ${
         interactive ? "hover:border-cyan-400/40 hover:bg-white/[0.04]" : "cursor-default"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="truncate text-[10px] font-mono text-white">
-              <span className="mr-2 text-cyan-300">#{summary.shotNumber ?? "—"}</span>
-              {deliverable.description || `Deliverable ${deliverable.id.slice(0, 8)}`}
-            </p>
-            {summary.beatName && (
-              <span className="shrink-0 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-1.5 py-0.5 text-[7px] font-mono uppercase tracking-widest text-cyan-200">
-                {formatBeatLabel(summary.beatName)}
-              </span>
-            )}
+        <div className="flex min-w-0 flex-1 gap-3">
+          <div className="relative h-[90px] w-[160px] shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white/[0.035]">
+            {summary.shotNumber ? (
+              <img
+                src={api.getProductionShotThumbnailUrl("drift-mv", summary.shotNumber)}
+                alt={`Shot ${summary.shotNumber} thumbnail`}
+                loading="lazy"
+                className="h-full w-full object-cover opacity-80 transition-opacity group-hover:opacity-100"
+                onError={(event) => {
+                  event.currentTarget.style.display = "none";
+                }}
+              />
+            ) : null}
+            <div className="absolute inset-0 bg-gradient-to-b from-black/20 to-black/55" />
+            <span className="absolute bottom-1.5 left-1.5 rounded-md border border-white/15 bg-black/55 px-1.5 py-0.5 text-[7px] font-mono uppercase tracking-wider text-white/70">
+              first frame
+            </span>
           </div>
-          <p className="mt-0.5 truncate text-[8px] font-mono uppercase tracking-wider text-white/30">
-            {deliverable.aiModel ?? "default model"} · {formatBeatLabel(summary.beatName)} · {summary.artifactCount} artifact{summary.artifactCount === 1 ? "" : "s"}
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-[7px] font-mono uppercase tracking-widest text-white/35">
-            <span>ID {deliverable.id.slice(0, 8)}</span>
-            {summary.lastVerdict && (
-              <span className={verdictStyles[summary.lastVerdict]}>
-                {summary.lastVerdict}
-                {summary.lastScore !== null ? ` ${summary.lastScore.toFixed(1)}` : ""}
-              </span>
-            )}
-            {summary.orchestratorCallCount > 0 && <span>{summary.orchestratorCallCount} call{summary.orchestratorCallCount === 1 ? "" : "s"}</span>}
+          <div className="min-w-0 flex-1 pt-0.5">
+            <div className="flex items-center gap-2">
+              <p className="truncate text-[10px] font-mono text-white">
+                <span className="mr-2 text-cyan-300">#{summary.shotNumber ?? "—"}</span>
+                {deliverable.description || `Deliverable ${deliverable.id.slice(0, 8)}`}
+              </p>
+              {summary.beatName && (
+                <span className="shrink-0 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-1.5 py-0.5 text-[7px] font-mono uppercase tracking-widest text-cyan-200">
+                  {formatBeatLabel(summary.beatName)}
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 truncate text-[8px] font-mono uppercase tracking-wider text-white/30">
+              {deliverable.aiModel ?? "default model"} · {formatBeatLabel(summary.beatName)} · {summary.artifactCount} artifact{summary.artifactCount === 1 ? "" : "s"}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[7px] font-mono uppercase tracking-widest text-white/35">
+              <span>ID {deliverable.id.slice(0, 8)}</span>
+              {summary.lastVerdict && (
+                <span className={verdictStyles[summary.lastVerdict]}>
+                  {summary.lastVerdict}
+                  {summary.lastScore !== null ? ` ${summary.lastScore.toFixed(1)}` : ""}
+                </span>
+              )}
+              {summary.orchestratorCallCount > 0 && <span>{summary.orchestratorCallCount} call{summary.orchestratorCallCount === 1 ? "" : "s"}</span>}
+            </div>
           </div>
         </div>
 

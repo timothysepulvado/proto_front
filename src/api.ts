@@ -692,8 +692,9 @@ interface DbHitlDecision {
 
 interface DbRejectionCategory {
   id: string;
-  name: string;
-  description: string | null;
+  name?: string | null;
+  label?: string | null;
+  description?: string | null;
   negative_prompt: string | null;
   positive_guidance: string | null;
 }
@@ -714,7 +715,7 @@ function mapDbHitlDecision(d: DbHitlDecision): HitlDecision {
 function mapDbRejectionCategory(d: DbRejectionCategory): RejectionCategory {
   return {
     id: d.id,
-    name: d.name,
+    name: d.name ?? d.label ?? d.id,
     description: d.description ?? undefined,
     negativePrompt: d.negative_prompt ?? undefined,
     positiveGuidance: d.positive_guidance ?? undefined,
@@ -723,13 +724,18 @@ function mapDbRejectionCategory(d: DbRejectionCategory): RejectionCategory {
 
 // Get rejection categories taxonomy
 export async function getRejectionCategories(): Promise<RejectionCategory[]> {
+  // Live proto_front has shipped with both historical shapes:
+  //   migration shape: { id UUID, name, description, ... }
+  //   seeded demo shape: { id text, label, ... }
+  // Select all and sort client-side so Review Gate does not 400 on either.
   const { data, error } = await supabase
     .from("rejection_categories")
-    .select("*")
-    .order("name");
+    .select("*");
 
   if (error) throw new Error(`Failed to get rejection categories: ${error.message}`);
-  return (data as DbRejectionCategory[]).map(mapDbRejectionCategory);
+  return (data as DbRejectionCategory[])
+    .map(mapDbRejectionCategory)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // Get artifacts for a run (for review queue)
@@ -1504,6 +1510,7 @@ export interface ProductionShotState {
   charactersNeeded: string[];
   defaultPrompt: string;
   stillPrompt?: string;
+  negativePrompt?: string;
   canonical: ProductionFileMeta & { backupExists: boolean };
   pending: ProductionFileMeta | null;
   stillPath: string | null;
@@ -1538,6 +1545,7 @@ export type ProductionEvent =
   | { type: "regen_complete"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; exitCode: number | null; durationMs: number; error?: string }
   | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean }
   | { type: "shot_rejected"; productionSlug: string; timestamp: string; shotNumber: number; pendingDeleted: boolean }
+  | { type: "shot_manifest_updated"; productionSlug: string; timestamp: string; shotNumber: number; cumulativeDurationDeltaS: number }
   | { type: "render_started"; productionSlug: string; timestamp: string; jobId: string }
   | { type: "render_log"; productionSlug: string; timestamp: string; jobId: string; line: string; stream: "stdout" | "stderr" }
   | { type: "render_complete"; productionSlug: string; timestamp: string; jobId: string; exitCode: number | null; durationMs: number; error?: string }
@@ -1554,6 +1562,15 @@ export function getProductionStillUrl(productionSlug: ProductionSlug, shotNumber
   return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/still`;
 }
 
+export function getProductionShotThumbnailUrl(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/thumbnail${suffix}`;
+}
+
 export function getProductionVideoUrl(
   productionSlug: ProductionSlug,
   shotNumber: number,
@@ -1566,6 +1583,37 @@ export async function getProductionShots(productionSlug: ProductionSlug): Promis
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ProductionShotsResponse;
+}
+
+
+export interface ProductionShotPatch {
+  visualIntent?: string;
+  beat?: string;
+  durationS?: number;
+  charactersNeeded?: string[];
+  stillPrompt?: string;
+  veoPrompt?: string;
+  negativePrompt?: string;
+}
+
+export interface ProductionShotPatchResponse {
+  ok: true;
+  shot: ProductionShotState;
+  warning?: string;
+}
+
+export async function patchProductionShot(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body: ProductionShotPatch,
+): Promise<ProductionShotPatchResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ProductionShotPatchResponse;
 }
 
 export async function regenerateProductionShot(

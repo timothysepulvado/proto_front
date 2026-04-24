@@ -5,6 +5,7 @@ import {
   Clock3,
   Film,
   Loader2,
+  PencilLine,
   RefreshCw,
   RotateCcw,
   Sparkles,
@@ -230,6 +231,12 @@ export default function ShotReshootDrawer({
     }
   };
 
+
+  const handleOpenFinalHitl = () => {
+    if (!shotNumber) return;
+    window.dispatchEvent(new CustomEvent("brandstudios:open-final-hitl", { detail: { shotNumber } }));
+  };
+
   return (
     <div className="fixed inset-0 z-[650] flex justify-end bg-black/60 backdrop-blur-sm" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
@@ -254,6 +261,13 @@ export default function ShotReshootDrawer({
                 <p className="mt-1 text-[10px] font-mono uppercase tracking-wider text-white/40">
                   #{shot.shotNumber}/30 · {formatBeat(shot.beat)} · {startS}s–{endS}s · {shot.durationS}s
                 </p>
+                <button
+                  type="button"
+                  onClick={handleOpenFinalHitl}
+                  className="mt-3 inline-flex items-center rounded-xl border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-[8px] font-mono font-bold uppercase tracking-[0.22em] text-orange-200 transition-all hover:border-orange-300/50 hover:bg-orange-500/20 focus:outline-none focus:ring-2 focus:ring-orange-300/40"
+                >
+                  <PencilLine size={11} className="mr-1.5" /> Final HITL
+                </button>
               </div>
               <button
                 type="button"

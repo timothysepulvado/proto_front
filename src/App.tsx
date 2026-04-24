@@ -22,6 +22,7 @@ import type { HudRoot } from "./types/hud";
 import noiseTexture from "./assets/noise.svg";
 import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
+import DeliverableTimeline from "./components/DeliverableTimeline";
 import ShotDetailDrawer from "./components/ShotDetailDrawer";
 import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
@@ -282,6 +283,7 @@ export default function App() {
   const [creativeSubtab, setCreativeSubtab] = useState<"deliverables" | "reshoots">("deliverables");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [finalHitlShotNumber, setFinalHitlShotNumber] = useState<number | null>(null);
   const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
   const [globalPendingCount, setGlobalPendingCount] = useState(0);
 
@@ -365,6 +367,20 @@ export default function App() {
       cancelled = true;
     };
   }, [activeClient]);
+
+
+  useEffect(() => {
+    const handleOpenFinalHitl = (event: Event) => {
+      const detail = (event as CustomEvent<{ shotNumber?: unknown }>).detail;
+      const shotNumber = typeof detail?.shotNumber === "number" ? detail.shotNumber : null;
+      setFinalHitlShotNumber(shotNumber);
+      setActivePillar("review");
+      setShowReviewPanel(true);
+    };
+
+    window.addEventListener("brandstudios:open-final-hitl", handleOpenFinalHitl);
+    return () => window.removeEventListener("brandstudios:open-final-hitl", handleOpenFinalHitl);
+  }, []);
 
   // Fetch pending HITL reviews for the active client + global count
   useEffect(() => {
@@ -943,11 +959,14 @@ export default function App() {
                           ) : !currentRun?.campaignId ? (
                             <PromptEvolutionPanel clientId={activeClient} />
                           ) : (
-                            <DeliverableTracker
-                              campaignId={currentRun.campaignId}
-                              runId={currentRun.runId}
-                              onShotClick={(n, id) => setSelectedShot({ n, id })}
-                            />
+                            <>
+                              <DeliverableTimeline />
+                              <DeliverableTracker
+                                campaignId={currentRun.campaignId}
+                                runId={currentRun.runId}
+                                onShotClick={(n, id) => setSelectedShot({ n, id })}
+                              />
+                            </>
                           )}
                         </>
                       )}
@@ -1182,7 +1201,11 @@ export default function App() {
         <ReviewPanel
           runId={currentRun.runId}
           clientName={currentClient.name}
-          onClose={() => setShowReviewPanel(false)}
+          initialFinalHitlShotNumber={finalHitlShotNumber}
+          onClose={() => {
+            setShowReviewPanel(false);
+            setFinalHitlShotNumber(null);
+          }}
           onComplete={handleReviewComplete}
         />
       )}

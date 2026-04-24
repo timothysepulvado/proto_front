@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { readFile, writeFile, rename } from "node:fs/promises";
+import { dirname, extname, join, normalize } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import type { Request, Response, Router } from "express";
@@ -25,11 +25,25 @@ type ManifestShot = {
   characters_needed?: unknown;
   veo_prompt?: string;
   still_prompt?: string;
+  negative_prompt?: string;
 };
 
 type Manifest = {
   shots: ManifestShot[];
+  [key: string]: unknown;
 };
+
+type ProductionShotPatch = {
+  visualIntent?: unknown;
+  beat?: unknown;
+  durationS?: unknown;
+  charactersNeeded?: unknown;
+  stillPrompt?: unknown;
+  veoPrompt?: unknown;
+  negativePrompt?: unknown;
+};
+
+type ProductionShotResponse = Awaited<ReturnType<typeof buildShotCatalog>>["shots"][number];
 
 export type ProductionJob = {
   jobId: string;
@@ -88,15 +102,20 @@ function safePath(root: string, ...segments: string[]): string {
   return target;
 }
 
-async function loadManifest(productionSlug: string): Promise<Manifest> {
-  const cached = manifestCache.get(productionSlug);
-  if (cached) return cached;
+async function readManifestFromDisk(productionSlug: string): Promise<Manifest> {
   const manifestPath = safePath(productionRoot(productionSlug), "manifest.json");
   const raw = await readFile(manifestPath, "utf8");
   const parsed = JSON.parse(raw) as Manifest;
   if (!Array.isArray(parsed.shots)) {
     throw new Error(`Manifest for ${productionSlug} is missing shots[]`);
   }
+  return parsed;
+}
+
+async function loadManifest(productionSlug: string): Promise<Manifest> {
+  const cached = manifestCache.get(productionSlug);
+  if (cached) return cached;
+  const parsed = await readManifestFromDisk(productionSlug);
   manifestCache.set(productionSlug, parsed);
   return parsed;
 }
@@ -114,6 +133,12 @@ function nullableFileMeta(path: string) {
   return existsSync(path) ? fileMeta(path) : null;
 }
 
+function validationError(message: string): Error {
+  const error = new Error(message);
+  error.name = "ValidationError";
+  return error;
+}
+
 function shotPaths(productionSlug: string, shotNumber: number) {
   const root = productionRoot(productionSlug);
   const padded = padShot(shotNumber);
@@ -123,6 +148,7 @@ function shotPaths(productionSlug: string, shotNumber: number) {
     backup: safePath(root, "shots", `shot_${padded}_v5_backup.mp4`),
     pending: safePath(root, "shots", "v5_standard", `shot_${padded}.mp4`),
     still: safePath(root, "stills", `shot_${padded}.png`),
+    thumbnail: safePath(root, ".thumbnails", `shot_${padded}.jpg`),
     assembly: safePath(root, "assembly", "drift_final.mp4"),
   };
 }
@@ -190,44 +216,160 @@ function streamProcessLines(
   });
 }
 
+function mapManifestShotToResponse(productionSlug: string, shot: ManifestShot) {
+  const shotNumber = shot.id;
+  const paths = shotPaths(productionSlug, shotNumber);
+  const canonicalMeta = fileMeta(paths.canonical);
+  const pending = nullableFileMeta(paths.pending);
+
+  return {
+    shotNumber,
+    beat: shot.section ?? "unmapped",
+    startS: shot.start_s ?? 0,
+    endS: shot.end_s ?? (shot.start_s ?? 0) + (shot.duration_s ?? 0),
+    durationS: shot.duration_s ?? 0,
+    visualIntent: shot.visual ?? "",
+    charactersNeeded: Array.isArray(shot.characters_needed)
+      ? shot.characters_needed.filter((item): item is string => typeof item === "string")
+      : [],
+    defaultPrompt: shot.veo_prompt ?? "",
+    stillPrompt: shot.still_prompt ?? "",
+    negativePrompt: shot.negative_prompt ?? "",
+    canonical: {
+      ...canonicalMeta,
+      backupExists: existsSync(paths.backup),
+    },
+    pending,
+    stillPath: existsSync(paths.still) ? paths.still : null,
+    activeJob: currentJobForShot(productionSlug, shotNumber),
+  };
+}
+
 async function buildShotCatalog(productionSlug: string) {
   const manifest = await loadManifest(productionSlug);
   const renderArtifact = nullableFileMeta(shotPaths(productionSlug, SHOT_MIN).assembly);
-  const shots = manifest.shots.map((shot) => {
-    const shotNumber = shot.id;
-    const paths = shotPaths(productionSlug, shotNumber);
-    const canonicalMeta = fileMeta(paths.canonical);
-    const pending = nullableFileMeta(paths.pending);
-
-    return {
-      shotNumber,
-      beat: shot.section ?? "unmapped",
-      startS: shot.start_s ?? 0,
-      endS: shot.end_s ?? (shot.start_s ?? 0) + (shot.duration_s ?? 0),
-      durationS: shot.duration_s ?? 0,
-      visualIntent: shot.visual ?? "",
-      charactersNeeded: Array.isArray(shot.characters_needed)
-        ? shot.characters_needed.filter((item): item is string => typeof item === "string")
-        : [],
-      defaultPrompt: shot.veo_prompt ?? "",
-      stillPrompt: shot.still_prompt ?? "",
-      canonical: {
-        ...canonicalMeta,
-        backupExists: existsSync(paths.backup),
-      },
-      pending,
-      stillPath: existsSync(paths.still) ? paths.still : null,
-      activeJob: currentJobForShot(productionSlug, shotNumber),
-    };
-  });
+  const shots = manifest.shots.map((shot) => mapManifestShotToResponse(productionSlug, shot));
 
   return { shots, renderArtifact };
+}
+
+
+function validateOptionalString(value: unknown, fieldName: string, maxLength: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw validationError(`${fieldName} must be a string`);
+  if (value.length > maxLength) throw validationError(`${fieldName} must be ${maxLength} characters or fewer`);
+  return value;
+}
+
+function validateDuration(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw validationError("durationS must be a finite number");
+  if (value <= 0 || value > 30) throw validationError("durationS must be > 0 and <= 30");
+  return value;
+}
+
+function validateCharactersNeeded(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw validationError("charactersNeeded must be an array of strings");
+  if (value.length > 20) throw validationError("charactersNeeded may include at most 20 entries");
+  return value.map((item, index) => {
+    if (typeof item !== "string") throw validationError(`charactersNeeded[${index}] must be a string`);
+    const trimmed = item.trim();
+    if (trimmed.length > 50) throw validationError(`charactersNeeded[${index}] must be 50 characters or fewer`);
+    return trimmed;
+  }).filter(Boolean);
+}
+
+function recalculateTimeline(shots: ManifestShot[]): void {
+  let cursor = 0;
+  for (const shot of shots) {
+    const duration = typeof shot.duration_s === "number" && Number.isFinite(shot.duration_s) ? shot.duration_s : 0;
+    shot.start_s = Number(cursor.toFixed(3));
+    cursor += duration;
+    shot.end_s = Number(cursor.toFixed(3));
+  }
+}
+
+function totalDuration(shots: ManifestShot[]): number {
+  return shots.reduce((sum, shot) => sum + (typeof shot.duration_s === "number" && Number.isFinite(shot.duration_s) ? shot.duration_s : 0), 0);
+}
+
+function applyShotPatch(shot: ManifestShot, patch: ProductionShotPatch): void {
+  const visualIntent = validateOptionalString(patch.visualIntent, "visualIntent", 4000);
+  const beat = validateOptionalString(patch.beat, "beat", 50);
+  const durationS = validateDuration(patch.durationS);
+  const charactersNeeded = validateCharactersNeeded(patch.charactersNeeded);
+  const stillPrompt = validateOptionalString(patch.stillPrompt, "stillPrompt", 4000);
+  const veoPrompt = validateOptionalString(patch.veoPrompt, "veoPrompt", 4000);
+  const negativePrompt = validateOptionalString(patch.negativePrompt, "negativePrompt", 4000);
+
+  if (visualIntent !== undefined) shot.visual = visualIntent;
+  if (beat !== undefined) shot.section = beat;
+  if (durationS !== undefined) shot.duration_s = durationS;
+  if (charactersNeeded !== undefined) shot.characters_needed = charactersNeeded;
+  if (stillPrompt !== undefined) shot.still_prompt = stillPrompt;
+  if (veoPrompt !== undefined) shot.veo_prompt = veoPrompt;
+  if (negativePrompt !== undefined) shot.negative_prompt = negativePrompt;
+}
+
+async function writeManifestAtomic(productionSlug: string, manifest: Manifest): Promise<void> {
+  const manifestPath = safePath(productionRoot(productionSlug), "manifest.json");
+  const tmpPath = `${manifestPath}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await rename(tmpPath, manifestPath);
+  manifestCache.delete(productionSlug);
+}
+
+async function extractThumbnail(productionSlug: string, shotNumber: number): Promise<string> {
+  const paths = shotPaths(productionSlug, shotNumber);
+  if (!existsSync(paths.canonical)) {
+    throw Object.assign(new Error("Canonical shot video not found"), { name: "NotFoundError" });
+  }
+
+  const canonicalStats = statSync(paths.canonical);
+  const needsRegenerate = !existsSync(paths.thumbnail) || statSync(paths.thumbnail).mtimeMs < canonicalStats.mtimeMs;
+  if (!needsRegenerate) return paths.thumbnail;
+
+  mkdirSync(dirname(paths.thumbnail), { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn("ffmpeg", [
+      "-y",
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      paths.canonical,
+      "-vframes",
+      "1",
+      "-q:v",
+      "2",
+      paths.thumbnail,
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+
+    let stderr = "";
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exit ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+    });
+    proc.on("error", reject);
+  });
+
+  return paths.thumbnail;
 }
 
 function sendJsonError(res: Response, err: unknown, label: string): void {
   const message = err instanceof Error ? err.message : "Unknown error";
   if (err instanceof Error && err.name === "ValidationError") {
     res.status(400).json({ error: message });
+    return;
+  }
+  if (err instanceof Error && err.name === "NotFoundError") {
+    res.status(404).json({ error: message });
     return;
   }
   console.error(`${label} error:`, err);
@@ -370,6 +512,60 @@ export function createProductionsRouter(): Router {
       res.json(catalog);
     } catch (err) {
       sendJsonError(res, err, "GET /api/productions/:productionSlug/shots");
+    }
+  });
+
+  router.get("/:productionSlug/shots/:n/thumbnail", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "n"));
+      const thumbnailPath = await extractThumbnail(productionSlug, shotNumber);
+      res.setHeader("Content-Type", "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=300");
+      createReadStream(thumbnailPath).pipe(res);
+    } catch (err) {
+      const isMissingFfmpeg = err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+      if (isMissingFfmpeg) {
+        res.status(503).json({ error: "ffmpeg not available", detail: err.message });
+        return;
+      }
+      sendJsonError(res, err, "GET /api/productions/:productionSlug/shots/:n/thumbnail");
+    }
+  });
+
+  router.patch("/:productionSlug/shots/:n", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "n"));
+      const body = (req.body ?? {}) as ProductionShotPatch;
+      const manifest = await readManifestFromDisk(productionSlug);
+      const shot = manifest.shots.find((item) => item.id === shotNumber);
+      if (!shot) {
+        res.status(404).json({ error: "Shot not found" });
+        return;
+      }
+
+      const originalTotalDuration = totalDuration(manifest.shots);
+      applyShotPatch(shot, body);
+      if (body.durationS !== undefined) recalculateTimeline(manifest.shots);
+      const nextTotalDuration = totalDuration(manifest.shots);
+      const cumulativeDurationDelta = nextTotalDuration - originalTotalDuration;
+
+      await writeManifestAtomic(productionSlug, manifest);
+      const updatedShot = mapManifestShotToResponse(productionSlug, shot) as ProductionShotResponse;
+      emitProductionEvent(productionSlug, {
+        type: "shot_manifest_updated",
+        shotNumber,
+        cumulativeDurationDeltaS: Number(cumulativeDurationDelta.toFixed(3)),
+      });
+
+      const response: { ok: true; shot: ProductionShotResponse; warning?: string } = { ok: true, shot: updatedShot };
+      if (Math.abs(cumulativeDurationDelta) > 1) {
+        response.warning = `cumulativeDurationDelta=${Number(cumulativeDurationDelta.toFixed(1))}s — music sync may break`;
+      }
+      res.json(response);
+    } catch (err) {
+      sendJsonError(res, err, "PATCH /api/productions/:productionSlug/shots/:n");
     }
   });
 

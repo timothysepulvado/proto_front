@@ -27,6 +27,7 @@ import {
   type CampaignDeliverable,
 } from "../api";
 import noiseTexture from "../assets/noise.svg";
+import FinalHITLPanel from "./FinalHITLPanel";
 
 // -- Overlay (matches HUD)
 const OverlayEffects = ({ className = "" }: { className?: string }) => (
@@ -84,15 +85,47 @@ const formatFileSize = (bytes?: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 };
 
+
+function metadataShotNumber(metadata: Record<string, unknown> | undefined): number | null {
+  if (!metadata) return null;
+  const direct = metadata.shotNumber ?? metadata.shot_number;
+  if (typeof direct === "number" && Number.isInteger(direct)) return direct;
+  const narrative = metadata.narrative_context;
+  if (narrative && typeof narrative === "object") {
+    const shot = (narrative as { shot_number?: unknown; shotNumber?: unknown }).shot_number
+      ?? (narrative as { shotNumber?: unknown }).shotNumber;
+    if (typeof shot === "number" && Number.isInteger(shot)) return shot;
+  }
+  return null;
+}
+
+function shotNumberFromText(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = /shot[_\s#-]*(\d{1,2})/i.exec(value) ?? /#(\d{1,2})\b/.exec(value);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 30 ? parsed : null;
+}
+
+function inferShotNumberFromArtifact(artifact: Artifact | undefined, deliverable?: CampaignDeliverable): number | null {
+  if (!artifact) return null;
+  return metadataShotNumber(artifact.metadata)
+    ?? shotNumberFromText(deliverable?.description)
+    ?? shotNumberFromText(artifact.name)
+    ?? shotNumberFromText(artifact.storagePath)
+    ?? shotNumberFromText(artifact.path);
+}
+
 // -- Component
 interface ReviewPanelProps {
   runId: string;
   clientName: string;
+  initialFinalHitlShotNumber?: number | null;
   onClose: () => void;
   onComplete: () => void;
 }
 
-export default function ReviewPanel({ runId, clientName, onClose, onComplete }: ReviewPanelProps) {
+export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNumber = null, onClose, onComplete }: ReviewPanelProps) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [categories, setCategories] = useState<RejectionCategory[]>([]);
   const [existingDecisions, setExistingDecisions] = useState<HitlDecision[]>([]);
@@ -102,6 +135,7 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
+  const [selectedFinalHitlShotNumber, setSelectedFinalHitlShotNumber] = useState<number | null>(initialFinalHitlShotNumber);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   // Load data
@@ -154,7 +188,10 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
         }
         if (cancelled) return;
         setDecisions(map);
-        if (arts.length > 0) setExpandedArtifact(arts[0].id);
+        if (arts.length > 0) {
+          setExpandedArtifact(arts[0].id);
+          setSelectedFinalHitlShotNumber((current) => current ?? inferShotNumberFromArtifact(arts[0]));
+        }
       } catch {
         if (!cancelled) setSubmitError("Couldn't load review data. Retry.");
       } finally {
@@ -204,6 +241,22 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
     () => new Set(existingDecisions.map((d) => d.artifactId)),
     [existingDecisions]
   );
+
+
+  useEffect(() => {
+    if (typeof initialFinalHitlShotNumber === "number") {
+      setSelectedFinalHitlShotNumber(initialFinalHitlShotNumber);
+    }
+  }, [initialFinalHitlShotNumber]);
+
+  useEffect(() => {
+    if (!expandedArtifact) return;
+    if (typeof initialFinalHitlShotNumber === "number" && selectedFinalHitlShotNumber === initialFinalHitlShotNumber) return;
+    const artifact = artifacts.find((item) => item.id === expandedArtifact);
+    const deliverable = artifact?.deliverableId ? deliverableMap.get(artifact.deliverableId) : undefined;
+    const inferred = inferShotNumberFromArtifact(artifact, deliverable);
+    if (inferred) setSelectedFinalHitlShotNumber(inferred);
+  }, [artifacts, deliverableMap, expandedArtifact, initialFinalHitlShotNumber, selectedFinalHitlShotNumber]);
 
   const handleSubmit = useCallback(async () => {
     setIsSubmitting(true);
@@ -264,7 +317,7 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
 
   return (
     <div className="fixed inset-0 z-[700] flex items-center justify-center p-4 bg-black/70 backdrop-blur-xl fade-zoom-in">
-      <div className="w-full max-w-3xl max-h-[90vh] bg-[#0a0c10] border border-cyan-500/30 rounded-[3rem] shadow-[0_0_100px_rgba(0,0,0,0.8)] relative overflow-hidden flex flex-col">
+      <div className="w-full max-w-6xl max-h-[92vh] bg-[#0a0c10] border border-cyan-500/30 rounded-[3rem] shadow-[0_0_100px_rgba(0,0,0,0.8)] relative overflow-hidden flex flex-col">
         <TickMarks count={60} />
 
         {/* Header */}
@@ -334,7 +387,12 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
         </div>
 
         {/* Scrollable Artifact List */}
-        <div className="flex-1 overflow-y-auto px-10 py-6 space-y-3 relative z-20 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+        <div className="flex-1 overflow-y-auto px-10 py-6 space-y-5 relative z-20 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+          <FinalHITLPanel
+            selectedShotNumber={selectedFinalHitlShotNumber}
+            onShotChange={setSelectedFinalHitlShotNumber}
+          />
+
           {isLoading ? (
             <div className="flex flex-col items-center justify-center py-16">
               <div className="w-8 h-8 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin" />
@@ -413,7 +471,11 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
 
                   {/* Artifact Header */}
                   <button
-                    onClick={() => setExpandedArtifact(isExpanded ? null : artifact.id)}
+                    onClick={() => {
+                      setExpandedArtifact(isExpanded ? null : artifact.id);
+                      const inferred = inferShotNumberFromArtifact(artifact, artifact.deliverableId ? deliverableMap.get(artifact.deliverableId) : undefined);
+                      if (inferred) setSelectedFinalHitlShotNumber(inferred);
+                    }}
                     className="w-full flex items-center justify-between p-4 text-left"
                   >
                     <div className="flex items-center space-x-3 min-w-0">
