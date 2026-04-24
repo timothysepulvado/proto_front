@@ -1581,6 +1581,92 @@ export async function recordOrchestrationDecision(params: {
   return mapOrchestrationDecision(data as DbOrchestrationDecision);
 }
 
+/**
+ * Estimate the total in-flight cost for a run — sum of recorded
+ * `orchestration_decisions.cost` (real Anthropic spend, accurate) plus
+ * per-Veo-artifact cost ESTIMATED via a model-id → cost-per-second table
+ * (Vertex doesn't return realized cost; we approximate from public pricing).
+ *
+ * Used by `runner.ts::executeRegradeStage` for the per-production
+ * `ProductionBudget` cap (2026-04-23). The ESTIMATE is intentionally
+ * conservative — better to halt early than to blow past the budget waiting
+ * for billing reconciliation.
+ *
+ * Image-gen cost (Temp-gen `/generate/image` for L3 redesigns) is currently
+ * out of scope — Gemini 3 Pro Image cost is small (~$0.03/image) compared
+ * to Veo ($1.60-$3.20/clip), so the omission is conservative-favorable
+ * (real cost is slightly higher than estimate).
+ */
+export const VEO_COST_PER_SECOND_BY_MODEL: Record<string, number> = {
+  // Vertex Veo 3.1 GA standard ~ $0.40/second (placeholder per Temp-gen
+  // cost_utils observed pricing; tune as Vertex publishes official rates).
+  "veo-3.1-generate-001": 0.40,
+  // Vertex Veo 3.1 Fast preview ~ half of standard.
+  "veo-3.1-fast-generate-preview": 0.20,
+};
+
+export interface RunCostEstimate {
+  orchestratorUsd: number;
+  veoUsd: number;
+  imageUsd: number;
+  totalUsd: number;
+  orchDecisionCount: number;
+  veoArtifactCount: number;
+  imageArtifactCount: number;
+}
+
+export async function getRunCostEstimate(runId: string): Promise<RunCostEstimate> {
+  const [decsRes, artsRes] = await Promise.all([
+    supabase
+      .from("orchestration_decisions")
+      .select("cost")
+      .eq("run_id", runId),
+    supabase
+      .from("artifacts")
+      .select("type, metadata")
+      .eq("run_id", runId)
+      .in("type", ["video", "image"]),
+  ]);
+  if (decsRes.error)
+    throw new Error(`getRunCostEstimate: orchestration_decisions read failed: ${decsRes.error.message}`);
+  if (artsRes.error)
+    throw new Error(`getRunCostEstimate: artifacts read failed: ${artsRes.error.message}`);
+
+  const orchestratorUsd = (decsRes.data ?? []).reduce(
+    (s: number, d: { cost?: number | null }) => s + (d.cost ?? 0),
+    0,
+  );
+
+  let veoUsd = 0;
+  let imageUsd = 0;
+  let veoArtifactCount = 0;
+  let imageArtifactCount = 0;
+  for (const a of artsRes.data ?? []) {
+    const meta = (a.metadata as Record<string, unknown> | null) ?? {};
+    if (a.type === "video") {
+      veoArtifactCount += 1;
+      const model = typeof meta.model === "string" ? meta.model : "veo-3.1-fast-generate-preview";
+      const duration = typeof meta.duration_seconds === "number" ? meta.duration_seconds : 8;
+      const perSec = VEO_COST_PER_SECOND_BY_MODEL[model] ?? VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-fast-generate-preview"];
+      veoUsd += perSec * duration;
+    } else if (a.type === "image") {
+      imageArtifactCount += 1;
+      // Gemini 3 Pro image ~$0.03/image (placeholder; small relative to Veo).
+      imageUsd += 0.03;
+    }
+  }
+
+  return {
+    orchestratorUsd,
+    veoUsd,
+    imageUsd,
+    totalUsd: orchestratorUsd + veoUsd + imageUsd,
+    orchDecisionCount: (decsRes.data ?? []).length,
+    veoArtifactCount,
+    imageArtifactCount,
+  };
+}
+
 export async function getOrchestrationDecisions(escalationId: string): Promise<OrchestrationDecisionRecord[]> {
   const { data, error } = await supabase
     .from("orchestration_decisions")

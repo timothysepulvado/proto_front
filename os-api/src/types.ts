@@ -426,6 +426,34 @@ export interface MusicVideoContext {
 }
 
 /**
+ * Per-production budget cap (Chunk 3 follow-up post-LANDED, 2026-04-23).
+ *
+ * Stored on `campaigns.guardrails.production_budget` JSONB, opt-in per
+ * campaign. When present, the runner checks aggregated run cost (orchestrator
+ * decisions + estimated Veo cost) before each deliverable iteration. Crossing
+ * `warn_at_pct` logs a warning; crossing `hard_stop_at_pct` halts the run by
+ * marking it `needs_review` so the operator decides whether to top up the
+ * budget or close it out.
+ *
+ * Per-shot `PER_SHOT_HARD_CAP_USD=4` in `escalation_loop.ts` continues to bite
+ * inside a single shot's escalation loop. This `ProductionBudget` is the
+ * outer envelope across all shots in one run.
+ *
+ * Veo cost estimation: per `runner.ts::VEO_COST_PER_SECOND_BY_MODEL`. Real
+ * Vertex pricing is not exposed via API, so we maintain a model→cost-per-second
+ * constant. Audit-friendly: the actual cost lives in the upstream invoice; we
+ * estimate in-process for halt logic only.
+ */
+export interface ProductionBudget {
+  /** Hard cap in USD across the whole run (orchestrator + Veo + image gen). */
+  total_usd: number;
+  /** Percentage at which to log a budget warning (default 75). */
+  warn_at_pct?: number;
+  /** Percentage at which to halt the run (default 100). */
+  hard_stop_at_pct?: number;
+}
+
+/**
  * Per-production QA threshold knob (Chunk 3 follow-up, 2026-04-23 — "Path C"
  * in plan `fresh-context-today-is-glowing-harp.md`).
  *

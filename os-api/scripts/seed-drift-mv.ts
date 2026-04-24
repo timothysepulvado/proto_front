@@ -193,7 +193,7 @@ async function upsertDeliverable(shot: ManifestShot): Promise<void> {
     id,
     campaign_id: CAMPAIGN_ID,
     description: shotDescription(shot),
-    ai_model: "veo-3.1-generate-001",
+    ai_model: "veo-3.1-fast-generate-preview",
     current_prompt: shot.veo_prompt,
     original_prompt: shot.veo_prompt,
     status: "pending",

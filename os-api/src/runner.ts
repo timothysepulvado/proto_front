@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, Artifact, StageStatus, Campaign, CampaignDeliverable, VideoGradeResult } from "./types.js";
+import type { Run, Artifact, ProductionBudget, StageStatus, Campaign, CampaignDeliverable, VideoGradeResult } from "./types.js";
 import {
   updateRun,
   addLog,
@@ -16,6 +16,7 @@ import {
   getLatestArtifactByDeliverable,
   updateDeliverableStatus,
   listKnownLimitations,
+  getRunCostEstimate,
 } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import { handleQAFailure, markEscalationResolved } from "./escalation_loop.js";
@@ -602,7 +603,7 @@ async function executeDeliverableGeneration(
       "/generate/video", "POST",
       {
         prompt,
-        model: deliverable.aiModel ?? "veo-3.1-generate-001",
+        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
         duration_seconds: deliverable.durationSeconds ?? 8,
         aspect_ratio: deliverable.aspectRatio ?? "16:9",
         resolution: deliverable.resolution ?? "720p",
@@ -627,7 +628,7 @@ async function executeDeliverableGeneration(
           localPath: resultPath || path.join(outputDir, vidFileName),
           stage: stageId,
           metadata: {
-            model: deliverable.aiModel ?? "veo-3.1",
+            model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
             prompt,
             duration_seconds: deliverable.durationSeconds ?? 8,
             quality_tier: deliverable.qualityTier ?? "standard",
@@ -858,7 +859,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
     "/generate/video", "POST",
     {
       prompt: videoPrompt,
-      model: "veo-3.1-generate-001",
+      model: "veo-3.1-fast-generate-preview",
       duration_seconds: 8,
       aspect_ratio: "16:9",
       resolution: "720p",
@@ -880,7 +881,7 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
         name: "generated.mp4",
         localPath: resultPath || path.join(outputDir, "generated.mp4"),
         stage: stageId,
-        metadata: { model: "veo-3.1", prompt: videoPrompt },
+        metadata: { model: "veo-3.1-fast-generate-preview", prompt: videoPrompt },
       });
       run = await updateStageStatus(run, stageId, "completed");
       return true;
@@ -1208,7 +1209,7 @@ async function gradeAndEscalateVideo(params: {
     // 1. Grade the current video
     await emitLog(run.runId, stageId, "info", `Grading video artifact ${currentArtifact.id} (loop ${loop + 1}/${ESCALATION_LOOP_MAX})`);
 
-    const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-generate-001" });
+    const catalog = await listKnownLimitations({ model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview" });
     const relevantFailureModes = catalog.map((k) => k.failureMode);
 
     // Prefer the on-disk path (stored in metadata by createArtifactWithUpload)
@@ -1366,7 +1367,7 @@ async function gradeAndEscalateVideo(params: {
       "POST",
       {
         prompt: newPrompts.veoPrompt ?? deliverable.currentPrompt,
-        model: deliverable.aiModel ?? "veo-3.1-generate-001",
+        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
         duration_seconds: deliverable.durationSeconds ?? 8,
         aspect_ratio: deliverable.aspectRatio ?? "16:9",
         resolution: deliverable.resolution ?? "1080p",
@@ -1402,7 +1403,7 @@ async function gradeAndEscalateVideo(params: {
       localPath: newVidPath || path.join(vidOutputDir, newVidFileName),
       stage: stageId,
       metadata: {
-        model: deliverable.aiModel ?? "veo-3.1",
+        model: deliverable.aiModel ?? "veo-3.1-fast-generate-preview",
         prompt: newPrompts.veoPrompt,
         negativePrompt: newPrompts.negativePrompt,
         referenceImagePath: refImagePath,
@@ -1664,8 +1665,57 @@ async function executeRegradeStage(run: Run): Promise<boolean> {
   await emitLog(run.runId, stageId, "info",
     `Campaign "${campaign.name}" has ${deliverables.length} deliverable(s) to regrade`);
 
+  // Per-production budget cap (post-Chunk-3, 2026-04-23). Opt-in via
+  // `campaigns.guardrails.production_budget = { total_usd, warn_at_pct,
+  // hard_stop_at_pct }`. Per-shot $4 cap in escalation_loop.ts continues to
+  // bite inside a single shot; this is the outer envelope across all shots
+  // in one run. Halt + flag needs_review at hard_stop_at_pct so the operator
+  // decides whether to top up or close out.
+  const productionBudget = _extractProductionBudget(campaign);
+  let lastWarnedAtPct = 0;
+  if (productionBudget) {
+    await emitLog(run.runId, stageId, "info",
+      `Production budget active: $${productionBudget.total_usd} ` +
+      `(warn=${productionBudget.warn_at_pct ?? 75}%, hard_stop=${productionBudget.hard_stop_at_pct ?? 100}%)`);
+  }
+
   const tally = { resolved: 0, hitl: 0, failed: 0, skipped: 0, missingArtifact: 0 };
+  let budgetHalted = false;
   for (const d of deliverables) {
+    // Budget check before each deliverable (post-shot, before next regen).
+    // Veo regens are the lion's share of cost; halting between shots saves
+    // a $1.60-3.20 bite even when per-shot cap holds.
+    if (productionBudget) {
+      try {
+        const cost = await getRunCostEstimate(run.runId);
+        const pct = (cost.totalUsd / productionBudget.total_usd) * 100;
+        const hardStopPct = productionBudget.hard_stop_at_pct ?? 100;
+        const warnPct = productionBudget.warn_at_pct ?? 75;
+        if (pct >= hardStopPct) {
+          await emitLog(run.runId, stageId, "warn",
+            `Production budget hard-stop: $${cost.totalUsd.toFixed(2)} of ` +
+            `$${productionBudget.total_usd} (${pct.toFixed(0)}%, threshold ${hardStopPct}%). ` +
+            `Halting regrade — operator review required.`,
+          );
+          budgetHalted = true;
+          break;
+        }
+        if (pct >= warnPct && lastWarnedAtPct < warnPct) {
+          await emitLog(run.runId, stageId, "warn",
+            `Production budget at ${pct.toFixed(0)}%: $${cost.totalUsd.toFixed(2)} of ` +
+            `$${productionBudget.total_usd} (orch=$${cost.orchestratorUsd.toFixed(2)} + ` +
+            `veo=$${cost.veoUsd.toFixed(2)} + img=$${cost.imageUsd.toFixed(2)} across ` +
+            `${cost.orchDecisionCount} decisions + ${cost.veoArtifactCount} videos)`,
+          );
+          lastWarnedAtPct = pct;
+        }
+      } catch (err) {
+        // Budget check failure shouldn't kill the run — log + continue.
+        await emitLog(run.runId, stageId, "warn",
+          `Budget check error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     try {
       const outcome = await regradeOneDeliverable(run, d, campaign, stageId);
       switch (outcome) {
@@ -1684,7 +1734,14 @@ async function executeRegradeStage(run: Run): Promise<boolean> {
 
   await emitLog(run.runId, stageId, "info",
     `Regrade summary — resolved=${tally.resolved} hitl=${tally.hitl} ` +
-    `failed=${tally.failed} skipped=${tally.skipped} missingArtifact=${tally.missingArtifact}`);
+    `failed=${tally.failed} skipped=${tally.skipped} missingArtifact=${tally.missingArtifact}` +
+    (budgetHalted ? " [HALTED on production budget cap]" : ""),
+  );
+
+  if (budgetHalted) {
+    // Flag the run as needs_review so the operator handles the budget call.
+    await updateRun(run.runId, { status: "needs_review", hitlRequired: true });
+  }
 
   // Stage is "completed" even if some deliverables need HITL or failed — the
   // runner surfaces those via hitlRequired + deliverable statuses. Stage only
@@ -1692,9 +1749,33 @@ async function executeRegradeStage(run: Run): Promise<boolean> {
   const fatalFail = tally.failed > 0 && tally.failed === deliverables.length;
   run = await updateStageStatus(run, stageId,
     fatalFail ? "failed" : "completed",
-    fatalFail ? "All deliverables failed regrade" : undefined,
+    fatalFail ? "All deliverables failed regrade" :
+      budgetHalted ? "Halted on production budget cap" : undefined,
   );
   return !fatalFail;
+}
+
+// ── Per-production budget extraction (post-Chunk-3, 2026-04-23) ───────────
+// Pulls ProductionBudget out of `campaigns.guardrails.production_budget`
+// JSONB. Opt-in per campaign — when absent or malformed, returns undefined
+// and the budget cap stays inert (existing behavior).
+export function _extractProductionBudget(
+  campaign: Campaign | null,
+): ProductionBudget | undefined {
+  if (!campaign) return undefined;
+  const g = campaign.guardrails;
+  if (!g || typeof g !== "object") return undefined;
+  const pb = (g as Record<string, unknown>).production_budget;
+  if (!pb || typeof pb !== "object") return undefined;
+  const total = (pb as Record<string, unknown>).total_usd;
+  if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return undefined;
+  const warn = (pb as Record<string, unknown>).warn_at_pct;
+  const hardStop = (pb as Record<string, unknown>).hard_stop_at_pct;
+  return {
+    total_usd: total,
+    warn_at_pct: typeof warn === "number" && Number.isFinite(warn) && warn > 0 && warn <= 100 ? warn : 75,
+    hard_stop_at_pct: typeof hardStop === "number" && Number.isFinite(hardStop) && hardStop > 0 && hardStop <= 200 ? hardStop : 100,
+  };
 }
 
 // Main run executor
