@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from "child_process";
+import type { ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
 import type { Run, Artifact, ProductionBudget, StageStatus, Campaign, CampaignDeliverable, NarrativeContext, VideoGradeResult } from "./types.js";
@@ -59,7 +59,6 @@ export const runEvents = new EventEmitter();
 
 // Environment paths
 const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || "/Users/timothysepulvado/Temp-gen";
-const TEMP_GEN_VENV = process.env.TEMP_GEN_VENV || path.join(TEMP_GEN_PATH, ".venv");
 
 // Brand Engine FastAPI sidecar (replaces Brand_linter subprocess calls)
 const BRAND_ENGINE_URL = process.env.BRAND_ENGINE_URL || "http://localhost:8100";
@@ -72,10 +71,6 @@ const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulv
 
 // Brand asset base directory (where per-brand asset folders live)
 const BRAND_ASSETS_BASE = process.env.BRAND_ASSETS_BASE || path.join(BRAND_LINTER_PATH, "data");
-
-function getPythonPath(venvPath: string): string {
-  return path.join(venvPath, "bin", "python");
-}
 
 async function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
   const log = {
@@ -160,62 +155,6 @@ async function createArtifactWithUpload(opts: {
   return addArtifact(artifact);
 }
 
-async function runCommand(
-  runId: string,
-  stage: string,
-  command: string,
-  args: string[],
-  cwd: string,
-  env?: Record<string, string>
-): Promise<{ success: boolean; output: string }> {
-  return new Promise((resolve) => {
-    emitLog(runId, stage, "info", `Executing: ${command} ${args.join(" ")}`).catch(console.error);
-
-    const proc = spawn(command, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    activeProcesses.set(runId, proc);
-
-    let output = "";
-
-    proc.stdout?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      output += text;
-      text.split("\n").filter(Boolean).forEach((line) => {
-        emitLog(runId, stage, "info", line).catch(console.error);
-      });
-    });
-
-    proc.stderr?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      output += text;
-      text.split("\n").filter(Boolean).forEach((line) => {
-        emitLog(runId, stage, "warn", line).catch(console.error);
-      });
-    });
-
-    proc.on("close", async (code) => {
-      activeProcesses.delete(runId);
-      if (code === 0) {
-        await emitLog(runId, stage, "info", `Stage completed successfully`);
-        resolve({ success: true, output });
-      } else {
-        await emitLog(runId, stage, "error", `Stage failed with exit code ${code}`);
-        resolve({ success: false, output });
-      }
-    });
-
-    proc.on("error", async (err) => {
-      activeProcesses.delete(runId);
-      await emitLog(runId, stage, "error", `Process error: ${err.message}`);
-      resolve({ success: false, output: err.message });
-    });
-  });
-}
-
 // Helper to check if a directory exists
 function directoryExists(dirPath: string): boolean {
   try {
@@ -255,18 +194,6 @@ async function callBrandEngine<T = unknown>(
   }
 }
 
-// Check brand-engine sidecar health
-async function checkBrandEngineHealth(): Promise<boolean> {
-  try {
-    const response = await fetch(`${BRAND_ENGINE_URL}/health`, {
-      signal: AbortSignal.timeout(5_000),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
 // Temp-gen sidecar helper — POST/GET JSON, parse response, handle errors
 async function callTempGen<T = unknown>(
   endpoint: string,
@@ -300,18 +227,6 @@ async function callTempGen<T = unknown>(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: msg };
-  }
-}
-
-// Check temp-gen sidecar health
-async function checkTempGenHealth(): Promise<boolean> {
-  try {
-    const response = await fetch(`${TEMP_GEN_URL}/health`, {
-      signal: AbortSignal.timeout(5_000),
-    });
-    return response.ok;
-  } catch {
-    return false;
   }
 }
 
