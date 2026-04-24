@@ -343,11 +343,142 @@ def _output_schema_example() -> dict:
     }
 
 
+def _repair_truncated_json(text: str) -> Optional[dict]:
+    """Best-effort recovery for Gemini-truncated JSON output.
+
+    Gemini 3.1 Pro periodically returns truncated JSON when its response runs
+    over the `max_output_tokens` budget — measured at ~20% rate during Step 10d
+    full-catalog regrade, the chief cause of brand-engine critic failures
+    blocking the orchestrator. This helper tries a small ladder of progressive
+    repairs and returns the first parse-success, or None if nothing recovers.
+
+    Repair strategies (applied in order, each on top of the last):
+      1. Strip trailing whitespace + trailing commas
+      2. Drop a partial mid-string value (find unbalanced quote, chop)
+      3. Append closers to balance `{` and `[` counts
+      4. Try with one more closer in case a partial token confused the count
+
+    On success the recovered structure is annotated with a synthetic
+    `_truncation_recovered: true` field so downstream code can flag it for
+    quality monitoring (the orchestrator can decide whether a recovered grade
+    counts toward consensus or not).
+    """
+    candidate = text.strip()
+    if not candidate:
+        return None
+
+    # Step 1: trailing whitespace + trailing commas (common on `,` cutoffs)
+    while candidate and candidate[-1] in " \t\n\r,":
+        candidate = candidate[:-1]
+    if not candidate:
+        return None
+
+    # Step 2: detect odd number of unescaped quotes → truncated mid-string.
+    # Walk char-by-char respecting backslash escapes.
+    quote_count = 0
+    i = 0
+    while i < len(candidate):
+        c = candidate[i]
+        if c == "\\":
+            i += 2  # skip escaped char
+            continue
+        if c == '"':
+            quote_count += 1
+        i += 1
+    if quote_count % 2 == 1:
+        # Odd quote → we're inside a string. Walk back to the last opening
+        # quote and chop everything from that key:value onward (including
+        # any preceding comma).
+        # Find the last unescaped `"` before truncation.
+        j = len(candidate) - 1
+        while j >= 0:
+            if candidate[j] == '"' and (j == 0 or candidate[j - 1] != "\\"):
+                # Walk back further to find the property's preceding `,` or `{`.
+                k = j - 1
+                while k >= 0 and candidate[k] not in ",{":
+                    k -= 1
+                if k >= 0:
+                    candidate = candidate[: k].rstrip().rstrip(",").rstrip()
+                else:
+                    candidate = ""
+                break
+            j -= 1
+        if not candidate:
+            return None
+
+    # Strip another trailing comma if Step 2 left one
+    while candidate and candidate[-1] in " \t\n\r,:":
+        candidate = candidate[:-1]
+    if not candidate:
+        return None
+
+    # Step 3: walk the candidate respecting string boundaries and build a
+    # nesting stack of open `{` and `[`. The remaining stack at end-of-walk is
+    # what needs closing — close in reverse order so the inner-most opens are
+    # closed first (so `[{` closes as `}]`, not `]}`).
+    stack: list[str] = []
+    in_string = False
+    i = 0
+    while i < len(candidate):
+        c = candidate[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            in_string = not in_string
+            i += 1
+            continue
+        if not in_string:
+            if c in "{[":
+                stack.append(c)
+            elif c == "}":
+                if not stack or stack[-1] != "{":
+                    return None  # malformed shape
+                stack.pop()
+            elif c == "]":
+                if not stack or stack[-1] != "[":
+                    return None
+                stack.pop()
+        i += 1
+    # Anything still open in `stack` needs closing (reversed = innermost first).
+    closer_chars = []
+    for opener in reversed(stack):
+        closer_chars.append("}" if opener == "{" else "]")
+    closer = "".join(closer_chars)
+    repaired = candidate + closer
+
+    try:
+        parsed = json.loads(repaired)
+    except json.JSONDecodeError:
+        # One more attempt: maybe a value is still partial (e.g., a number
+        # with a trailing `.`). Add an extra `}` and retry; if still bad, fail.
+        try:
+            parsed = json.loads(repaired + "}")
+        except json.JSONDecodeError:
+            return None
+
+    if isinstance(parsed, list):
+        if len(parsed) == 1 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        else:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+
+    parsed["_truncation_recovered"] = True
+    return parsed
+
+
 def _extract_json_block(text: str) -> dict:
     """Recover JSON from the model output, tolerating fenced code blocks.
 
     Gemini 3.x sometimes returns `[{...}]` (single-element array) when asked
     for a JSON object via response_mime_type="application/json"; unwrap that.
+
+    Also handles truncated JSON via `_repair_truncated_json` when the initial
+    parse fails — Gemini has a measured ~20% truncation rate on long critic
+    responses (Step 10d full-catalog regrade evidence). Recovered grades are
+    annotated with `_truncation_recovered: true` for downstream monitoring.
     """
     text = text.strip()
     if text.startswith("```"):
@@ -358,7 +489,24 @@ def _extract_json_block(text: str) -> dict:
             if start >= 0 and end > start:
                 text = text[start : end + 1]
                 break
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as initial_err:
+        recovered = _repair_truncated_json(text)
+        if recovered is not None:
+            logger.warning(
+                "Gemini critic JSON was truncated (%d chars); recovered via "
+                "best-effort repair. Verdict marked with _truncation_recovered=true.",
+                len(text),
+            )
+            return recovered
+        # Re-raise original error with a more helpful tail for diagnosis
+        raise json.JSONDecodeError(
+            f"{initial_err.msg} (no recovery possible)",
+            initial_err.doc,
+            initial_err.pos,
+        )
+
     if isinstance(parsed, list):
         # Unwrap single-element arrays — a common Gemini quirk.
         if len(parsed) == 1 and isinstance(parsed[0], dict):
@@ -527,7 +675,7 @@ class VideoGrader:
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,  # Low temp — critic should be deterministic
-            max_output_tokens=4096,
+            max_output_tokens=16384,
         )
 
         logger.info("Calling Gemini video critic: model=%s, criteria=%d, catalog_size=%d",
@@ -821,7 +969,7 @@ class VideoGrader:
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.1,
-            max_output_tokens=4096,
+            max_output_tokens=16384,
         )
 
         logger.info(
