@@ -234,9 +234,36 @@ Projected 10d spend at accurate pricing: orchestrator-side ~$5-8 for 30 shots ×
 
 ### Go / No-Go for Step 11
 
-**NOT YET.** Step 10d remains PARTIALLY OPEN. Blockers:
-1. Bug #3 fix (cross-artifact escalation history) — needed for autonomous 30-shot convergence.
-2. Critic-vs-production-video gap — either accept HITL as primary path, widen rubric, or add per-shot stylization allowances.
-3. Re-launch autonomous 30-shot run with bug #3 fix + whatever critic-gap decision is reached.
+**NOT YET — but the code-side blockers are resolved.** See "Chunk 3 LANDED" addendum below.
 
-Until those three are resolved, Step 11 (gen_assembly.py + presentation) stays gated.
+---
+
+## Chunk 3 LANDED addendum (2026-04-23)
+
+Plan: `~/.claude/plans/fresh-context-today-is-glowing-harp.md`. Commits: proto_front `e4004b3` + `ff2d077` · agent-vault `c87cf33`. Full record in `~/proto_front/docs/ESCALATION_LOG.md` §Step 10d Chunk 3 LANDED + `~/agent-vault/domains/brandstudios/ROADMAP.md` §Chunk 3 LANDED.
+
+**Three Chunk 3 PARTIAL blockers from above are now closed:**
+
+1. **Bug #3 fix** — `db.ts::getLatestOpenEscalationForDeliverableInRun` + `getOrchestrationDecisionsForDeliverableInRun` aggregate escalation history by `(deliverable_id, run_id)`. `escalation_loop.ts` inherits predecessor escalation `currentLevel` + `iterationCount` on regen artifacts. `getEscalationByArtifact(id, runId?)` adds optional run scope to close the bug #1 cross-run-bleed pattern at the code level. New unit test `_10d-escalation-history.ts` 9/9. **Confirmed LIVE on shots 11 + 12 in run `92aec59f`** — iter 2 orchestrator input shows inherited `level=L2/L3, attempts=1, cumCost=$X.XX, levels=[Lk]`. Shot 11 CONVERGED via L3 accept after the L2 regen.
+
+2. **Critic-vs-production-video gap** — addressed via Path C + Path B per Tim's choice (plan Q1 = C+B):
+   - **Path C** — `QAThreshold` interface + `_extractQAThreshold` + `_maybeBorderlineAccept` rule-based L3-accept short-circuit on borderline non-blocking scores (band `[accept_threshold, pass_threshold)`). Critic + orchestrator prompts BYTE-IDENTICAL (Chunk 1 lock held). `set-qa-threshold.ts` seeded `{pass:3.0, accept:2.5}` on Drift MV campaign. New unit test `_10d-qa-threshold.ts` 22/22.
+   - **Path B** — Jackie authored 24 v5 stylization allowance entries in `~/Temp-gen/productions/drift-mv/qa_prompt_evolution.md` (manifest+intent-derived; clip-watching re-pass queued). Ingester hardened with `metadata.narrative_context.shot_number` fallback for forwarded-narrative regen artifacts. `_10d-narrative-ingest-probe.ts` extended to assert all 30 shots have non-empty allowances.
+
+3. **Re-launch autonomous run** — Run `92aec59f` exercised bug #3 fix LIVE on 2 shots. Process killed at $6.93 spend (8 approved · 4 reviewing · 18 pending) — full 22-shot scale projects $60-95 with current per-shot Veo cost.
+
+### Updated Go / No-Go for Step 11
+
+**Code is GO. Budget strategy is the remaining gate.**
+
+The pipeline is sound — bug #3 fix proven, allowances + threshold knob wired, all PARTIAL bugs addressed. The remaining open question is **per-production budget strategy** (per-production cap, deferred in 10d-pre, needs to land before a single-session full-catalog autonomous run is safe). Once that's in place, kick off the full 22-shot regrade and gate Step 11 on its clean completion.
+
+### Known follow-ups for next session
+
+1. **Residual bug #2 gap** — orchestrator path lacks narrative_context fallback on regen artifacts (critic does via runner's `initialNarrativeContext`). Fix: `handleQAFailure` accept `narrativeContextOverride` OR write `narrative_context` into new artifact metadata at upload time.
+2. **Per-production budget cap** — `campaigns.base_budget` column + warn-at-N%/hard-stop-at-M% logic, sized to expected per-shot cost.
+3. **Bug #4 (cancelRun no-op for regrade runs)** — add cancel-flag set in `runner.ts`, check at top of each deliverable iteration.
+4. **Stuck escalation cleanup** — runs `44447f5d` (1 row) + `92aec59f` (2 rows) need DB write to flip status.
+5. **Jackie v5 re-pass with clip-watching** — once workspace sandbox can include `~/Temp-gen/productions/drift-mv/`.
+6. **Bug #6 (cache-hit probe 1s sleep)** — bump to 10s. Drive-by.
+7. **Bug #7 (Temp-gen /generate/image 500)** — separate Temp-gen session.
