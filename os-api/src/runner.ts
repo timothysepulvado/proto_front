@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
-import type { Run, Artifact, ProductionBudget, StageStatus, Campaign, CampaignDeliverable, VideoGradeResult } from "./types.js";
+import type { Run, Artifact, ProductionBudget, StageStatus, Campaign, CampaignDeliverable, NarrativeContext, VideoGradeResult } from "./types.js";
 import {
   updateRun,
   addLog,
@@ -19,7 +19,11 @@ import {
   getRunCostEstimate,
 } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
-import { handleQAFailure, markEscalationResolved } from "./escalation_loop.js";
+import {
+  _isNarrativeContext,
+  handleQAFailure,
+  markEscalationResolved,
+} from "./escalation_loop.js";
 import { supabase } from "./supabase.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -1171,10 +1175,10 @@ async function gradeAndEscalateVideo(params: {
   // L3-redesign loops in Runs 2 and 3 are the live evidence.
   const initialArtifactMeta =
     (params.artifact.metadata as Record<string, unknown> | undefined) ?? {};
-  let initialNarrativeContext =
-    (initialArtifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
-    null;
-  if (initialNarrativeContext === null && deliverable.id) {
+  const initialArtifactNc = initialArtifactMeta.narrative_context;
+  let initialNarrativeContext: NarrativeContext | undefined =
+    _isNarrativeContext(initialArtifactNc) ? initialArtifactNc : undefined;
+  if (initialNarrativeContext === undefined && deliverable.id) {
     try {
       const { data: seedArts } = await supabase
         .from("artifacts")
@@ -1183,8 +1187,8 @@ async function gradeAndEscalateVideo(params: {
         .eq("type", "video")
         .order("created_at", { ascending: true });
       for (const a of seedArts ?? []) {
-        const nc = (a.metadata as any)?.narrative_context;
-        if (nc) {
+        const nc = (a.metadata as Record<string, unknown> | null)?.narrative_context;
+        if (_isNarrativeContext(nc)) {
           initialNarrativeContext = nc;
           await emitLog(run.runId, stageId, "info",
             `narrative_context fallback: pulled from seeded artifact for deliverable ${deliverable.id.slice(0, 8)}…`);
@@ -1226,9 +1230,9 @@ async function gradeAndEscalateVideo(params: {
     // envelope even when mid-loop regens produce context-less artifacts.
     const currentArtifactMeta =
       (currentArtifact.metadata as Record<string, unknown> | undefined) ?? {};
-    const narrativeContext =
-      (currentArtifactMeta.narrative_context as Record<string, unknown> | null | undefined) ??
-      initialNarrativeContext;
+    const currentArtifactNc = currentArtifactMeta.narrative_context;
+    const narrativeContext: NarrativeContext | undefined =
+      _isNarrativeContext(currentArtifactNc) ? currentArtifactNc : initialNarrativeContext;
 
     const gradeResult = await callBrandEngine<VideoGradeResult>(
       "/grade_video",
@@ -1277,6 +1281,15 @@ async function gradeAndEscalateVideo(params: {
     }
 
     // 2. Failure — call orchestrator via escalation loop
+    //
+    // Bug #2 residual fix (2026-04-24): pass the runner-resolved
+    // narrativeContext as `narrativeContextOverride` so the orchestrator
+    // gets the same envelope the critic just received (post-fallback). On
+    // iteration 2+ the regen artifact lacks `metadata.narrative_context`,
+    // so reading from the artifact inside escalation_loop would silently
+    // yield undefined and Claude would call without the music-video shot
+    // position / stylization budget — matching the original chunk 3 gap
+    // closed for the critic but not the orchestrator.
     const escalationResult = await handleQAFailure({
       runId: run.runId,
       clientId: run.clientId,
@@ -1286,6 +1299,7 @@ async function gradeAndEscalateVideo(params: {
       stageId,
       runEvents,
       logger: (level, message) => emitLog(run.runId, stageId, level, message),
+      narrativeContextOverride: narrativeContext,
     });
 
     if (escalationResult.outcome === "accepted") {

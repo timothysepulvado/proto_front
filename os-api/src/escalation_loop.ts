@@ -80,6 +80,21 @@ export interface QAFailureContext {
   stageId: string;
   runEvents: EventEmitter;
   logger: (level: "info" | "warn" | "error" | "debug", message: string) => Promise<void>;
+  /**
+   * Bug #2 residual fix (2026-04-24): runner-resolved NarrativeContext for
+   * this deliverable. Mid-loop regen artifacts produced by L1/L2/L3 actions
+   * lack `metadata.narrative_context` (createArtifactWithUpload doesn't
+   * forward it), so reading from `artifact.metadata` here would silently
+   * yield undefined and the orchestrator would call without the envelope —
+   * exactly the gap the runner's seeded-artifact fallback (runner.ts:1158-
+   * 1198) closes for the critic but NOT for the orchestrator. When the
+   * runner already has the resolved envelope (post-fallback), it passes it
+   * here so the orchestrator stays context-aware across iterations.
+   * Undefined = caller has nothing to override → fall back to
+   * `_extractNarrativeContext(artifact)` for the legacy path (non-runner
+   * callers, tests).
+   */
+  narrativeContextOverride?: NarrativeContext;
 }
 
 export interface QAFailureResult {
@@ -266,7 +281,13 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   // (written by os-api/scripts/ingest-drift-mv-narrative.ts). Campaign-level
   // MusicVideoContext lives on campaign.guardrails.music_video_context. Both
   // optional — non-music-video campaigns fall through to baseline behavior.
-  const narrativeContext = _extractNarrativeContext(artifact);
+  //
+  // Bug #2 residual fix (2026-04-24): use _resolveNarrativeContext which
+  // honors the runner's narrativeContextOverride. Mid-loop regen artifacts
+  // produced by L1/L2/L3 actions don't forward narrative_context onto their
+  // new metadata, so reading the artifact alone returned undefined on
+  // iteration 2+ — matching the gap closed for the critic in chunk 3.
+  const narrativeContext = _resolveNarrativeContext(ctx);
   const musicVideoContext = _extractMusicVideoContext(campaign);
   if (narrativeContext) {
     await logger(
@@ -655,7 +676,7 @@ function _nullDecision(): OrchestratorDecision {
 // falls back to the baseline prompt.
 
 /** Shape guard — returns true when the value looks like a NarrativeContext. */
-function _isNarrativeContext(v: unknown): v is NarrativeContext {
+export function _isNarrativeContext(v: unknown): v is NarrativeContext {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
   return (
@@ -683,6 +704,24 @@ export function _extractNarrativeContext(
   if (!meta || typeof meta !== "object") return undefined;
   const nc = (meta as Record<string, unknown>).narrative_context;
   return _isNarrativeContext(nc) ? nc : undefined;
+}
+
+/**
+ * Bug #2 residual fix (2026-04-24): resolve NarrativeContext for the
+ * orchestrator call, preferring a caller-provided override (the runner's
+ * resolved envelope after its seeded-artifact fallback) and falling back to
+ * extracting from the current artifact's metadata for the legacy path.
+ *
+ * Why a helper instead of inlining the `??`: pure unit-testable, no Supabase /
+ * Anthropic deps, and a future "explicit-disable via null" semantic can land
+ * here without touching the call site. The override is `NarrativeContext`
+ * (not `NarrativeContext | null`) because the legitimate "I have nothing"
+ * case is `undefined` — pass-or-don't, no need for a third nullary state yet.
+ */
+export function _resolveNarrativeContext(
+  ctx: Pick<QAFailureContext, "artifact" | "narrativeContextOverride">,
+): NarrativeContext | undefined {
+  return ctx.narrativeContextOverride ?? _extractNarrativeContext(ctx.artifact);
 }
 
 export function _extractMusicVideoContext(
