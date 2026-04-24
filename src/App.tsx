@@ -27,6 +27,7 @@ import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
 import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
+import ReshootPanel from "./components/ReshootPanel";
 import {
   createRun,
   cancelRun,
@@ -277,7 +278,8 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
-  const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "review" | "insight">("memory");
+  const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "review" | "insight">("creative");
+  const [creativeSubtab, setCreativeSubtab] = useState<"deliverables" | "reshoots">("deliverables");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
@@ -301,7 +303,11 @@ export default function App() {
         const derived = buildClients(data);
         setClients(derived);
         if (derived.length > 0 && !activeClient) {
-          setActiveClient(derived[0].id);
+          const demoClient = derived.find((client) => client.id === "client_drift-mv") ?? derived[0];
+          setActiveClient(demoClient.id);
+          setActivePillar(demoClient.id === "client_drift-mv" ? "creative" : "memory");
+          setIsClientDetailOpen(true);
+          setIsExpanded(true);
         }
       } catch (err) {
         setClientError(err instanceof Error ? err.message : "Failed to load clients");
@@ -339,11 +345,15 @@ export default function App() {
         const runs = await getClientRuns(activeClient);
         if (cancelled) return;
         const latestCampaignRun = runs.find((run) => run.campaignId);
+        const demoRun = activeClient === "client_drift-mv"
+          ? runs.find((run) => run.runId.startsWith("9bfdf23e"))
+          : undefined;
+        const preferredRun = demoRun ?? latestCampaignRun;
         setCurrentRun((previous) => {
-          if (previous?.clientId === activeClient && previous.campaignId) {
+          if (previous?.clientId === activeClient && previous.campaignId && previous.runId === preferredRun?.runId) {
             return previous;
           }
-          return latestCampaignRun ?? previous;
+          return preferredRun ?? previous;
         });
       } catch {
         // Non-critical — creative view can still operate without a hydrated run.
@@ -388,7 +398,6 @@ export default function App() {
     { id: "creative" as const, label: "Creative Studio", description: "Generate images and video" },
     { id: "drift" as const, label: "Brand Drift", description: "Brand compliance scoring and drift metrics" },
     { id: "review" as const, label: "Review Gate", description: "Human-in-the-loop review and approval" },
-    { id: "insight" as const, label: "Insight Loop", description: "Analytics and learning" },
   ];
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? clients[0];
@@ -684,6 +693,10 @@ export default function App() {
                     }
                     setActiveClient(client.id);
                     setIsClientDetailOpen(true);
+                    if (client.id === "client_drift-mv") {
+                      setActivePillar("creative");
+                      setCreativeSubtab("deliverables");
+                    }
                   }}
                   className={`group relative flex items-center justify-center transition-all duration-500 ${
                     activeClient === client.id
@@ -897,13 +910,46 @@ export default function App() {
                     </p>
                   ) : activePillar === "creative" && activeClient ? (
                     <>
-                      {!currentRun?.campaignId && <PromptEvolutionPanel clientId={activeClient} />}
-                      {currentRun?.campaignId && (
-                        <DeliverableTracker
-                          campaignId={currentRun.campaignId}
-                          runId={currentRun.runId}
-                          onShotClick={(n, id) => setSelectedShot({ n, id })}
-                        />
+                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
+                        {[
+                          { id: "deliverables" as const, label: "Deliverables" },
+                          { id: "reshoots" as const, label: "Reshoots" },
+                        ].map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => setCreativeSubtab(tab.id)}
+                            className={`flex-1 rounded-lg px-3 py-2 text-[8px] font-mono uppercase tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
+                              creativeSubtab === tab.id
+                                ? "border border-cyan-500/30 bg-cyan-500/15 text-cyan-300"
+                                : "border border-transparent text-white/35 hover:bg-white/5 hover:text-white/65"
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+                      {creativeSubtab === "reshoots" ? (
+                        <ReshootPanel />
+                      ) : (
+                        <>
+                          {activeClient === "client_drift-mv" && !currentRun?.campaignId ? (
+                            <div className="flex flex-col items-center justify-center py-8">
+                              <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
+                              <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
+                                Loading Drift MV run
+                              </span>
+                            </div>
+                          ) : !currentRun?.campaignId ? (
+                            <PromptEvolutionPanel clientId={activeClient} />
+                          ) : (
+                            <DeliverableTracker
+                              campaignId={currentRun.campaignId}
+                              runId={currentRun.runId}
+                              onShotClick={(n, id) => setSelectedShot({ n, id })}
+                            />
+                          )}
+                        </>
                       )}
                     </>
                   ) : activePillar === "creative" ? (
@@ -919,9 +965,18 @@ export default function App() {
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
                       Select a client to view drift alerts
                     </p>
+                  ) : activePillar === "insight" ? (
+                    <div className="mt-3 rounded-2xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 px-4 py-5">
+                      <p className="text-[10px] font-mono uppercase tracking-[0.24em] text-orange-200/80">
+                        Insight Loop coming soon
+                      </p>
+                      <p className="mt-2 text-[9px] leading-relaxed text-white/35">
+                        External asset performance and engagement tracking will appear here once Phase 8 starts.
+                      </p>
+                    </div>
                   ) : (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
-                      Pillar: {activePillar}
+                      Select a pillar to continue
                     </p>
                   )}
                 </div>

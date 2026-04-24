@@ -1319,6 +1319,15 @@ export async function getCampaign(campaignId: string): Promise<Campaign | null> 
   return mapDbCampaignToCampaign(data as DbCampaign);
 }
 
+
+// Get deliverable by ID via os-api (used by drawer detail fallbacks)
+export async function getDeliverable(deliverableId: string): Promise<CampaignDeliverable | null> {
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}`);
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as CampaignDeliverable;
+}
+
 // Subscribe to deliverable updates for a campaign (realtime)
 export function subscribeToCampaignDeliverables(
   campaignId: string,
@@ -1473,4 +1482,153 @@ export function subscribeToArtifacts(
   return () => {
     supabase.removeChannel(channel);
   };
+}
+
+// ============ Production Reshoot Operations (Step 11 HITL UI) ============
+
+export type ProductionSlug = "drift-mv";
+
+export interface ProductionFileMeta {
+  path: string;
+  sizeBytes: number;
+  mtime: string;
+}
+
+export interface ProductionShotState {
+  shotNumber: number;
+  beat: string;
+  startS: number;
+  endS: number;
+  durationS: number;
+  visualIntent: string;
+  charactersNeeded: string[];
+  defaultPrompt: string;
+  stillPrompt?: string;
+  canonical: ProductionFileMeta & { backupExists: boolean };
+  pending: ProductionFileMeta | null;
+  stillPath: string | null;
+  activeJob?: ProductionJob | null;
+}
+
+export interface ProductionRenderArtifact extends ProductionFileMeta {
+  durationS?: number;
+}
+
+export interface ProductionJob {
+  jobId: string;
+  productionSlug: ProductionSlug | string;
+  kind: "regenerate" | "render";
+  shotNumber?: number;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  exitCode?: number | null;
+}
+
+export interface ProductionShotsResponse {
+  shots: ProductionShotState[];
+  renderArtifact?: ProductionRenderArtifact | null;
+}
+
+export type ProductionEvent =
+  | { type: "connected"; productionSlug: string; timestamp: string }
+  | { type: "regen_started"; productionSlug: string; timestamp: string; jobId: string; shotNumber: number; promptSource: "override" | "manifest"; useImageConditioning: boolean }
+  | { type: "regen_log"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; line: string; stream: "stdout" | "stderr" }
+  | { type: "regen_complete"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; exitCode: number | null; durationMs: number; error?: string }
+  | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean }
+  | { type: "shot_rejected"; productionSlug: string; timestamp: string; shotNumber: number; pendingDeleted: boolean }
+  | { type: "render_started"; productionSlug: string; timestamp: string; jobId: string }
+  | { type: "render_log"; productionSlug: string; timestamp: string; jobId: string; line: string; stream: "stdout" | "stderr" }
+  | { type: "render_complete"; productionSlug: string; timestamp: string; jobId: string; exitCode: number | null; durationMs: number; error?: string }
+  | { type: "render_artifact"; productionSlug: string; timestamp: string; jobId: string; path: string; sizeBytes: number; durationS: number | null }
+  | { type: string; productionSlug?: string; timestamp?: string; [key: string]: unknown };
+
+async function parseOsApiError(resp: Response): Promise<Error> {
+  const body = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+  const message = typeof body.error === "string" ? body.error : `HTTP ${resp.status}`;
+  return new Error(message);
+}
+
+export function getProductionStillUrl(productionSlug: ProductionSlug, shotNumber: number): string {
+  return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/still`;
+}
+
+export function getProductionVideoUrl(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  variant: "canonical" | "pending" = "canonical",
+): string {
+  return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/${variant}.mp4`;
+}
+
+export async function getProductionShots(productionSlug: ProductionSlug): Promise<ProductionShotsResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ProductionShotsResponse;
+}
+
+export async function regenerateProductionShot(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body?: { prompt?: string; useImageConditioning?: boolean },
+): Promise<{ jobId: string; status: "running" }> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/regenerate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as { jobId: string; status: "running" };
+}
+
+export async function promoteProductionShot(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+): Promise<{ shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string }> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/promote`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as { shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string };
+}
+
+export async function rejectProductionShot(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+): Promise<{ shotNumber: number; rejected: boolean; pendingDeleted: boolean }> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/reject`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as { shotNumber: number; rejected: boolean; pendingDeleted: boolean };
+}
+
+export async function triggerProductionRender(
+  productionSlug: ProductionSlug,
+): Promise<{ jobId: string; status: "running" }> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/render`, {
+    method: "POST",
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as { jobId: string; status: "running" };
+}
+
+export function subscribeToProductionEvents(
+  productionSlug: ProductionSlug,
+  onEvent: (event: ProductionEvent) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  const source = new EventSource(`${OS_API_URL}/api/productions/${productionSlug}/events`);
+  source.onmessage = (message) => {
+    try {
+      onEvent(JSON.parse(message.data) as ProductionEvent);
+    } catch (err) {
+      onError?.(err instanceof Error ? err : new Error("Failed to parse production event"));
+    }
+  };
+  source.onerror = () => {
+    onError?.(new Error("Production event stream disconnected"));
+  };
+  return () => source.close();
 }

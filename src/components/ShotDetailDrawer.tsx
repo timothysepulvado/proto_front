@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../api";
-import type { Artifact, DeliverableStatus, RunLog } from "../api";
+import type { Artifact, CampaignDeliverable, DeliverableStatus, ProductionShotState, RunLog } from "../api";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -368,9 +368,12 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
   const [trail, setTrail] = useState<DeliverableTrail | null>(null);
+  const [fallbackDeliverable, setFallbackDeliverable] = useState<CampaignDeliverable | null>(null);
+  const [productionShots, setProductionShots] = useState<ProductionShotState[]>([]);
   const [expandedDecisionId, setExpandedDecisionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -390,6 +393,18 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const isTyping = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+      if (!isTyping && (event.key === "j" || event.key === "J" || event.key === "k" || event.key === "K")) {
+        event.preventDefault();
+        const delta = event.key.toLowerCase() === "j" ? 1 : -1;
+        setActiveTab((previous) => {
+          const index = tabs.findIndex((tab) => tab.id === previous);
+          const nextIndex = (index + delta + tabs.length) % tabs.length;
+          return tabs[nextIndex].id;
+        });
         return;
       }
       if (event.key !== "Tab") return;
@@ -429,12 +444,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
       setIsLoading(true);
       setLoadError(null);
       try {
-        const [runArtifacts, runLogs, runTrail] = await Promise.all([
+        const [runArtifacts, runLogs, runTrail, deliverableDetail, productionCatalog] = await Promise.all([
           runId
             ? api.getArtifacts(runId).then((items) => items.filter((item) => item.deliverableId === currentDeliverableId))
             : Promise.resolve<Artifact[]>([]),
           runId ? api.getRunLogs(runId) : Promise.resolve<RunLog[]>([]),
           runId ? fetchTrail(runId, currentDeliverableId) : Promise.resolve<DeliverableTrail | null>(null),
+          api.getDeliverable(currentDeliverableId).catch(() => null),
+          api.getProductionShots("drift-mv").then((response) => response.shots).catch(() => []),
         ]);
 
         const sortedArtifacts = [...runArtifacts].sort(
@@ -448,9 +465,11 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
         setArtifacts(latestArtifact && sortedArtifacts.length === 0 ? [latestArtifact] : sortedArtifacts);
         setLogs(runLogs);
         setTrail(runTrail);
+        setFallbackDeliverable(deliverableDetail);
+        setProductionShots(productionCatalog);
       } catch (error) {
         if (!cancelled) {
-          setLoadError(error instanceof Error ? error.message : "Unable to load shot details");
+          setLoadError("Couldn't load shot details. Retry.");
         }
       } finally {
         if (!cancelled) {
@@ -463,7 +482,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
     return () => {
       cancelled = true;
     };
-  }, [deliverableId, runId]);
+  }, [deliverableId, reloadNonce, runId]);
 
   const latestArtifact = artifacts[0] ?? null;
   const narrative = useMemo(() => extractNarrativeContext(latestArtifact), [latestArtifact]);
@@ -479,8 +498,11 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
   }, [trail]);
   const qaVerdict = useMemo(() => extractQaVerdict(decisionsNewestFirst), [decisionsNewestFirst]);
   const resolvedShotNumber = narrative?.shot_number ?? shotNumber;
-  const resolvedBeat = narrative?.beat_name ?? null;
-  const deliverable = trail?.deliverable ?? null;
+  const productionShot = productionShots.find((item) => item.shotNumber === resolvedShotNumber) ?? null;
+  const previousProductionShot = productionShots.find((item) => item.shotNumber === (resolvedShotNumber ?? 0) - 1) ?? null;
+  const nextProductionShot = productionShots.find((item) => item.shotNumber === (resolvedShotNumber ?? 0) + 1) ?? null;
+  const resolvedBeat = narrative?.beat_name ?? productionShot?.beat ?? null;
+  const deliverable = trail?.deliverable ?? fallbackDeliverable ?? null;
   const deliverableStatus = isDeliverableStatus(deliverable?.status) ? deliverable.status : undefined;
   const timeline = useMemo(
     () => (deliverableId ? buildTimelineEvents(logs, artifacts, decisionsNewestFirst, deliverableId, resolvedShotNumber) : []),
@@ -567,7 +589,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
             </div>
           ) : loadError ? (
             <div className="rounded-2xl border border-red-500/20 bg-red-500/6 p-4 text-[10px] font-mono text-red-300">
-              {loadError}
+              <p>{loadError}</p>
+              <button
+                type="button"
+                onClick={() => setReloadNonce((value) => value + 1)}
+                className="mt-3 rounded-xl border border-cyan-500/25 px-4 py-2 text-[9px] uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+              >
+                Retry
+              </button>
             </div>
           ) : activeTab === "narrative" ? (
             <div className="space-y-4">
@@ -581,14 +610,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
                   </div>
                   <div className="rounded-xl border border-white/8 bg-white/[0.02] p-3">
                     <p className="text-white/35">Song timing</p>
-                    <p className="mt-1 text-white">{formatDuration(narrative?.song_start_s ?? null)} → {formatDuration(narrative?.song_end_s ?? null)}</p>
+                    <p className="mt-1 text-white">{formatDuration(narrative?.song_start_s ?? productionShot?.startS ?? null)} → {formatDuration(narrative?.song_end_s ?? productionShot?.endS ?? null)}</p>
                   </div>
                 </div>
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                 <p className="text-[8px] font-mono uppercase tracking-widest text-white/45">Visual intent</p>
-                <p className="mt-2 text-[13px] leading-6 text-white/80">{narrative?.visual_intent || "No narrative envelope found on the latest artifact."}</p>
+                <p className="mt-2 text-[13px] leading-6 text-white/80">{narrative?.visual_intent || productionShot?.visualIntent || "No narrative envelope found on the latest artifact."}</p>
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -597,7 +626,9 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
                   <p className="mt-2 text-[12px] leading-5 text-white/65">
                     {narrative?.previous_shot
                       ? `#${narrative.previous_shot.shot_number ?? "—"} · ${truncate(narrative.previous_shot.visual_intent_summary, 80)}`
-                      : "—"}
+                      : previousProductionShot
+                        ? `#${previousProductionShot.shotNumber} · ${truncate(previousProductionShot.visualIntent, 80)}`
+                        : "—"}
                   </p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
@@ -605,7 +636,9 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
                   <p className="mt-2 text-[12px] leading-5 text-white/65">
                     {narrative?.next_shot
                       ? `#${narrative.next_shot.shot_number ?? "—"} · ${truncate(narrative.next_shot.visual_intent_summary, 80)}`
-                      : "—"}
+                      : nextProductionShot
+                        ? `#${nextProductionShot.shotNumber} · ${truncate(nextProductionShot.visualIntent, 80)}`
+                        : "—"}
                   </p>
                 </div>
               </div>
@@ -626,7 +659,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
 
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                 <p className="text-[8px] font-mono uppercase tracking-widest text-white/45">Characters</p>
-                <p className="mt-2 text-[12px] leading-5 text-white/70">{formatCharacters(narrative?.characters ?? [])}</p>
+                <p className="mt-2 text-[12px] leading-5 text-white/70">{narrative ? formatCharacters(narrative.characters) : (productionShot?.charactersNeeded.join(", ") || "—")}</p>
               </div>
             </div>
           ) : activeTab === "critic" ? (
@@ -684,7 +717,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
               </div>
             ) : (
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">
-                No grade recorded — shot reused without escalation.
+                No critic payload persisted — this shot is approved without escalation.
               </div>
             )
           ) : activeTab === "orchestrator" ? (

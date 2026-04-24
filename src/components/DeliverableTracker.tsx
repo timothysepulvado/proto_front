@@ -66,38 +66,52 @@ function formatBeatLabel(beatName: string | null) {
   return beatName ? beatName.replace(/_/g, " ") : "unmapped";
 }
 
+function deriveShotMetadata(deliverable: CampaignDeliverable, index: number) {
+  const description = deliverable.description ?? "";
+  const match = /shot\s+(\d{1,2})\s*[·:-]\s*([a-z0-9_]+)/i.exec(description);
+  return {
+    shotNumber: match ? Number.parseInt(match[1], 10) : index + 1,
+    beatName: match?.[2]?.toLowerCase() ?? null,
+  };
+}
+
 function buildStubShotSummaries(deliverables: CampaignDeliverable[]): ShotSummary[] {
-  return deliverables.map((deliverable, index) => ({
-    deliverableId: deliverable.id,
-    shotNumber: index + 1,
-    beatName: null,
-    status: deliverable.status,
-    retryCount: deliverable.retryCount,
-    escalationLevel: deliverable.retryCount >= 3 ? "L3" : deliverable.retryCount >= 2 ? "L2" : deliverable.retryCount >= 1 ? "L1" : null,
-    escalationStatus: null,
-    latestEscalationId: null,
-    cumulativeCost: 0,
-    orchestratorCallCount: 0,
-    lastVerdict: null,
-    lastScore: null,
-    artifactCount: 0,
-    latestArtifactId: null,
-  }));
+  return deliverables.map((deliverable, index) => {
+    const derived = deriveShotMetadata(deliverable, index);
+    return {
+      deliverableId: deliverable.id,
+      shotNumber: derived.shotNumber,
+      beatName: derived.beatName,
+      status: deliverable.status,
+      retryCount: deliverable.retryCount,
+      escalationLevel: deliverable.retryCount >= 3 ? "L3" : deliverable.retryCount >= 2 ? "L2" : deliverable.retryCount >= 1 ? "L1" : null,
+      escalationStatus: null,
+      latestEscalationId: null,
+      cumulativeCost: 0,
+      orchestratorCallCount: 0,
+      lastVerdict: null,
+      lastScore: null,
+      artifactCount: 0,
+      latestArtifactId: null,
+    };
+  });
 }
 
 async function loadShotSummaries(
   campaignId: string,
   deliverables: CampaignDeliverable[],
+  runId?: string,
 ): Promise<ShotSummary[]> {
   try {
     if (getShotSummariesCompat) {
-      const summaries = await getShotSummariesCompat(campaignId);
+      const summaries = await getShotSummariesCompat(campaignId, runId);
       if (Array.isArray(summaries) && summaries.length > 0) {
         return summaries;
       }
     }
 
-    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries`);
+    const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`);
     if (response.ok) {
       const summaries = (await response.json()) as ShotSummary[];
       if (Array.isArray(summaries)) {
@@ -207,15 +221,21 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
   const [deliverables, setDeliverables] = useState<CampaignDeliverable[]>([]);
   const [shotSummaries, setShotSummaries] = useState<ShotSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const deliverablesRef = useRef<CampaignDeliverable[]>([]);
 
   const refreshShotSummaries = useCallback(
     async (nextDeliverables?: CampaignDeliverable[]) => {
       const base = nextDeliverables ?? deliverablesRef.current;
-      const summaries = await loadShotSummaries(campaignId, base);
-      setShotSummaries(summaries);
+      try {
+        const summaries = await loadShotSummaries(campaignId, base, runId);
+        setShotSummaries(summaries);
+      } catch {
+        setError("Couldn't refresh shot summaries. Retry.");
+      }
     },
-    [campaignId],
+    [campaignId, runId],
   );
 
   useEffect(() => {
@@ -224,12 +244,15 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
     async function load() {
       try {
         setIsLoading(true);
+        setError(null);
         const data = await api.getCampaignDeliverables(campaignId);
         if (cancelled) return;
         deliverablesRef.current = data;
         setDeliverables(data);
-        const summaries = await loadShotSummaries(campaignId, data);
+        const summaries = await loadShotSummaries(campaignId, data, runId);
         if (!cancelled) setShotSummaries(summaries);
+      } catch {
+        if (!cancelled) setError("Couldn't load campaign deliverables. Retry.");
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -271,15 +294,25 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
         void supabase.removeChannel(decisionsChannel);
       }
     };
-  }, [campaignId, refreshShotSummaries, runId]);
+  }, [campaignId, refreshShotSummaries, reloadNonce, runId]);
 
   const mergedDeliverables = useMemo(() => {
     const summaryMap = new Map(shotSummaries.map((summary) => [summary.deliverableId, summary]));
     const fallbackMap = new Map(buildStubShotSummaries(deliverables).map((summary) => [summary.deliverableId, summary]));
-    return deliverables.map((deliverable) => ({
-      deliverable,
-      summary: summaryMap.get(deliverable.id) ?? fallbackMap.get(deliverable.id) ?? buildStubShotSummaries([deliverable])[0],
-    }));
+    return deliverables.map((deliverable) => {
+      const summary = summaryMap.get(deliverable.id);
+      const fallback = fallbackMap.get(deliverable.id) ?? buildStubShotSummaries([deliverable])[0];
+      return {
+        deliverable,
+        summary: summary
+          ? {
+              ...summary,
+              shotNumber: summary.shotNumber ?? fallback.shotNumber,
+              beatName: summary.beatName ?? fallback.beatName,
+            }
+          : fallback,
+      };
+    });
   }, [deliverables, shotSummaries]);
 
   const counts = useMemo(
@@ -308,6 +341,23 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
     );
   }
 
+
+  if (error && deliverables.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8">
+        <Layers size={24} className="mb-3 text-red-400/30" />
+        <span className="text-[9px] font-mono uppercase tracking-widest text-red-300/70">Couldn't load deliverables</span>
+        <button
+          type="button"
+          onClick={() => setReloadNonce((value) => value + 1)}
+          className="mt-4 rounded-xl border border-cyan-500/25 px-4 py-2 text-[9px] font-mono uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (deliverables.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8">
@@ -320,6 +370,11 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
 
   return (
     <div className="mt-3 space-y-3">
+      {error && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[9px] font-mono text-amber-200">
+          {error}
+        </div>
+      )}
       <div className="flex items-center justify-between gap-3">
         <span className="flex items-center text-[9px] font-mono uppercase tracking-widest text-cyan-400/80">
           <Layers size={10} className="mr-1.5" />

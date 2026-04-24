@@ -19,6 +19,7 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
   const [isCalculating, setIsCalculating] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Load baseline + subscribe to realtime
   useEffect(() => {
@@ -38,7 +39,7 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load baselines");
+          setError("Couldn't load brand baselines. Retry.");
         }
       } finally {
         if (!cancelled) setIsLoading(false);
@@ -57,7 +58,10 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
           if (!cancelled) {
             setActive(a);
             setHistory(h);
+            setError(null);
           }
+        }).catch(() => {
+          if (!cancelled) setError("Couldn't refresh brand baselines. Retry.");
         });
       }
     });
@@ -66,7 +70,7 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
       cancelled = true;
       cleanup();
     };
-  }, [clientId]);
+  }, [clientId, reloadNonce]);
 
   const handleCalculate = useCallback(async () => {
     setIsCalculating(true);
@@ -78,11 +82,11 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
       const historyData = await getBaselineHistory(clientId);
       setHistory(historyData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Calculation failed");
+      setError("Couldn't calculate a new baseline. Retry.");
     } finally {
       setIsCalculating(false);
     }
-  }, [clientId]);
+  }, [clientId, reloadNonce]);
 
   // Loading state
   if (isLoading) {
@@ -130,8 +134,15 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
 
       {/* Error display */}
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[9px] font-mono text-red-400">
-          {error}
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[9px] font-mono text-red-300">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setReloadNonce((value) => value + 1)}
+            className="shrink-0 rounded border border-red-400/30 px-2 py-1 uppercase tracking-wider hover:bg-red-500/10 focus:outline-none focus:ring-2 focus:ring-red-300/40"
+          >
+            Retry
+          </button>
         </div>
       )}
 

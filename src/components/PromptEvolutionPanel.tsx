@@ -72,6 +72,7 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
   const [lineage, setLineage] = useState<LineageEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Editor state
   const [isEditing, setIsEditing] = useState(false);
@@ -129,7 +130,7 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
       }
     } catch {
       if (!cancelled.current) {
-        setError("Failed to load prompt data");
+        setError("Couldn't load prompt data. Retry.");
       }
     } finally {
       if (!cancelled.current) {
@@ -141,17 +142,17 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
   useEffect(() => {
     const cancelled = { current: false };
     setIsLoading(true);
-    loadData(cancelled);
+    void loadData(cancelled);
 
     const unsub = subscribeToPrompts(clientId, () => {
-      loadData(cancelled);
+      void loadData(cancelled);
     });
 
     return () => {
       cancelled.current = true;
       unsub();
     };
-  }, [clientId, loadData]);
+  }, [clientId, loadData, reloadNonce]);
 
   // -- Lazy load history scores
   const loadHistoryScores = useCallback(async (promptId: string) => {
@@ -200,7 +201,7 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
       setIsEditing(false);
       setEditText("");
     } catch {
-      setError("Failed to save prompt");
+      setError("Couldn't save prompt. Retry.");
     } finally {
       setIsSaving(false);
     }
@@ -226,9 +227,16 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
     return (
       <div className="flex flex-col items-center justify-center py-10">
         <Dna size={20} className="text-red-400/40 mb-2" />
-        <span className="text-[9px] font-mono text-red-400/60 uppercase tracking-widest">
-          {error}
+        <span className="text-[9px] font-mono text-red-300/70 uppercase tracking-widest">
+          Couldn't load prompts
         </span>
+        <button
+          type="button"
+          onClick={() => setReloadNonce((value) => value + 1)}
+          className="mt-4 rounded-xl border border-cyan-500/25 px-4 py-2 text-[9px] font-mono uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -281,8 +289,15 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
 
       {/* Error banner (non-fatal) */}
       {error && (
-        <div className="p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-[8px] font-mono text-red-400/80">
-          {error}
+        <div className="flex items-center justify-between gap-3 p-2 bg-red-500/10 border border-red-500/20 rounded-lg text-[8px] font-mono text-red-300/80">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setReloadNonce((value) => value + 1)}
+            className="shrink-0 rounded border border-red-400/30 px-2 py-1 uppercase tracking-wider hover:bg-red-500/10 focus:outline-none focus:ring-2 focus:ring-red-300/40"
+          >
+            Retry
+          </button>
         </div>
       )}
 

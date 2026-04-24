@@ -53,6 +53,7 @@ import {
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
+import { createProductionsRouter } from "./productions.js";
 
 dotenv.config();
 
@@ -61,6 +62,7 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+app.use("/api/productions", createProductionsRouter());
 
 // Helper to extract params safely
 function getParam(req: Request, name: string): string {

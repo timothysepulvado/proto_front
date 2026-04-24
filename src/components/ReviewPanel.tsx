@@ -102,17 +102,21 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Load data
   useEffect(() => {
+    let cancelled = false;
     async function load() {
       try {
         setIsLoading(true);
+        setSubmitError(null);
         const [arts, cats, existing] = await Promise.all([
           getArtifactsForReview(runId),
           getRejectionCategories(),
           getHitlDecisions(runId),
         ]);
+        if (cancelled) return;
         setArtifacts(arts);
         setCategories(cats);
         setExistingDecisions(existing);
@@ -132,7 +136,7 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
                 dMap.set(d.id, d);
               }
             }
-            setDeliverableMap(dMap);
+            if (!cancelled) setDeliverableMap(dMap);
           } catch {
             // Non-fatal — deliverable context is optional
           }
@@ -148,16 +152,20 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
             rejectionCategories: prev?.rejectionCategories ?? [],
           });
         }
+        if (cancelled) return;
         setDecisions(map);
         if (arts.length > 0) setExpandedArtifact(arts[0].id);
       } catch {
-        setSubmitError("Failed to load review data");
+        if (!cancelled) setSubmitError("Couldn't load review data. Retry.");
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
-    load();
-  }, [runId]);
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, reloadNonce]);
 
   const updateDecision = useCallback(
     (artifactId: string, updates: Partial<ArtifactDecision>) => {
@@ -334,14 +342,28 @@ export default function ReviewPanel({ runId, clientName, onClose, onComplete }: 
                 Loading Review Queue
               </span>
             </div>
+          ) : submitError && artifacts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16">
+              <AlertTriangle size={32} className="text-red-400/35 mb-4" />
+              <span className="text-[10px] font-mono text-red-300/70 uppercase tracking-widest">
+                Couldn't load review queue
+              </span>
+              <button
+                type="button"
+                onClick={() => setReloadNonce((value) => value + 1)}
+                className="mt-4 rounded-xl border border-cyan-500/25 px-4 py-2 text-[9px] font-mono uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+              >
+                Retry
+              </button>
+            </div>
           ) : artifacts.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16">
               <Package size={32} className="text-white/10 mb-4" />
               <span className="text-[10px] font-mono text-white/30 uppercase tracking-widest">
-                No artifacts to review
+                No items in the review queue
               </span>
               <p className="text-[9px] font-mono text-white/20 mt-2">
-                Pipeline hasn't generated artifacts for this run yet
+                Pipeline artifacts will appear here when a run needs review
               </p>
             </div>
           ) : (

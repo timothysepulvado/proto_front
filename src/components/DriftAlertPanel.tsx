@@ -23,6 +23,8 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [acknowledging, setAcknowledging] = useState<string | null>(null);
   const [ackNotes, setAckNotes] = useState<Map<string, string>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Load alerts + subscribe to realtime
   useEffect(() => {
@@ -31,10 +33,11 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
     async function load() {
       try {
         setIsLoading(true);
+        setError(null);
         const data = await getDriftAlerts(clientId);
         if (!cancelled) setAlerts(data);
-      } catch (err) {
-        console.error("Failed to load drift alerts:", err);
+      } catch {
+        if (!cancelled) setError("Couldn't load drift alerts. Retry.");
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -47,7 +50,12 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
     const cleanup = subscribeToDriftAlerts(clientId, () => {
       if (!cancelled) {
         getDriftAlerts(clientId).then((data) => {
-          if (!cancelled) setAlerts(data);
+          if (!cancelled) {
+            setAlerts(data);
+            setError(null);
+          }
+        }).catch(() => {
+          if (!cancelled) setError("Couldn't refresh drift alerts. Retry.");
         });
       }
     });
@@ -56,7 +64,7 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
       cancelled = true;
       cleanup();
     };
-  }, [clientId]);
+  }, [clientId, reloadNonce]);
 
   const handleAcknowledge = useCallback(async (alertId: string) => {
     setAcknowledging(alertId);
@@ -72,8 +80,8 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
         next.delete(alertId);
         return next;
       });
-    } catch (err) {
-      console.error("Failed to acknowledge drift alert:", err);
+    } catch {
+      setError("Couldn't acknowledge that alert. Retry.");
     } finally {
       setAcknowledging(null);
     }
@@ -95,6 +103,25 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
     );
   }
 
+
+  if (error && alerts.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <AlertTriangle size={28} className="text-red-400/35 mb-3" />
+        <span className="text-[10px] font-mono text-red-300/70 uppercase tracking-widest">
+          Couldn't load drift alerts
+        </span>
+        <button
+          type="button"
+          onClick={() => setReloadNonce((value) => value + 1)}
+          className="mt-4 rounded-xl border border-cyan-500/25 px-4 py-2 text-[9px] font-mono uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10 focus:outline-none focus:ring-2 focus:ring-cyan-400/40"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   // Empty state
   if (alerts.length === 0) {
     return (
@@ -112,6 +139,11 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
 
   return (
     <div className="mt-3 space-y-3">
+      {error && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[9px] font-mono text-amber-200">
+          {error}
+        </div>
+      )}
       {/* Summary bar */}
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3 text-[9px] font-mono uppercase tracking-wider">
