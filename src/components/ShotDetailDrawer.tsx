@@ -378,10 +378,18 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!deliverableId) return;
     setActiveTab("narrative");
     setExpandedDecisionId(null);
-  }, [deliverableId]);
+    setArtifacts([]);
+    setLogs([]);
+    setTrail(null);
+    setFallbackDeliverable(null);
+    setProductionShots([]);
+    setLoadError(null);
+    if (!deliverableId) {
+      setIsLoading(false);
+    }
+  }, [deliverableId, runId]);
 
   useEffect(() => {
     if (!deliverableId) return;
@@ -467,7 +475,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
         setTrail(runTrail);
         setFallbackDeliverable(deliverableDetail);
         setProductionShots(productionCatalog);
-      } catch (error) {
+      } catch {
         if (!cancelled) {
           setLoadError("Couldn't load shot details. Retry.");
         }

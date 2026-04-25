@@ -29,6 +29,10 @@ export default function DriftAlertPanel({ clientId }: DriftAlertPanelProps) {
   // Load alerts + subscribe to realtime
   useEffect(() => {
     let cancelled = false;
+    setAlerts([]);
+    setAcknowledging(null);
+    setAckNotes(new Map());
+    setError(null);
 
     async function load() {
       try {

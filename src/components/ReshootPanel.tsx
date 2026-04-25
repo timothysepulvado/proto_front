@@ -114,6 +114,14 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
   }, [productionSlug]);
 
   useEffect(() => {
+    setShots([]);
+    setRenderArtifact(null);
+    setSelectedShotNumber(null);
+    setActiveRegens(new Map());
+    setError(null);
+    setRenderInFlight(false);
+    setRenderProgress(null);
+    setHasPromoteSinceRender(false);
     setIsLoading(true);
     void loadShots();
   }, [loadShots]);

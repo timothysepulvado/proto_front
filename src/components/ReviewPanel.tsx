@@ -141,6 +141,15 @@ export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNum
   // Load data
   useEffect(() => {
     let cancelled = false;
+    setArtifacts([]);
+    setCategories([]);
+    setExistingDecisions([]);
+    setDecisions(new Map());
+    setDeliverableMap(new Map());
+    setExpandedArtifact(null);
+    setSelectedFinalHitlShotNumber(initialFinalHitlShotNumber);
+    setIsSubmitting(false);
+
     async function load() {
       try {
         setIsLoading(true);
@@ -202,7 +211,7 @@ export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNum
     return () => {
       cancelled = true;
     };
-  }, [runId, reloadNonce]);
+  }, [initialFinalHitlShotNumber, runId, reloadNonce]);
 
   const updateDecision = useCallback(
     (artifactId: string, updates: Partial<ArtifactDecision>) => {

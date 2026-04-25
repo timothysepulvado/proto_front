@@ -109,9 +109,20 @@ export default function FinalHITLPanel({
   }, [productionSlug, selectedShotNumber]);
 
   useEffect(() => {
+    setShots([]);
+    setLocalShotNumber(selectedShotNumber ?? null);
+    setForm(null);
+    setCharacterDraft("");
+    setMessage(null);
+    setError(null);
+    setLogs([]);
+    setIsSaving(false);
+    setIsRegenerating(false);
+    setIsApproving(false);
+    setIsRejecting(false);
     setIsLoading(true);
     void loadShots();
-  }, [loadShots]);
+  }, [loadShots, selectedShotNumber]);
 
   useEffect(() => {
     if (typeof selectedShotNumber === "number") {
@@ -125,14 +136,22 @@ export default function FinalHITLPanel({
   );
 
   useEffect(() => {
-    if (!selectedShot) return;
+    if (!selectedShot) {
+      setForm(null);
+      setCharacterDraft("");
+      setMessage(null);
+      setError(null);
+      setLogs([]);
+      setIsRegenerating(false);
+      return;
+    }
     setForm(formFromShot(selectedShot));
     setCharacterDraft("");
     setMessage(null);
     setError(null);
     setLogs([]);
     setIsRegenerating(Boolean(selectedShot.activeJob?.status === "running"));
-  }, [selectedShot?.shotNumber, selectedShot?.canonical.mtime, selectedShot?.pending?.mtime, selectedShot?.activeJob?.jobId]);
+  }, [selectedShot]);
 
   useEffect(() => {
     if (!selectedShot) return;

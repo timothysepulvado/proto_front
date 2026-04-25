@@ -110,7 +110,9 @@ export default function ShotReshootDrawer({
     setActionError(null);
     setLogs([]);
     setRegenInFlight(Boolean(shot.activeJob?.status === "running"));
-  }, [shot?.shotNumber, shot?.pending?.mtime, shot?.activeJob?.jobId]);
+    setIsPromoting(false);
+    setIsRejecting(false);
+  }, [productionSlug, shot]);
 
   useEffect(() => {
     if (!shotNumber) return;

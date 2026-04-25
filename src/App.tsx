@@ -29,6 +29,7 @@ import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
 import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
 import ReshootPanel from "./components/ReshootPanel";
+import ActiveClientBadge from "./components/ActiveClientBadge";
 import {
   createRun,
   cancelRun,
@@ -47,6 +48,7 @@ import {
 } from "./api";
 
 type Orientation = "horizontal" | "vertical";
+type PillarId = "memory" | "creative" | "drift" | "review" | "insight";
 
 type LogEntry = {
   time: string;
@@ -58,6 +60,7 @@ type LogEntry = {
 type DerivedClient = Client & {
   alert: boolean;
   dnaCode: string;
+  demoMode: boolean;
   health: number;
   runsValue: number;
   runsLabel: string;
@@ -79,6 +82,10 @@ const typeByName: Record<string, string> = {
   Cylndr: "CORE",
   "Jenni Kayne": "RETAIL",
   Lilydale: "AGRI",
+};
+
+const clientUiConfig: Record<string, { demoMode?: boolean }> = {
+  "client_drift-mv": { demoMode: true },
 };
 
 const seedLogs: LogEntry[] = [
@@ -243,6 +250,29 @@ const computeHealth = (status: string, runs: number, index: number) => {
   return Math.min(99, Math.max(18, base + variance));
 };
 
+const pillarForClient = (client: Pick<DerivedClient, "demoMode">): PillarId => (
+  client.demoMode ? "creative" : "memory"
+);
+
+const getClientIdFromUrl = (availableClients: DerivedClient[]) => {
+  if (typeof window === "undefined") return null;
+  const requested = new URLSearchParams(window.location.search).get("client");
+  return requested && availableClients.some((client) => client.id === requested)
+    ? requested
+    : null;
+};
+
+const getDefaultClient = (availableClients: DerivedClient[]) => (
+  availableClients.find((client) => client.demoMode) ?? availableClients[0] ?? null
+);
+
+const updateClientUrl = (clientId: string) => {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("client", clientId);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+};
+
 const buildClients = (list: Client[]): DerivedClient[] => {
   const placeholderDna = typeof placeholders.dna === "string" ? placeholders.dna : "DNA_UNSET";
 
@@ -254,6 +284,7 @@ const buildClients = (list: Client[]): DerivedClient[] => {
       ...client,
       alert: client.lastRunStatus === "needs_review",
       dnaCode: formatDna(client.id, placeholderDna),
+      demoMode: Boolean(clientUiConfig[client.id]?.demoMode),
       health: computeHealth(status, runsValue, index),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
@@ -279,7 +310,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const dragStartPos = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
-  const [activePillar, setActivePillar] = useState<"memory" | "creative" | "drift" | "review" | "insight">("creative");
+  const [activePillar, setActivePillar] = useState<PillarId>("creative");
   const [creativeSubtab, setCreativeSubtab] = useState<"deliverables" | "reshoots">("deliverables");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
@@ -296,6 +327,13 @@ export default function App() {
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
 
+  const teardownRunSubscriptions = useCallback(() => {
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
+    }
+  }, []);
+
   // Fetch clients from Supabase on mount
   useEffect(() => {
     async function loadClients() {
@@ -304,10 +342,11 @@ export default function App() {
         const data = await getClients();
         const derived = buildClients(data);
         setClients(derived);
-        if (derived.length > 0 && !activeClient) {
-          const demoClient = derived.find((client) => client.id === "client_drift-mv") ?? derived[0];
-          setActiveClient(demoClient.id);
-          setActivePillar(demoClient.id === "client_drift-mv" ? "creative" : "memory");
+        if (derived.length > 0) {
+          const initialClientId = getClientIdFromUrl(derived) ?? getDefaultClient(derived)?.id;
+          const initialClient = derived.find((client) => client.id === initialClientId) ?? derived[0];
+          setActiveClient(initialClient.id);
+          setActivePillar(pillarForClient(initialClient));
           setIsClientDetailOpen(true);
           setIsExpanded(true);
         }
@@ -347,7 +386,7 @@ export default function App() {
         const runs = await getClientRuns(activeClient);
         if (cancelled) return;
         const latestCampaignRun = runs.find((run) => run.campaignId);
-        const demoRun = activeClient === "client_drift-mv"
+        const demoRun = clientUiConfig[activeClient]?.demoMode
           ? runs.find((run) => run.runId.startsWith("9bfdf23e"))
           : undefined;
         const preferredRun = demoRun ?? latestCampaignRun;
@@ -355,7 +394,7 @@ export default function App() {
           if (previous?.clientId === activeClient && previous.campaignId && previous.runId === preferredRun?.runId) {
             return previous;
           }
-          return preferredRun ?? previous;
+          return preferredRun ?? null;
         });
       } catch {
         // Non-critical — creative view can still operate without a hydrated run.
@@ -385,12 +424,15 @@ export default function App() {
   // Fetch pending HITL reviews for the active client + global count
   useEffect(() => {
     if (!activeClient) return;
+    let cancelled = false;
+    setPendingReviewRuns([]);
     async function loadPendingReviews() {
       try {
         const [clientRuns, count] = await Promise.all([
           getPendingReviewRuns(activeClient),
           getPendingReviewCount(),
         ]);
+        if (cancelled) return;
         setPendingReviewRuns(clientRuns);
         setGlobalPendingCount(count);
       } catch {
@@ -398,6 +440,9 @@ export default function App() {
       }
     }
     loadPendingReviews();
+    return () => {
+      cancelled = true;
+    };
   }, [activeClient]);
 
   const runMenuOptions = [
@@ -416,7 +461,8 @@ export default function App() {
     { id: "review" as const, label: "Review Gate", description: "Human-in-the-loop review and approval" },
   ];
 
-  const currentClient = clients.find((client) => client.id === activeClient) ?? clients[0];
+  const currentClient = clients.find((client) => client.id === activeClient) ?? null;
+  const isDemoClient = Boolean(currentClient?.demoMode);
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
@@ -425,7 +471,7 @@ export default function App() {
   ];
 
   useEffect(() => {
-    if (isExpanded) {
+    if (!isExpanded) {
       setIsClientDetailOpen(false);
     }
   }, [isExpanded]);
@@ -459,6 +505,35 @@ export default function App() {
       setIsExpanded((prev) => !prev);
     }
   };
+
+  const handleClientSwitch = useCallback((nextClientId: string) => {
+    if (nextClientId === activeClient) {
+      setIsClientDetailOpen((prev) => !prev);
+      return;
+    }
+
+    const nextClient = clients.find((client) => client.id === nextClientId);
+    if (!nextClient) return;
+
+    teardownRunSubscriptions();
+
+    setCurrentRun(null);
+    setPendingReviewRuns([]);
+    setSelectedShot({ n: null, id: null });
+    setShowReviewPanel(false);
+    setFinalHitlShotNumber(null);
+    setIsRunning(false);
+    setRunError(null);
+    setCurrentStage(null);
+    setLogs(seedLogs);
+    setShowRunMenu(false);
+    setCreativeSubtab("deliverables");
+    setActivePillar(pillarForClient(nextClient));
+    setIsClientDetailOpen(true);
+
+    setActiveClient(nextClientId);
+    updateClientUrl(nextClientId);
+  }, [activeClient, clients, teardownRunSubscriptions]);
 
   useEffect(() => {
     // Only show seed logs when not running a real run
@@ -501,19 +576,13 @@ export default function App() {
 
   // Cleanup SSE subscription on unmount
   useEffect(() => {
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-    };
-  }, []);
+    return teardownRunSubscriptions;
+  }, [teardownRunSubscriptions]);
 
   const handleStartRun = useCallback(async (mode: RunMode) => {
+    if (!activeClient) return;
     // Cleanup previous subscription
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-      unsubscribeRef.current = null;
-    }
+    teardownRunSubscriptions();
 
     setRunError(null);
     setIsRunning(true);
@@ -591,7 +660,7 @@ export default function App() {
         { time: now, msg: `RUN_FAILED: ${err instanceof Error ? err.message : "Unknown error"}`, status: "WAIT" },
       ]);
     }
-  }, [activeClient]);
+  }, [activeClient, teardownRunSubscriptions]);
 
   const handleReviewComplete = useCallback(async () => {
     setShowReviewPanel(false);
@@ -599,7 +668,9 @@ export default function App() {
     if (currentRun) {
       try {
         const updated = await approveReview(currentRun.runId);
-        setCurrentRun(updated);
+        if (updated.clientId === activeClient) {
+          setCurrentRun(updated);
+        }
       } catch {
         // Run may already be updated — just log
       }
@@ -635,10 +706,7 @@ export default function App() {
     try {
       await cancelRun(currentRun.runId);
       // Cleanup SSE subscription
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
-      }
+      teardownRunSubscriptions();
       setIsRunning(false);
       setCurrentStage(null);
       const now = new Date().toLocaleTimeString("en-US", { hour12: false });
@@ -646,7 +714,7 @@ export default function App() {
     } catch (err) {
       setRunError(err instanceof Error ? err.message : "Failed to cancel run");
     }
-  }, [currentRun]);
+  }, [currentRun, teardownRunSubscriptions]);
 
   return (
     <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#141821]">
@@ -702,18 +770,7 @@ export default function App() {
               ) : clients.map((client) => (
                 <button
                   key={client.id}
-                  onClick={() => {
-                    if (client.id === activeClient) {
-                      setIsClientDetailOpen((prev) => !prev);
-                      return;
-                    }
-                    setActiveClient(client.id);
-                    setIsClientDetailOpen(true);
-                    if (client.id === "client_drift-mv") {
-                      setActivePillar("creative");
-                      setCreativeSubtab("deliverables");
-                    }
-                  }}
+                  onClick={() => handleClientSwitch(client.id)}
                   className={`group relative flex items-center justify-center transition-all duration-500 ${
                     activeClient === client.id
                       ? "scale-110"
@@ -819,6 +876,7 @@ export default function App() {
             {currentRun?.runId && (
               <div className="pointer-events-auto absolute right-6 top-6 z-30">
                 <WatcherSignalsPanel
+                  key={currentRun.runId}
                   runId={currentRun.runId}
                   runStatus={currentRun.status}
                   onCancelled={() => {
@@ -842,7 +900,7 @@ export default function App() {
               <div className="w-full max-w-[480px] z-10 space-y-4 ml-4">
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
                   <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
-                <div className="space-y-2">
+                  <div className="space-y-2">
                     <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
                       {currentClient.name}
                     </h1>
@@ -860,6 +918,8 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                <ActiveClientBadge client={currentClient} />
 
                 {/* Four Pillars Tabs */}
                 <div className="flex space-x-1 bg-black/20 p-1 rounded-xl border border-white/5">
@@ -929,7 +989,7 @@ export default function App() {
                       <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
                         {[
                           { id: "deliverables" as const, label: "Deliverables" },
-                          { id: "reshoots" as const, label: "Reshoots" },
+                          ...(isDemoClient ? [{ id: "reshoots" as const, label: "Reshoots" }] : []),
                         ].map((tab) => (
                           <button
                             key={tab.id}
@@ -945,11 +1005,11 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                      {creativeSubtab === "reshoots" ? (
+                      {creativeSubtab === "reshoots" && isDemoClient ? (
                         <ReshootPanel />
                       ) : (
                         <>
-                          {activeClient === "client_drift-mv" && !currentRun?.campaignId ? (
+                          {isDemoClient && !currentRun?.campaignId ? (
                             <div className="flex flex-col items-center justify-center py-8">
                               <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
                               <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
@@ -957,11 +1017,12 @@ export default function App() {
                               </span>
                             </div>
                           ) : !currentRun?.campaignId ? (
-                            <PromptEvolutionPanel clientId={activeClient} />
+                            <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
                           ) : (
                             <>
-                              <DeliverableTimeline />
+                              {isDemoClient && <DeliverableTimeline />}
                               <DeliverableTracker
+                                key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
                                 campaignId={currentRun.campaignId}
                                 runId={currentRun.runId}
                                 onShotClick={(n, id) => setSelectedShot({ n, id })}
@@ -977,8 +1038,8 @@ export default function App() {
                     </p>
                   ) : activePillar === "drift" && activeClient ? (
                     <>
-                      <BaselinePanel clientId={activeClient} />
-                      <DriftAlertPanel clientId={activeClient} currentRunId={currentRun?.runId} />
+                      <BaselinePanel key={`baseline:${activeClient}`} clientId={activeClient} />
+                      <DriftAlertPanel key={`drift:${activeClient}`} clientId={activeClient} currentRunId={currentRun?.runId} />
                     </>
                   ) : activePillar === "drift" ? (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
@@ -1191,6 +1252,7 @@ export default function App() {
       </div>
 
       <ShotDetailDrawer
+        key={`${activeClient}:${currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}`}
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
         runId={currentRun?.runId}
@@ -1199,6 +1261,7 @@ export default function App() {
 
       {showReviewPanel && currentRun && currentClient && (
         <ReviewPanel
+          key={`${activeClient}:${currentRun.runId}`}
           runId={currentRun.runId}
           clientName={currentClient.name}
           initialFinalHitlShotNumber={finalHitlShotNumber}
