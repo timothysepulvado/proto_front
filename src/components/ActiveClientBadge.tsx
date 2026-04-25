@@ -5,7 +5,7 @@ interface ActiveClientBadgeProps {
     id: string;
     name: string;
     status?: string;
-    demoMode?: boolean;
+    featured?: boolean;
   } | null;
 }
 
@@ -31,7 +31,7 @@ export default function ActiveClientBadge({ client }: ActiveClientBadgeProps) {
         </div>
         <div className="shrink-0 text-right">
           <p className="font-mono text-[8px] uppercase tracking-[0.22em] text-cyan-200/70">
-            {client.demoMode ? "Demo Mode" : client.status ?? "active"}
+            {client.featured ? "Featured" : client.status ?? "active"}
           </p>
           <p className="mt-1 max-w-[180px] truncate font-mono text-[9px] text-white/45">
             {client.id}

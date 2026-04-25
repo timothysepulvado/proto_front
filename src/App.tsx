@@ -60,7 +60,7 @@ type LogEntry = {
 type DerivedClient = Client & {
   alert: boolean;
   dnaCode: string;
-  demoMode: boolean;
+  featured: boolean;
   health: number;
   runsValue: number;
   runsLabel: string;
@@ -84,8 +84,8 @@ const typeByName: Record<string, string> = {
   Lilydale: "AGRI",
 };
 
-const clientUiConfig: Record<string, { demoMode?: boolean }> = {
-  "client_drift-mv": { demoMode: true },
+const clientUiConfig: Record<string, { featured?: boolean }> = {
+  "client_drift-mv": { featured: true },
 };
 
 const seedLogs: LogEntry[] = [
@@ -250,8 +250,8 @@ const computeHealth = (status: string, runs: number, index: number) => {
   return Math.min(99, Math.max(18, base + variance));
 };
 
-const pillarForClient = (client: Pick<DerivedClient, "demoMode">): PillarId => (
-  client.demoMode ? "creative" : "memory"
+const pillarForClient = (client: Pick<DerivedClient, "featured">): PillarId => (
+  client.featured ? "creative" : "memory"
 );
 
 const getClientIdFromUrl = (availableClients: DerivedClient[]) => {
@@ -263,7 +263,7 @@ const getClientIdFromUrl = (availableClients: DerivedClient[]) => {
 };
 
 const getDefaultClient = (availableClients: DerivedClient[]) => (
-  availableClients.find((client) => client.demoMode) ?? availableClients[0] ?? null
+  availableClients.find((client) => client.featured) ?? availableClients[0] ?? null
 );
 
 const updateClientUrl = (clientId: string) => {
@@ -284,7 +284,7 @@ const buildClients = (list: Client[]): DerivedClient[] => {
       ...client,
       alert: client.lastRunStatus === "needs_review",
       dnaCode: formatDna(client.id, placeholderDna),
-      demoMode: Boolean(clientUiConfig[client.id]?.demoMode),
+      featured: Boolean(clientUiConfig[client.id]?.featured),
       health: computeHealth(status, runsValue, index),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
@@ -386,10 +386,10 @@ export default function App() {
         const runs = await getClientRuns(activeClient);
         if (cancelled) return;
         const latestCampaignRun = runs.find((run) => run.campaignId);
-        const demoRun = clientUiConfig[activeClient]?.demoMode
+        const featuredRun = clientUiConfig[activeClient]?.featured
           ? runs.find((run) => run.runId.startsWith("9bfdf23e"))
           : undefined;
-        const preferredRun = demoRun ?? latestCampaignRun;
+        const preferredRun = featuredRun ?? latestCampaignRun;
         setCurrentRun((previous) => {
           if (previous?.clientId === activeClient && previous.campaignId && previous.runId === preferredRun?.runId) {
             return previous;
@@ -462,7 +462,7 @@ export default function App() {
   ];
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
-  const isDemoClient = Boolean(currentClient?.demoMode);
+  const isFeaturedClient = Boolean(currentClient?.featured);
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
@@ -989,7 +989,7 @@ export default function App() {
                       <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
                         {[
                           { id: "deliverables" as const, label: "Deliverables" },
-                          ...(isDemoClient ? [{ id: "reshoots" as const, label: "Reshoots" }] : []),
+                          ...(isFeaturedClient ? [{ id: "reshoots" as const, label: "Reshoots" }] : []),
                         ].map((tab) => (
                           <button
                             key={tab.id}
@@ -1005,11 +1005,11 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                      {creativeSubtab === "reshoots" && isDemoClient ? (
+                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
                         <ReshootPanel />
                       ) : (
                         <>
-                          {isDemoClient && !currentRun?.campaignId ? (
+                          {isFeaturedClient && !currentRun?.campaignId ? (
                             <div className="flex flex-col items-center justify-center py-8">
                               <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
                               <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
@@ -1020,7 +1020,7 @@ export default function App() {
                             <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
                           ) : (
                             <>
-                              {isDemoClient && <DeliverableTimeline />}
+                              {isFeaturedClient && <DeliverableTimeline />}
                               <DeliverableTracker
                                 key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
                                 campaignId={currentRun.campaignId}
