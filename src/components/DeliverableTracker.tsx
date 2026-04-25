@@ -259,6 +259,9 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
 
   useEffect(() => {
     let cancelled = false;
+    deliverablesRef.current = [];
+    setDeliverables([]);
+    setShotSummaries([]);
 
     async function load() {
       try {

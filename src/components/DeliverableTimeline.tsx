@@ -78,6 +78,10 @@ export default function DeliverableTimeline({ productionSlug = "drift-mv" }: Del
   }, [productionSlug]);
 
   useEffect(() => {
+    setShots([]);
+    setError(null);
+    setSelectedShotNumber(null);
+    setThumbnailBust({});
     setIsLoading(true);
     void loadShots();
   }, [loadShots]);

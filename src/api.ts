@@ -59,6 +59,7 @@ export interface Client {
   id: string;
   name: string;
   status: ClientStatus;
+  featured?: boolean;
   lastRunId?: string;
   lastRunAt?: string;
   lastRunStatus?: RunStatus;

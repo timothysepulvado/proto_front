@@ -24,6 +24,11 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
   // Load baseline + subscribe to realtime
   useEffect(() => {
     let cancelled = false;
+    setActive(null);
+    setHistory([]);
+    setIsCalculating(false);
+    setShowHistory(false);
+    setError(null);
 
     async function load() {
       try {
@@ -37,7 +42,7 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
           setActive(activeData);
           setHistory(historyData);
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setError("Couldn't load brand baselines. Retry.");
         }
@@ -81,12 +86,12 @@ export default function BaselinePanel({ clientId }: BaselinePanelProps) {
       // Re-fetch history to include the new baseline
       const historyData = await getBaselineHistory(clientId);
       setHistory(historyData);
-    } catch (err) {
+    } catch {
       setError("Couldn't calculate a new baseline. Retry.");
     } finally {
       setIsCalculating(false);
     }
-  }, [clientId, reloadNonce]);
+  }, [clientId]);
 
   // Loading state
   if (isLoading) {

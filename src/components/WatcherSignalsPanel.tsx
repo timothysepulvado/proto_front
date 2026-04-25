@@ -111,6 +111,13 @@ export default function WatcherSignalsPanel({ runId, runStatus, onCancelled }: W
 
   useEffect(() => {
     let cancelled = false;
+    setSignal(null);
+    setActiveEscalation(null);
+    setArtifactDeliverables({});
+    setConfirmCancel(false);
+    setIsCancelling(false);
+    setCancelError(null);
+
     async function loadArtifacts() {
       try {
         const artifacts = await api.getArtifacts(runId);

@@ -141,6 +141,19 @@ export default function PromptEvolutionPanel({ clientId }: PromptEvolutionPanelP
 
   useEffect(() => {
     const cancelled = { current: false };
+    setActive(null);
+    setHistory([]);
+    setActiveScores([]);
+    setLineage([]);
+    setError(null);
+    setIsEditing(false);
+    setEditText("");
+    setIsSaving(false);
+    setPromptExpanded(false);
+    setHistoryExpanded(false);
+    setLineageExpanded(false);
+    setExpandedHistoryId(null);
+    setHistoryScores(new Map());
     setIsLoading(true);
     void loadData(cancelled);
 
