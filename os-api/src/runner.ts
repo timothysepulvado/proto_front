@@ -178,7 +178,7 @@ async function callBrandEngine<T = unknown>(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000), // 2 minute timeout
+      signal: AbortSignal.timeout(300_000), // 5 minute timeout — bumped 2026-04-25 PM after smoke timeout: brand-engine grade_video_with_consensus + Gemini 3.1 Pro on 8s clip + tiebreak can exceed 2 minutes when graded against a divergent new aesthetic intent.
     });
 
     if (!response.ok) {
