@@ -1,12 +1,13 @@
 import { EventEmitter } from "node:events";
-import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync } from "node:fs";
+import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync, readFileSync } from "node:fs";
 import { readFile, writeFile, rename } from "node:fs/promises";
-import { dirname, extname, join, normalize } from "node:path";
+import { dirname, extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import type { Request, Response, Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { buildTempGenProcessEnv, getTempGenDir } from "./temp-gen-env.js";
+import { supabase } from "./supabase.js";
 
 const KNOWN_PRODUCTIONS = new Set(["drift-mv"]);
 const SHOT_MIN = 1;
@@ -44,6 +45,42 @@ type ProductionShotPatch = {
 };
 
 type ProductionShotResponse = Awaited<ReturnType<typeof buildShotCatalog>>["shots"][number];
+type AnchorSource = "regen_stills_pivot.py" | "manifest";
+
+type AnchorCatalogItem = {
+  name: string;
+  path: string;
+  thumb: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
+};
+
+type ShotStillCatalogItem = {
+  shot: number;
+  currentStillPath: string | null;
+  currentStillThumb: string | null;
+  currentStill?: ReturnType<typeof nullableFileMeta>;
+  backupStillPath?: string;
+  backupStill?: ReturnType<typeof nullableFileMeta>;
+  anchors: AnchorCatalogItem[];
+  anchorsSource: AnchorSource;
+};
+
+type ArtifactApprovalRow = {
+  id: string;
+  deliverable_id: string | null;
+  campaign_id: string | null;
+  path: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type DeliverableApprovalRow = {
+  id: string;
+  reference_images: string[] | null;
+  updated_at: string;
+};
 
 export type ProductionJob = {
   jobId: string;
@@ -148,8 +185,274 @@ function shotPaths(productionSlug: string, shotNumber: number) {
     backup: safePath(root, "shots", `shot_${padded}_v5_backup.mp4`),
     pending: safePath(root, "shots", "v5_standard", `shot_${padded}.mp4`),
     still: safePath(root, "stills", `shot_${padded}.png`),
+    stillBackup: safePath(root, "stills", `shot_${padded}_v5_backup.png`),
     thumbnail: safePath(root, ".thumbnails", `shot_${padded}.jpg`),
     assembly: safePath(root, "assembly", "drift_final.mp4"),
+  };
+}
+
+function anchorPath(productionSlug: string, name: string): string {
+  validateAnchorName(name);
+  return safePath(productionRoot(productionSlug), "anchors", `${name}_anchor.png`);
+}
+
+function shotStillUrl(productionSlug: string, shotNumber: number): string {
+  return `/api/productions/${productionSlug}/shot/${shotNumber}/still`;
+}
+
+function anchorUrl(productionSlug: string, name: string): string {
+  return `/api/productions/${productionSlug}/anchor/${encodeURIComponent(name)}`;
+}
+
+function validateAnchorName(raw: string): string {
+  const name = raw.trim();
+  if (!/^[a-z0-9_]{1,64}$/.test(name)) {
+    throw validationError("Anchor name must be 1-64 chars using lowercase letters, numbers, and underscores");
+  }
+  return name;
+}
+
+function parseShotAnchorsFromPython(raw: string): Map<number, string[]> {
+  const marker = "SHOT_ANCHORS";
+  const markerIndex = raw.indexOf(marker);
+  if (markerIndex < 0) return new Map();
+
+  const braceStart = raw.indexOf("{", markerIndex);
+  if (braceStart < 0) return new Map();
+
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < raw.length; i += 1) {
+    const char = raw[i];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        braceEnd = i;
+        break;
+      }
+    }
+  }
+  if (braceEnd < 0) return new Map();
+
+  const body = raw.slice(braceStart + 1, braceEnd);
+  const anchors = new Map<number, string[]>();
+  for (const line of body.split(/\r?\n/)) {
+    const withoutComment = line.split("#")[0] ?? "";
+    const match = /^\s*(\d+)\s*:\s*\[([^\]]*)\]/.exec(withoutComment);
+    if (!match) continue;
+    const shotNumber = Number.parseInt(match[1] ?? "", 10);
+    const names = [...(match[2] ?? "").matchAll(/["']([a-z0-9_]+)["']/g)].map((item) => item[1]);
+    if (Number.isInteger(shotNumber)) anchors.set(shotNumber, names);
+  }
+  return anchors;
+}
+
+async function loadAnchorMap(productionSlug: string, manifest: Manifest): Promise<{ source: AnchorSource; anchorsByShot: Map<number, string[]> }> {
+  const pivotPath = safePath(productionRoot(productionSlug), "regen_stills_pivot.py");
+  if (existsSync(pivotPath)) {
+    const parsed = parseShotAnchorsFromPython(await readFile(pivotPath, "utf8"));
+    if (parsed.size > 0) return { source: "regen_stills_pivot.py", anchorsByShot: parsed };
+  }
+
+  const fallback = new Map<number, string[]>();
+  for (const shot of manifest.shots) {
+    const names = Array.isArray(shot.characters_needed)
+      ? shot.characters_needed.filter((item): item is string => typeof item === "string")
+      : [];
+    fallback.set(shot.id, names);
+  }
+  return { source: "manifest", anchorsByShot: fallback };
+}
+
+function anchorCatalogItem(productionSlug: string, name: string): AnchorCatalogItem {
+  const path = anchorPath(productionSlug, name);
+  const meta = nullableFileMeta(path);
+  return {
+    name,
+    path,
+    thumb: anchorUrl(productionSlug, name),
+    exists: meta !== null,
+    sizeBytes: meta?.sizeBytes,
+    mtime: meta?.mtime,
+  };
+}
+
+async function buildShotStillCatalog(productionSlug: string): Promise<ShotStillCatalogItem[]> {
+  const manifest = await loadManifest(productionSlug);
+  const anchorMap = await loadAnchorMap(productionSlug, manifest);
+
+  return manifest.shots
+    .slice()
+    .sort((a, b) => a.id - b.id)
+    .map((shot) => {
+      const paths = shotPaths(productionSlug, shot.id);
+      const currentStill = nullableFileMeta(paths.still);
+      const backupStill = nullableFileMeta(paths.stillBackup);
+      const anchorNames = anchorMap.anchorsByShot.get(shot.id) ?? [];
+
+      return {
+        shot: shot.id,
+        currentStillPath: currentStill?.path ?? null,
+        currentStillThumb: currentStill ? shotStillUrl(productionSlug, shot.id) : null,
+        currentStill,
+        backupStillPath: backupStill?.path,
+        backupStill,
+        anchors: anchorNames.map((name) => anchorCatalogItem(productionSlug, name)),
+        anchorsSource: anchorMap.source,
+      };
+    });
+}
+
+function resolveUserPath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (!trimmed) throw validationError("sourcePath cannot be empty");
+  if (trimmed === "~") return process.env.HOME ?? trimmed;
+  if (trimmed.startsWith("~/")) return join(process.env.HOME ?? "", trimmed.slice(2));
+  return trimmed;
+}
+
+function validateStillSourcePath(rawPath: unknown): string {
+  if (typeof rawPath !== "string") throw validationError("sourcePath must be a string");
+  const sourcePath = resolve(resolveUserPath(rawPath));
+  if (!existsSync(sourcePath)) throw Object.assign(new Error(`Replacement still not found: ${sourcePath}`), { name: "NotFoundError" });
+  const stats = statSync(sourcePath);
+  if (!stats.isFile()) throw validationError("sourcePath must resolve to a file");
+  if (stats.size > 50 * 1024 * 1024) throw validationError("Replacement still must be 50MB or smaller");
+  const allowedExtensions = new Set([".png", ".jpg", ".jpeg"]);
+  if (!allowedExtensions.has(extname(sourcePath).toLowerCase())) {
+    throw validationError("Replacement still must be a .png, .jpg, or .jpeg file");
+  }
+
+  const signature = readFileSync(sourcePath).subarray(0, 8);
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const isPng = signature.equals(pngSignature);
+  const isJpeg = signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
+  if (!isPng && !isJpeg) throw validationError("Replacement still must be a valid PNG or JPEG image");
+  return sourcePath;
+}
+
+function replaceShotStill(productionSlug: string, shotNumber: number, sourcePath: string) {
+  const paths = shotPaths(productionSlug, shotNumber);
+  let backupCreated = false;
+  if (existsSync(paths.still) && !existsSync(paths.stillBackup)) {
+    copyFileSync(paths.still, paths.stillBackup, constants.COPYFILE_EXCL);
+    backupCreated = true;
+  }
+
+  const sourceResolved = resolve(sourcePath);
+  const targetResolved = resolve(paths.still);
+  const replaced = sourceResolved !== targetResolved;
+  if (replaced) {
+    mkdirSync(dirname(paths.still), { recursive: true });
+    copyFileSync(sourcePath, paths.still);
+  }
+
+  return {
+    shotNumber,
+    replaced,
+    backupCreated,
+    sourcePath,
+    currentStill: fileMeta(paths.still),
+    backupStill: nullableFileMeta(paths.stillBackup),
+  };
+}
+
+function metadataShotNumber(metadata: Record<string, unknown> | null): number | null {
+  if (!metadata) return null;
+  if (typeof metadata.shotNumber === "number") return metadata.shotNumber;
+  const narrativeContext = metadata.narrative_context as { shot_number?: unknown } | undefined;
+  return typeof narrativeContext?.shot_number === "number" ? narrativeContext.shot_number : null;
+}
+
+function artifactMatchesShot(row: ArtifactApprovalRow, shotNumber: number): boolean {
+  const fromMetadata = metadataShotNumber(row.metadata);
+  if (fromMetadata === shotNumber) return true;
+  const padded = padShot(shotNumber);
+  return row.path.includes(`shot_${padded}.`);
+}
+
+async function findLatestArtifactForShot(shotNumber: number, deliverableId?: string): Promise<ArtifactApprovalRow | null> {
+  let query = supabase
+    .from("artifacts")
+    .select("id, deliverable_id, campaign_id, path, metadata, created_at")
+    .order("created_at", { ascending: false })
+    .limit(2000);
+
+  if (deliverableId) query = query.eq("deliverable_id", deliverableId);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Failed to resolve shot artifact: ${error.message}`);
+
+  const rows = (data as ArtifactApprovalRow[] | null) ?? [];
+  return rows.find((row) => artifactMatchesShot(row, shotNumber) && row.deliverable_id) ?? null;
+}
+
+async function approveShotStill(productionSlug: string, shotNumber: number, deliverableId?: string) {
+  const paths = shotPaths(productionSlug, shotNumber);
+  if (!existsSync(paths.still)) {
+    throw Object.assign(new Error("Starting still not found"), { name: "NotFoundError" });
+  }
+
+  const artifact = await findLatestArtifactForShot(shotNumber, deliverableId);
+  if (!artifact || !artifact.deliverable_id) {
+    throw Object.assign(new Error("No deliverable-backed artifact found for this shot"), { name: "NotFoundError" });
+  }
+
+  const approvedAt = new Date().toISOString();
+  const stillMeta = fileMeta(paths.still);
+  const approval = {
+    productionSlug,
+    shotNumber,
+    approvedAt,
+    currentStillPath: stillMeta.path,
+    currentStillMtime: stillMeta.mtime,
+    source: "hud-anchor-still-management",
+  };
+
+  const nextArtifactMetadata = {
+    ...(artifact.metadata ?? {}),
+    starting_still_approved_at: approvedAt,
+    starting_still_approval: approval,
+  };
+  const { error: artifactError } = await supabase
+    .from("artifacts")
+    .update({ metadata: nextArtifactMetadata })
+    .eq("id", artifact.id);
+  if (artifactError) throw new Error(`Failed to update artifact approval metadata: ${artifactError.message}`);
+
+  const { data: deliverable, error: deliverableReadError } = await supabase
+    .from("campaign_deliverables")
+    .select("id, reference_images, updated_at")
+    .eq("id", artifact.deliverable_id)
+    .maybeSingle();
+  if (deliverableReadError) throw new Error(`Failed to read deliverable reference images: ${deliverableReadError.message}`);
+  if (!deliverable) throw Object.assign(new Error("Deliverable not found"), { name: "NotFoundError" });
+
+  const currentRefs = Array.isArray((deliverable as DeliverableApprovalRow).reference_images)
+    ? ((deliverable as DeliverableApprovalRow).reference_images ?? [])
+    : [];
+  const nextRefs = [paths.still, ...currentRefs.filter((item) => item !== paths.still)];
+  const { data: updatedDeliverable, error: deliverableUpdateError } = await supabase
+    .from("campaign_deliverables")
+    .update({ reference_images: nextRefs })
+    .eq("id", artifact.deliverable_id)
+    .select("id, reference_images, updated_at")
+    .single();
+  if (deliverableUpdateError) throw new Error(`Failed to update deliverable reference images: ${deliverableUpdateError.message}`);
+
+  return {
+    ok: true,
+    shotNumber,
+    approvedAt,
+    productionSlug,
+    currentStillPath: stillMeta.path,
+    artifactId: artifact.id,
+    deliverableId: artifact.deliverable_id,
+    campaignId: artifact.campaign_id,
+    referenceImages: (updatedDeliverable as DeliverableApprovalRow).reference_images ?? [],
+    storage: "artifacts.metadata.starting_still_approval + campaign_deliverables.reference_images",
+    note: "campaign_deliverables.metadata is not present in this schema; approval metadata is stored on the deliverable-backed artifact while reference_images is updated to fire deliverable realtime.",
   };
 }
 
@@ -512,6 +815,82 @@ export function createProductionsRouter(): Router {
       res.json(catalog);
     } catch (err) {
       sendJsonError(res, err, "GET /api/productions/:productionSlug/shots");
+    }
+  });
+
+  router.get("/:productionSlug/shot-stills", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shots = await buildShotStillCatalog(productionSlug);
+      res.json({ productionSlug, shots });
+    } catch (err) {
+      sendJsonError(res, err, "GET /api/productions/:productionSlug/shot-stills");
+    }
+  });
+
+  router.get("/:productionSlug/shot/:shot/still", (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "shot"));
+      streamFile(res, shotPaths(productionSlug, shotNumber).still, "image/png");
+    } catch (err) {
+      sendJsonError(res, err, "GET /api/productions/:productionSlug/shot/:shot/still");
+    }
+  });
+
+  router.get("/:productionSlug/anchor/:name", (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const name = validateAnchorName(getParam(req, "name"));
+      streamFile(res, anchorPath(productionSlug, name), "image/png");
+    } catch (err) {
+      sendJsonError(res, err, "GET /api/productions/:productionSlug/anchor/:name");
+    }
+  });
+
+  router.post("/:productionSlug/shot/:shot/still", (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "shot"));
+      const body = (req.body ?? {}) as { sourcePath?: unknown };
+      const sourcePath = validateStillSourcePath(body.sourcePath);
+      const replacement = replaceShotStill(productionSlug, shotNumber, sourcePath);
+
+      emitProductionEvent(productionSlug, {
+        type: "shot_still_replaced",
+        shotNumber,
+        replaced: replacement.replaced,
+        backupCreated: replacement.backupCreated,
+        currentStillPath: replacement.currentStill.path,
+      });
+
+      res.json({ ok: true, ...replacement });
+    } catch (err) {
+      sendJsonError(res, err, "POST /api/productions/:productionSlug/shot/:shot/still");
+    }
+  });
+
+  router.post("/:productionSlug/shot/:shot/approve-still", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "shot"));
+      const body = (req.body ?? {}) as { deliverableId?: unknown };
+      const deliverableId = body.deliverableId === undefined
+        ? undefined
+        : validateOptionalString(body.deliverableId, "deliverableId", 80);
+      const result = await approveShotStill(productionSlug, shotNumber, deliverableId);
+
+      emitProductionEvent(productionSlug, {
+        type: "shot_still_approved",
+        shotNumber,
+        approvedAt: result.approvedAt,
+        deliverableId: result.deliverableId,
+        artifactId: result.artifactId,
+      });
+
+      res.json(result);
+    } catch (err) {
+      sendJsonError(res, err, "POST /api/productions/:productionSlug/shot/:shot/approve-still");
     }
   });
 
