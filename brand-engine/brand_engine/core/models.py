@@ -332,3 +332,130 @@ class VideoGradeResult(BaseModel):
             "the verdict is authoritative (not subject to critic variance)."
         ),
     )
+
+
+# ─── Image grader (ADR-004 Phase A — stills critic-in-loop) ──────────────────
+# Mirrors VideoGradeRequest/Result but narrowed for single-image grading via
+# Gemini 3 Pro Vision. The recommendation union drops L3_accept_with_trim
+# (no clip-trim semantics for stills) and consensus_note is dropped (frame-
+# extraction tiebreak is video-only). Adds shot_number, image_path, and
+# new_candidate_limitation per the stills critic rubric output JSON shape.
+#
+# os-api consumes this via the parallel `ImageGradeResult` TypeScript type at
+# os-api/src/types.ts. The two must stay in sync.
+
+ImageGradeMode = Literal["audit", "in_loop"]
+ImageGradeRecommendation = Literal[
+    "ship",
+    "L1_prompt_fix",
+    "L2_approach_change",
+    "L3_redesign",
+]
+
+
+class ImageGradeRequest(BaseModel):
+    """API request to grade a single still image using Gemini 3 Pro Vision.
+
+    Two modes:
+      * audit    — score in isolation, skip rubric Rules 6+7 (no pivot history)
+      * in_loop  — score during regen iteration; Rules 6+7 active (consume
+                   pivot_rewrite_history; degenerate-loop guard)
+
+    The 2000-char ceiling on still_prompt is the productized NB Pro hard limit
+    per ~/Temp-gen/productions/drift-mv/STILLS_AUDIT_15_SHOTS.md.
+    """
+    image_path: str = Field(description="Absolute filesystem path to the still PNG/JPG")
+    still_prompt: str = Field(
+        description="The prompt that produced this image",
+        max_length=2000,
+    )
+    narrative_beat: dict = Field(
+        description=(
+            "Manifest shot N entry — `visual` + `characters_needed` + `section` + "
+            "`shot_number` + optional `pivot_rewrite_history` (the iter log)"
+        ),
+    )
+    story_context: dict = Field(
+        default_factory=dict,
+        description=(
+            "Pre-loaded BRIEF.md + NARRATIVE.md + LYRICS.md content for this campaign. "
+            "Caller is responsible for reading these once and threading them through; "
+            "the critic does not reach into the filesystem."
+        ),
+    )
+    anchor_paths: list[str] = Field(
+        default_factory=list,
+        description="Filesystem paths to character anchor PNGs (brandy_anchor.png, etc.)",
+    )
+    reference_paths: list[str] = Field(
+        default_factory=list,
+        description="Filesystem paths to quality-bar exemplar shipped stills",
+    )
+    pivot_rewrite_history: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "None for audit-mode; list of prior iter records for in_loop mode. "
+            "Each record holds the iter critic verdict + orchestrator decision. "
+            "Triggers Rules 6 (history consume) and 7 (degenerate-loop guard)."
+        ),
+    )
+    mode: ImageGradeMode = Field(
+        default="audit",
+        description="audit (skip Rules 6+7) | in_loop (apply Rules 6+7)",
+    )
+    shot_number: Optional[int] = Field(
+        default=None,
+        description="Optional shot number for logging/return — derived from narrative_beat if absent",
+    )
+
+
+class ImageGradeResult(BaseModel):
+    """Response for /grade_image_v2 — structured verdict on a single still.
+
+    Mirrors VideoGradeResult field-for-field except:
+      * recommendation: narrowed (no L3_accept_with_trim — no clip-trim semantics)
+      * consensus_note: dropped (frame-extraction tiebreak is video-only)
+      * shot_number, image_path, new_candidate_limitation: added per the stills
+        critic rubric output JSON shape
+
+    The TypeScript consumer (os-api/src/types.ts ImageGradeResult) tracks this
+    one-for-one — schema changes here require a TS update in the same commit.
+    """
+    verdict: str = Field(description="PASS | WARN | FAIL")
+    aggregate_score: float = Field(ge=0.0, le=5.0, description="Mean of criterion scores")
+    criteria: list[VideoGradeCriterion] = Field(
+        description=(
+            "6 criteria for stills: character_consistency, hand_anatomy, "
+            "mech_color_identity, composition, narrative_alignment, aesthetic_match. "
+            "Reuses VideoGradeCriterion shape (name/score/notes)."
+        ),
+    )
+    detected_failure_classes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Failure modes present in the image — exact snake_case strings from "
+            "known_limitations.failure_mode, OR new_candidate:<proposed_name>"
+        ),
+    )
+    confidence: float = Field(ge=0.0, le=1.0, description="Overall confidence in the verdict")
+    summary: str = Field(description="1-2 sentence overall assessment")
+    reasoning: str = Field(description="3-5 sentences: visual evidence + verdict rationale")
+    recommendation: ImageGradeRecommendation = Field(
+        description="ship | L1_prompt_fix | L2_approach_change | L3_redesign (narrowed for stills)",
+    )
+    model: str = Field(description="Gemini model id used")
+    cost: float = Field(default=0.0, description="USD cost of the grade call")
+    latency_ms: int = Field(default=0, description="Wall-clock latency of the grade call")
+    shot_number: Optional[int] = Field(
+        default=None,
+        description="Shot index (1-30 for Drift MV) — echoed from request when present",
+    )
+    image_path: str = Field(description="Echo of input image_path for downstream tracing")
+    new_candidate_limitation: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Populated when critic discovers a failure pattern not in the catalog. "
+            "Shape: {failure_mode, category, description, mitigation, severity}. "
+            "Orchestrator may seed this back into known_limitations after review."
+        ),
+    )

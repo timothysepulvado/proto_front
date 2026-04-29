@@ -26,12 +26,15 @@ from brand_engine.core.models import (
     GradeRequest,
     GradeResult,
     HealthResponse,
+    ImageGradeRequest,
+    ImageGradeResult,
     IngestRequest,
     IngestResult,
     RetrieveRequest,
     VideoGradeRequest,
     VideoGradeResult,
 )
+from brand_engine.core.image_grader import grade_image_v2 as _grade_image_v2
 from brand_engine.core.pinecone_client import check_connectivity as check_pinecone
 from brand_engine.core.retriever import DualFusionRetriever, load_brand_profile
 from brand_engine.core.trainer import ThresholdTrainer
@@ -220,6 +223,56 @@ async def grade_video(request: VideoGradeRequest):
         raise HTTPException(status_code=502, detail=f"Video critic returned invalid output: {e}")
     except Exception as e:
         logger.error("Video grade failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/grade_image_v2", response_model=ImageGradeResult)
+async def grade_image_v2_route(request: ImageGradeRequest):
+    """Grade a single still image using Gemini 3 Pro Vision (ADR-004 Phase A).
+
+    Two modes:
+      * ``audit`` — score in isolation, skip rubric Rules 6+7 (no pivot history)
+      * ``in_loop`` — score during regen iteration, apply Rules 6+7
+        (consume pivot_rewrite_history; degenerate-loop guard fires on same
+        failure_class repeating without ≥0.3 score movement)
+
+    Reads the ``known_limitations`` catalog from Supabase at request time
+    (60-second module-level cache) — single source of truth for failure modes.
+    Falls back to criterion-only grading when the catalog is unreachable.
+
+    Returns ImageGradeResult — the JSON contract that os-api's runner.ts
+    (Phase B) will consume to feed orchestrator escalation decisions.
+    """
+    try:
+        result_dict = _grade_image_v2(
+            image_path=request.image_path,
+            still_prompt=request.still_prompt,
+            narrative_beat=request.narrative_beat,
+            story_context=request.story_context,
+            anchor_paths=request.anchor_paths,
+            reference_paths=request.reference_paths,
+            pivot_rewrite_history=request.pivot_rewrite_history,
+            mode=request.mode,
+            shot_number=request.shot_number,
+        )
+        # Re-validate via Pydantic so FastAPI emits the canonical schema
+        return ImageGradeResult(**result_dict)
+    except ValueError as e:
+        # Pre-flight failure (2000-char ceiling) OR critic JSON invalid.
+        # 2000-char ceiling is a client input error → 422.
+        # Critic JSON invalid is an upstream error → 502.
+        msg = str(e)
+        if "2000" in msg or "char" in msg.lower():
+            logger.warning("Image grade pre-flight rejected: %s", msg)
+            raise HTTPException(status_code=422, detail=msg)
+        logger.error("Image grade JSON error: %s", msg)
+        raise HTTPException(status_code=502, detail=f"Stills critic returned invalid output: {msg}")
+    except FileNotFoundError as e:
+        # Should not happen — grade_image_v2 returns synthetic FAIL on missing
+        # image rather than raising. But surface a 404 for defense-in-depth.
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Image grade failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

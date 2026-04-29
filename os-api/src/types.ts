@@ -354,6 +354,60 @@ export interface VideoGradeResult {
   consensus_note?: string | null;
 }
 
+// ─── Image Grade (mirrors brand-engine ImageGradeResult — ADR-004 Phase A) ─
+// Narrowed for stills: drops L3_accept_with_trim (no clip-trim semantics),
+// drops consensus_note (frame-extraction tiebreak is video-only). Adds
+// shot_number / image_path / new_candidate_limitation per the stills rubric.
+//
+// The Python source of truth is brand_engine.core.models.ImageGradeResult.
+// Schema changes there require this type to update in the same commit.
+export type ImageGradeMode = "audit" | "in_loop";
+
+export type ImageGradeRecommendation =
+  | "ship"
+  | "L1_prompt_fix"
+  | "L2_approach_change"
+  | "L3_redesign";
+
+export interface ImageGradeRequest {
+  image_path: string;
+  /** ≤ 2000 chars — productized NB Pro hard limit. Pre-flight rejects above. */
+  still_prompt: string;
+  narrative_beat: Record<string, unknown>;
+  story_context?: Record<string, unknown>;
+  anchor_paths?: string[];
+  reference_paths?: string[];
+  /** None for audit mode; iter records for in_loop mode (Rules 6+7 active). */
+  pivot_rewrite_history?: Array<Record<string, unknown>> | null;
+  mode?: ImageGradeMode;
+  shot_number?: number | null;
+}
+
+export interface ImageGradeResult {
+  verdict: "PASS" | "WARN" | "FAIL";
+  aggregate_score: number;
+  /** 6 stills criteria — reuses VideoGradeCriterion shape (name/score/notes). */
+  criteria: VideoGradeCriterion[];
+  detected_failure_classes: string[];
+  confidence: number;
+  summary: string;
+  reasoning: string;
+  /** Narrowed union — no L3_accept_with_trim, no L3_escalation. */
+  recommendation: ImageGradeRecommendation;
+  model: string;
+  cost: number;
+  latency_ms: number;
+  shot_number?: number | null;
+  image_path: string;
+  /**
+   * Populated when the critic discovers a failure pattern not yet in the
+   * known_limitations catalog. Shape matches the
+   * known_limitations row schema (failure_mode, category, description,
+   * mitigation, severity).
+   */
+  new_candidate_limitation?: Record<string, unknown> | null;
+}
+
 // ─── Narrative envelope (Chunk 1 — context-aware grading) ───────────────
 // Both critic + orchestrator consume these so every per-shot call knows its
 // position in the 30-shot Drift MV music video + what stylization is
