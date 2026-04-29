@@ -60,6 +60,15 @@ function formatDate(iso: string | undefined): string {
   });
 }
 
+function formatTimeStamp(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 function labelizeAnchor(name: string): string {
   const replacements: Record<string, string> = {
     brandy: "Brandy",
@@ -134,11 +143,13 @@ export function EmptyAnchorState() {
 export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumber, campaignId }: AnchorStillPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const refetchTimerRef = useRef<number | null>(null);
+  const badgeTimerRef = useRef<number | null>(null);
   const [still, setStill] = useState<ProductionShotStillCatalogItem | null>(null);
   const [shot, setShot] = useState<ProductionShotState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [startingStillUpdatedAt, setStartingStillUpdatedAt] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"approve" | "reject" | "snapshot" | "replace" | null>(null);
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -164,13 +175,24 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
     }
   }, [productionSlug, shotNumber]);
 
-  const refetchSoon = useCallback((message?: string) => {
-    if (message) setActionMessage(message);
+  const showStartingStillUpdatedBadge = useCallback((timestamp: string) => {
+    setStartingStillUpdatedAt(timestamp);
+    if (badgeTimerRef.current) window.clearTimeout(badgeTimerRef.current);
+    badgeTimerRef.current = window.setTimeout(() => {
+      setStartingStillUpdatedAt(null);
+      badgeTimerRef.current = null;
+    }, 30000);
+  }, []);
+
+  const refetchSoon = useCallback((options: { message?: string; startingStillUpdatedAt?: string } = {}) => {
+    if (options.message) setActionMessage(options.message);
+    if (options.startingStillUpdatedAt) showStartingStillUpdatedBadge(options.startingStillUpdatedAt);
     if (refetchTimerRef.current) window.clearTimeout(refetchTimerRef.current);
     refetchTimerRef.current = window.setTimeout(() => {
       void load();
-    }, 250);
-  }, [load]);
+      refetchTimerRef.current = null;
+    }, 300);
+  }, [load, showStartingStillUpdatedBadge]);
 
   useEffect(() => {
     setStill(null);
@@ -179,6 +201,11 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
     setError(null);
     setActionError(null);
     setActionMessage(null);
+    setStartingStillUpdatedAt(null);
+    if (badgeTimerRef.current) {
+      window.clearTimeout(badgeTimerRef.current);
+      badgeTimerRef.current = null;
+    }
     setRejectOpen(false);
     setRejectReason("");
     setSnapshotLabel("");
@@ -191,8 +218,12 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
       (event: ProductionEvent) => {
         const eventShot = typeof (event as { shotNumber?: unknown }).shotNumber === "number" ? (event as { shotNumber: number }).shotNumber : null;
         if (eventShot !== shotNumber) return;
-        if (["shot_still_replaced", "shot_still_snapshot", "shot_still_approved", "shot_still_rejected", "regen_complete", "shot_promoted", "shot_rejected"].includes(event.type)) {
-          refetchSoon(event.type === "shot_still_replaced" || event.type === "shot_promoted" ? "Starting still updated" : undefined);
+        if (event.type === "shot_promoted" || event.type === "shot_still_replaced") {
+          refetchSoon({ startingStillUpdatedAt: event.timestamp ?? new Date().toISOString() });
+          return;
+        }
+        if (["shot_still_snapshot", "shot_still_approved", "shot_still_rejected", "regen_complete", "shot_rejected"].includes(event.type)) {
+          refetchSoon();
         }
       },
       () => {
@@ -203,14 +234,25 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
   }, [productionSlug, refetchSoon, shotNumber]);
 
   useEffect(() => {
+    const handleLocalStillUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<{ productionSlug?: string; shotNumber?: number; timestamp?: string }>).detail;
+      if (detail?.productionSlug !== productionSlug || detail.shotNumber !== shotNumber) return;
+      refetchSoon({ startingStillUpdatedAt: detail.timestamp ?? new Date().toISOString() });
+    };
+    window.addEventListener("brandstudios:shot-still-updated", handleLocalStillUpdate);
+    return () => window.removeEventListener("brandstudios:shot-still-updated", handleLocalStillUpdate);
+  }, [productionSlug, refetchSoon, shotNumber]);
+
+  useEffect(() => {
     if (!campaignId) return undefined;
     return subscribeToCampaignDeliverables(campaignId, () => {
-      refetchSoon("Deliverable state synced");
+      refetchSoon({ message: "Deliverable state synced" });
     });
   }, [campaignId, refetchSoon]);
 
   useEffect(() => () => {
     if (refetchTimerRef.current) window.clearTimeout(refetchTimerRef.current);
+    if (badgeTimerRef.current) window.clearTimeout(badgeTimerRef.current);
   }, []);
 
   const stillUrl = getProductionManagedStillUrl(productionSlug, shotNumber, revision);
@@ -321,6 +363,12 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
         {actionMessage && (
           <div className="mt-4 rounded-2xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3 text-[10px] font-mono uppercase tracking-wider text-emerald-200">
             <CheckCircle2 size={13} className="mr-2 inline" /> {actionMessage}
+          </div>
+        )}
+
+        {startingStillUpdatedAt && (
+          <div className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-[10px] font-mono uppercase tracking-wider text-cyan-100 shadow-[0_0_26px_rgba(34,211,238,0.10)] transition-opacity duration-500">
+            <RefreshCw size={13} className="mr-2 inline" /> Starting still updated {formatTimeStamp(startingStillUpdatedAt)}
           </div>
         )}
 

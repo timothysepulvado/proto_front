@@ -855,6 +855,54 @@ async function extractThumbnail(productionSlug: string, shotNumber: number): Pro
   return paths.thumbnail;
 }
 
+async function extractStartingStillFromCanonical(productionSlug: string, shotNumber: number): Promise<{
+  currentStill: ReturnType<typeof fileMeta>;
+  stillBackupCreated: boolean;
+}> {
+  const paths = shotPaths(productionSlug, shotNumber);
+  if (!existsSync(paths.canonical)) {
+    throw Object.assign(new Error("Canonical shot video not found"), { name: "NotFoundError" });
+  }
+
+  let stillBackupCreated = false;
+  if (existsSync(paths.still) && !existsSync(paths.stillBackup)) {
+    copyFileSync(paths.still, paths.stillBackup, constants.COPYFILE_EXCL);
+    stillBackupCreated = true;
+  }
+
+  mkdirSync(dirname(paths.still), { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn("ffmpeg", [
+      "-y",
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      paths.canonical,
+      "-vframes",
+      "1",
+      paths.still,
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+
+    let stderr = "";
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exit ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+    });
+    proc.on("error", reject);
+  });
+
+  return {
+    currentStill: fileMeta(paths.still),
+    stillBackupCreated,
+  };
+}
+
 function sendJsonError(res: Response, err: unknown, label: string): void {
   const message = err instanceof Error ? err.message : "Unknown error";
   if (err instanceof Error && err.name === "ValidationError") {
@@ -1287,7 +1335,7 @@ export function createProductionsRouter(): Router {
     }
   });
 
-  router.post("/:productionSlug/shots/:n/promote", (req: Request, res: Response) => {
+  router.post("/:productionSlug/shots/:n/promote", async (req: Request, res: Response) => {
     try {
       const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
       const shotNumber = parseShotNumber(getParam(req, "n"));
@@ -1308,12 +1356,33 @@ export function createProductionsRouter(): Router {
       copyFileSync(paths.pending, paths.canonical);
       unlinkSync(paths.pending);
 
+      let stillUpdate: Awaited<ReturnType<typeof extractStartingStillFromCanonical>> | null = null;
+      let stillWarning: string | undefined;
+      try {
+        stillUpdate = await extractStartingStillFromCanonical(productionSlug, shotNumber);
+      } catch (err) {
+        stillWarning = err instanceof Error ? err.message : "Unable to extract promoted starting still";
+      }
+
       emitProductionEvent(productionSlug, {
         type: "shot_promoted",
         shotNumber,
         backupCreated,
+        stillUpdated: Boolean(stillUpdate),
+        stillBackupCreated: stillUpdate?.stillBackupCreated ?? false,
+        currentStillPath: stillUpdate?.currentStill.path,
+        currentStillMtime: stillUpdate?.currentStill.mtime,
+        warning: stillWarning,
       });
-      res.json({ shotNumber, promoted: true, backupCreated });
+      res.json({
+        shotNumber,
+        promoted: true,
+        backupCreated,
+        stillUpdated: Boolean(stillUpdate),
+        stillBackupCreated: stillUpdate?.stillBackupCreated ?? false,
+        currentStill: stillUpdate?.currentStill ?? null,
+        warning: stillWarning,
+      });
     } catch (err) {
       sendJsonError(res, err, "POST /api/productions/:productionSlug/shots/:n/promote");
     }

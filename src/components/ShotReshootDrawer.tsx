@@ -209,10 +209,20 @@ export default function ShotReshootDrawer({
     setIsPromoting(true);
     setActionError(null);
     try {
-      const result = await promoteProductionShot(productionSlug, shotNumber);
-      await onRefresh();
-      if (result.promoted) onPromoted?.();
-    } catch (err) {
+        const result = await promoteProductionShot(productionSlug, shotNumber);
+        await onRefresh();
+        if (result.promoted) {
+          window.dispatchEvent(new CustomEvent("brandstudios:shot-still-updated", {
+            detail: {
+              productionSlug,
+              shotNumber,
+              timestamp: result.currentStill?.mtime ?? new Date().toISOString(),
+              source: "shot-promoted",
+            },
+          }));
+          onPromoted?.();
+        }
+      } catch (err) {
       setActionError(err instanceof Error ? err.message : "Couldn't promote this shot. Retry.");
     } finally {
       setIsPromoting(false);

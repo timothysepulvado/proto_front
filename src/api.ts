@@ -1569,7 +1569,7 @@ export type ProductionEvent =
   | { type: "regen_started"; productionSlug: string; timestamp: string; jobId: string; shotNumber: number; promptSource: "override" | "manifest"; useImageConditioning: boolean }
   | { type: "regen_log"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; line: string; stream: "stdout" | "stderr" }
   | { type: "regen_complete"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; exitCode: number | null; durationMs: number; error?: string }
-  | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean }
+  | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean; stillUpdated?: boolean; stillBackupCreated?: boolean; currentStillPath?: string; currentStillMtime?: string; warning?: string }
   | { type: "shot_rejected"; productionSlug: string; timestamp: string; shotNumber: number; pendingDeleted: boolean }
   | { type: "shot_still_replaced"; productionSlug: string; timestamp: string; shotNumber: number; replaced: boolean; backupCreated: boolean; currentStillPath: string }
   | { type: "shot_still_snapshot"; productionSlug: string; timestamp: string; shotNumber: number; label: string; snapshotPath: string }
@@ -1687,12 +1687,30 @@ export async function regenerateProductionShot(
 export async function promoteProductionShot(
   productionSlug: ProductionSlug,
   shotNumber: number,
-): Promise<{ shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string }> {
+): Promise<{
+  shotNumber: number;
+  promoted: boolean;
+  backupCreated: boolean;
+  reason?: string;
+  stillUpdated?: boolean;
+  stillBackupCreated?: boolean;
+  currentStill?: ProductionFileMeta | null;
+  warning?: string;
+}> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/promote`, {
     method: "POST",
   });
   if (!resp.ok) throw await parseOsApiError(resp);
-  return (await resp.json()) as { shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string };
+  return (await resp.json()) as {
+    shotNumber: number;
+    promoted: boolean;
+    backupCreated: boolean;
+    reason?: string;
+    stillUpdated?: boolean;
+    stillBackupCreated?: boolean;
+    currentStill?: ProductionFileMeta | null;
+    warning?: string;
+  };
 }
 
 export async function rejectProductionShot(
