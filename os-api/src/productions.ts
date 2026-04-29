@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync, readFileSync, readdirSync } from "node:fs";
+import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -330,6 +330,53 @@ function validateStillSourcePath(rawPath: unknown): string {
   const isJpeg = signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
   if (!isPng && !isJpeg) throw validationError("Replacement still must be a valid PNG or JPEG image");
   return sourcePath;
+}
+
+function detectImageExtension(buffer: Buffer): ".png" | ".jpg" {
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  if (buffer.subarray(0, 8).equals(pngSignature)) return ".png";
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return ".jpg";
+  throw validationError("Replacement still must be a valid PNG or JPEG image");
+}
+
+function validateStillUploadBody(productionSlug: string, shotNumber: number, fileBase64: unknown, fileName: unknown): string {
+  if (typeof fileBase64 !== "string") throw validationError("fileBase64 must be a base64-encoded PNG or JPEG");
+  if (fileName !== undefined && typeof fileName !== "string") throw validationError("fileName must be a string");
+  if (fileName && fileName.length > 160) throw validationError("fileName must be 160 characters or fewer");
+
+  const trimmed = fileBase64.trim();
+  if (!trimmed) throw validationError("fileBase64 cannot be empty");
+  const payload = trimmed.includes(",") ? trimmed.slice(trimmed.indexOf(",") + 1) : trimmed;
+  const buffer = Buffer.from(payload, "base64");
+  if (buffer.byteLength === 0) throw validationError("fileBase64 could not be decoded");
+  if (buffer.byteLength > 50 * 1024 * 1024) throw validationError("Replacement still must be 50MB or smaller");
+
+  const detectedExt = detectImageExtension(buffer);
+  const namedExt = typeof fileName === "string" ? extname(fileName).toLowerCase() : "";
+  if (namedExt && !new Set([".png", ".jpg", ".jpeg"]).has(namedExt)) {
+    throw validationError("fileName must end in .png, .jpg, or .jpeg");
+  }
+
+  const root = productionRoot(productionSlug);
+  const uploadPath = safePath(root, ".uploads", `shot_${padShot(shotNumber)}_${Date.now()}_${uuidv4()}${detectedExt}`);
+  mkdirSync(dirname(uploadPath), { recursive: true });
+  writeFileSync(uploadPath, buffer, { flag: "wx" });
+  return uploadPath;
+}
+
+function resolveStillReplacementSource(
+  productionSlug: string,
+  shotNumber: number,
+  body: { sourcePath?: unknown; fileBase64?: unknown; fileName?: unknown },
+): { sourcePath: string; tempUploadPath: string | null } {
+  if (body.sourcePath !== undefined) {
+    return { sourcePath: validateStillSourcePath(body.sourcePath), tempUploadPath: null };
+  }
+  if (body.fileBase64 !== undefined) {
+    const tempUploadPath = validateStillUploadBody(productionSlug, shotNumber, body.fileBase64, body.fileName);
+    return { sourcePath: validateStillSourcePath(tempUploadPath), tempUploadPath };
+  }
+  throw validationError("sourcePath or fileBase64 is required");
 }
 
 function replaceShotStill(productionSlug: string, shotNumber: number, sourcePath: string) {
@@ -995,9 +1042,16 @@ export function createProductionsRouter(): Router {
     try {
       const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
       const shotNumber = parseShotNumber(getParam(req, "shot"));
-      const body = (req.body ?? {}) as { sourcePath?: unknown };
-      const sourcePath = validateStillSourcePath(body.sourcePath);
-      const replacement = replaceShotStill(productionSlug, shotNumber, sourcePath);
+      const body = (req.body ?? {}) as { sourcePath?: unknown; fileBase64?: unknown; fileName?: unknown };
+      const source = resolveStillReplacementSource(productionSlug, shotNumber, body);
+      const replacement = replaceShotStill(productionSlug, shotNumber, source.sourcePath);
+      if (source.tempUploadPath) {
+        try {
+          unlinkSync(source.tempUploadPath);
+        } catch {
+          // Non-fatal: replacement already succeeded, and .uploads is a temp cache.
+        }
+      }
 
       emitProductionEvent(productionSlug, {
         type: "shot_still_replaced",

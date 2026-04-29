@@ -14,6 +14,9 @@ import ShotReshootDrawer from "./ShotReshootDrawer";
 
 interface ReshootPanelProps {
   productionSlug?: ProductionSlug;
+  onShotSelect?: (shotNumber: number) => void;
+  activeShotNumber?: number | null;
+  openDrawerOnSelect?: boolean;
 }
 
 function formatBytes(bytes: number | undefined): string {
@@ -75,7 +78,12 @@ function StatusBadge({ shot, regenerating }: { shot: ProductionShotState; regene
   );
 }
 
-export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPanelProps) {
+export default function ReshootPanel({
+  productionSlug = "drift-mv",
+  onShotSelect,
+  activeShotNumber = null,
+  openDrawerOnSelect = true,
+}: ReshootPanelProps) {
   const [shots, setShots] = useState<ProductionShotState[]>([]);
   const [renderArtifact, setRenderArtifact] = useState<ProductionRenderArtifact | null>(null);
   const [selectedShotNumber, setSelectedShotNumber] = useState<number | null>(null);
@@ -203,6 +211,16 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
   const backupCount = shots.filter((shot) => shot.canonical.backupExists).length;
   const renderDisabled = renderInFlight || !hasPromoteSinceRender;
 
+  const handleShotSelect = (shotNumber: number) => {
+    onShotSelect?.(shotNumber);
+    if (openDrawerOnSelect) setSelectedShotNumber(shotNumber);
+  };
+
+  const handleOpenDrawer = (shotNumber: number) => {
+    onShotSelect?.(shotNumber);
+    setSelectedShotNumber(shotNumber);
+  };
+
   const handleRender = async () => {
     setRenderProgress(null);
     setError(null);
@@ -273,16 +291,23 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {shots.map((shot) => {
-            const regenerating = activeRegens.has(shot.shotNumber);
-            return (
-              <button
-                key={shot.shotNumber}
-                type="button"
-                onClick={() => setSelectedShotNumber(shot.shotNumber)}
-                className={`group relative overflow-hidden rounded-2xl border bg-white/[0.025] p-3 text-left transition-all hover:-translate-y-0.5 hover:border-cyan-400/40 hover:bg-white/[0.045] focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${shot.pending ? "border-amber-500/25" : regenerating ? "border-cyan-400/35" : "border-white/10"}`}
-              >
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            {shots.map((shot) => {
+              const regenerating = activeRegens.has(shot.shotNumber);
+              return (
+                <article
+                  key={shot.shotNumber}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleShotSelect(shot.shotNumber)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      handleShotSelect(shot.shotNumber);
+                    }
+                  }}
+                  className={`group relative cursor-pointer overflow-hidden rounded-2xl border bg-white/[0.025] p-3 text-left transition-all hover:-translate-y-0.5 hover:border-cyan-400/40 hover:bg-white/[0.045] focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${activeShotNumber === shot.shotNumber ? "border-[#ED4C14]/60 shadow-[0_0_26px_rgba(237,76,20,0.16)]" : shot.pending ? "border-amber-500/25" : regenerating ? "border-cyan-400/35" : "border-white/10"}`}
+                >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="font-mono text-xs font-black uppercase text-white">
@@ -314,19 +339,31 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
                   {shot.visualIntent || "Visual intent not captured for this shot."}
                 </p>
 
-                <div className="mt-3 flex items-center justify-between gap-2 text-[8px] font-mono uppercase tracking-wider text-white/30">
-                  <span>{shot.durationS}s · {shot.startS}s</span>
-                  {shot.canonical.backupExists && (
-                    <span className="rounded-full border border-white/10 px-2 py-0.5 text-white/35">Backup available</span>
+                  <div className="mt-3 flex items-center justify-between gap-2 text-[8px] font-mono uppercase tracking-wider text-white/30">
+                    <span>{shot.durationS}s · {shot.startS}s</span>
+                    {shot.canonical.backupExists && (
+                      <span className="rounded-full border border-white/10 px-2 py-0.5 text-white/35">Backup available</span>
+                    )}
+                  </div>
+                  {!openDrawerOnSelect && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleOpenDrawer(shot.shotNumber);
+                      }}
+                      className="mt-3 w-full rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-center text-[8px] font-mono font-bold uppercase tracking-[0.2em] text-cyan-200/75 transition-all hover:border-cyan-300/45 hover:bg-cyan-500/18 hover:text-cyan-100 focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
+                    >
+                      Reshoot controls
+                    </button>
                   )}
-                </div>
-                {shot.pending && (
-                  <div className="absolute right-3 top-12 rounded-full bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,0.65)] h-2 w-2" />
-                )}
-                {regenerating && <div className="absolute inset-x-0 bottom-0 h-0.5 bg-cyan-400 animate-pulse" />}
-              </button>
-            );
-          })}
+                  {shot.pending && (
+                    <div className="absolute right-3 top-12 h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,0.65)]" />
+                  )}
+                  {regenerating && <div className="absolute inset-x-0 bottom-0 h-0.5 bg-cyan-400 animate-pulse" />}
+                </article>
+              );
+            })}
         </div>
       )}
 

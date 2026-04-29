@@ -29,6 +29,7 @@ import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
 import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
 import ReshootPanel from "./components/ReshootPanel";
+import AnchorStillPanel, { EmptyAnchorState } from "./components/AnchorStillPanel";
 import ActiveClientBadge from "./components/ActiveClientBadge";
 import {
   createRun,
@@ -321,6 +322,7 @@ export default function App() {
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
   const [selectedShot, setSelectedShot] = useState<{ n: number | null; id: string | null }>({ n: null, id: null });
+  const [selectedAnchorShot, setSelectedAnchorShot] = useState<number | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
@@ -463,6 +465,7 @@ export default function App() {
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
   const isFeaturedClient = Boolean(currentClient?.featured);
+  const isAnchorStillLayout = activePillar === "creative" && creativeSubtab === "reshoots" && isFeaturedClient;
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
@@ -475,6 +478,10 @@ export default function App() {
       setIsClientDetailOpen(false);
     }
   }, [isExpanded]);
+
+  useEffect(() => {
+    setSelectedAnchorShot(null);
+  }, [activeClient, creativeSubtab]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -897,7 +904,7 @@ export default function App() {
             </div>
 
             {currentClient && isClientDetailOpen && (
-              <div className="w-full max-w-[480px] z-10 space-y-4 ml-4">
+              <div className={`w-full z-10 space-y-4 ml-4 ${isAnchorStillLayout ? "max-w-[1320px]" : "max-w-[480px]"}`}>
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
                   <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
                   <div className="space-y-2">
@@ -1006,7 +1013,22 @@ export default function App() {
                         ))}
                       </div>
                       {creativeSubtab === "reshoots" && isFeaturedClient ? (
-                        <ReshootPanel />
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+                          <ReshootPanel
+                            onShotSelect={setSelectedAnchorShot}
+                            activeShotNumber={selectedAnchorShot}
+                            openDrawerOnSelect={false}
+                          />
+                          {selectedAnchorShot != null ? (
+                            <AnchorStillPanel
+                              productionSlug="drift-mv"
+                              shotNumber={selectedAnchorShot}
+                              campaignId={currentRun?.campaignId}
+                            />
+                          ) : (
+                            <EmptyAnchorState />
+                          )}
+                        </div>
                       ) : (
                         <>
                           {isFeaturedClient && !currentRun?.campaignId ? (

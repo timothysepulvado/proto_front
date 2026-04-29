@@ -1539,6 +1539,31 @@ export interface ProductionShotsResponse {
   renderArtifact?: ProductionRenderArtifact | null;
 }
 
+export interface ProductionAnchorCatalogItem {
+  name: string;
+  path: string;
+  thumb: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
+}
+
+export interface ProductionShotStillCatalogItem {
+  shot: number;
+  currentStillPath: string | null;
+  currentStillThumb: string | null;
+  currentStill?: ProductionFileMeta | null;
+  backupStillPath?: string;
+  backupStill?: ProductionFileMeta | null;
+  anchors: ProductionAnchorCatalogItem[];
+  anchorsSource: "regen_stills_pivot.py" | "manifest";
+}
+
+export interface ProductionShotStillsResponse {
+  productionSlug: ProductionSlug;
+  shots: ProductionShotStillCatalogItem[];
+}
+
 export type ProductionEvent =
   | { type: "connected"; productionSlug: string; timestamp: string }
   | { type: "regen_started"; productionSlug: string; timestamp: string; jobId: string; shotNumber: number; promptSource: "override" | "manifest"; useImageConditioning: boolean }
@@ -1546,6 +1571,10 @@ export type ProductionEvent =
   | { type: "regen_complete"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; exitCode: number | null; durationMs: number; error?: string }
   | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean }
   | { type: "shot_rejected"; productionSlug: string; timestamp: string; shotNumber: number; pendingDeleted: boolean }
+  | { type: "shot_still_replaced"; productionSlug: string; timestamp: string; shotNumber: number; replaced: boolean; backupCreated: boolean; currentStillPath: string }
+  | { type: "shot_still_snapshot"; productionSlug: string; timestamp: string; shotNumber: number; label: string; snapshotPath: string }
+  | { type: "shot_still_approved"; productionSlug: string; timestamp: string; shotNumber: number; approvedAt: string; deliverableId: string; artifactId: string }
+  | { type: "shot_still_rejected"; productionSlug: string; timestamp: string; shotNumber: number; rejectedAt: string; deliverableId: string; artifactId: string }
   | { type: "shot_manifest_updated"; productionSlug: string; timestamp: string; shotNumber: number; cumulativeDurationDeltaS: number }
   | { type: "render_started"; productionSlug: string; timestamp: string; jobId: string }
   | { type: "render_log"; productionSlug: string; timestamp: string; jobId: string; line: string; stream: "stdout" | "stderr" }
@@ -1561,6 +1590,24 @@ async function parseOsApiError(resp: Response): Promise<Error> {
 
 export function getProductionStillUrl(productionSlug: ProductionSlug, shotNumber: number): string {
   return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/still`;
+}
+
+export function getProductionManagedStillUrl(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/still${suffix}`;
+}
+
+export function getProductionAnchorUrl(
+  productionSlug: ProductionSlug,
+  anchorName: string,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/anchor/${encodeURIComponent(anchorName)}${suffix}`;
 }
 
 export function getProductionShotThumbnailUrl(
@@ -1584,6 +1631,12 @@ export async function getProductionShots(productionSlug: ProductionSlug): Promis
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ProductionShotsResponse;
+}
+
+export async function getProductionShotStills(productionSlug: ProductionSlug): Promise<ProductionShotStillsResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot-stills`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ProductionShotStillsResponse;
 }
 
 
@@ -1651,6 +1704,158 @@ export async function rejectProductionShot(
   });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as { shotNumber: number; rejected: boolean; pendingDeleted: boolean };
+}
+
+export async function approveProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body?: { deliverableId?: string },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  approvedAt: string;
+  productionSlug: string;
+  currentStillPath: string;
+  artifactId: string;
+  deliverableId: string;
+  campaignId: string | null;
+  referenceImages: string[];
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/approve-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    approvedAt: string;
+    productionSlug: string;
+    currentStillPath: string;
+    artifactId: string;
+    deliverableId: string;
+    campaignId: string | null;
+    referenceImages: string[];
+  };
+}
+
+export async function rejectProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body: { reason: string; denied_by?: string | null; deliverableId?: string },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  productionSlug: string;
+  still_rejected_at: string;
+  still_rejection_reason: string;
+  still_denied_by: string | null;
+  currentStillPath: string;
+  artifactId: string;
+  deliverableId: string;
+  campaignId: string | null;
+  referenceImages: string[];
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/reject-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    productionSlug: string;
+    still_rejected_at: string;
+    still_rejection_reason: string;
+    still_denied_by: string | null;
+    currentStillPath: string;
+    artifactId: string;
+    deliverableId: string;
+    campaignId: string | null;
+    referenceImages: string[];
+  };
+}
+
+export async function snapshotProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body?: { label?: string },
+): Promise<{
+  ok: true;
+  existed: false;
+  status: 200;
+  productionSlug: string;
+  shotNumber: number;
+  label: string;
+  snapshot_path: string;
+  snapshot: ProductionFileMeta;
+  source_path: string;
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/snapshot-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    existed: false;
+    status: 200;
+    productionSlug: string;
+    shotNumber: number;
+    label: string;
+    snapshot_path: string;
+    snapshot: ProductionFileMeta;
+    source_path: string;
+  };
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read selected still file"));
+    reader.onload = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      resolve(value.includes(",") ? value.slice(value.indexOf(",") + 1) : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function replaceProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  source: { sourcePath: string } | { file: File },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  replaced: boolean;
+  backupCreated: boolean;
+  sourcePath: string;
+  currentStill: ProductionFileMeta;
+  backupStill: ProductionFileMeta | null;
+}> {
+  const body = "file" in source
+    ? { fileName: source.file.name, fileBase64: await readFileAsBase64(source.file) }
+    : { sourcePath: source.sourcePath };
+
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    replaced: boolean;
+    backupCreated: boolean;
+    sourcePath: string;
+    currentStill: ProductionFileMeta;
+    backupStill: ProductionFileMeta | null;
+  };
 }
 
 export async function triggerProductionRender(
