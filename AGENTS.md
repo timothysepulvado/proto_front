@@ -129,7 +129,33 @@ cd ~/Temp-gen && python main.py veo generate    # Veo 3.1
 
 ## Supabase
 
-**Project:** `tfbfzepaccvklpabllao`
+**Project:** `tfbfzepaccvklpabllao` (Supabase project name `prototype_os_demo` — the legacy name predates the production framing pivot; the data IS production)
+**Org:** `krjhaabsalqwjpebemmn`
+
+### Authentication path (canonical 2026-04-29)
+
+For ANY Supabase work — migrations, queries, MCP calls — use the **project-scoped Personal Access Token** in `os-api/.env`. Never go through global mcp.supabase.com OAuth; never use the user-shell `SUPABASE_ACCESS_TOKEN` env (it may be scoped to a different project).
+
+```bash
+# Canonical pattern — Supabase CLI with project-scoped PAT
+PROTO_PAT=$(grep "^SUPABASE_ACCESS_TOKEN=" ~/proto_front/os-api/.env | cut -d= -f2-)
+
+# One-time link (idempotent)
+SUPABASE_ACCESS_TOKEN="$PROTO_PAT" supabase link --project-ref tfbfzepaccvklpabllao
+
+# Apply migration / run SQL (use db query, NOT db push, for hand-written migration files)
+SUPABASE_ACCESS_TOKEN="$PROTO_PAT" supabase db query --linked < supabase/migrations/NNN_*.sql
+
+# Run ad-hoc SQL
+SUPABASE_ACCESS_TOKEN="$PROTO_PAT" supabase db query --linked "SELECT ..."
+```
+
+Why not the MCP OAuth flow:
+- The mcp.supabase.com OAuth path uses your browser cookies' Supabase account — risk of cross-account collisions
+- The PAT in `os-api/.env` is scoped to this project + org; safer + no interactive flow
+- Per supabase skill: use `execute_sql` (MCP) OR `supabase db query` (CLI), NOT `apply_migration` (writes migration history conflicts with `supabase db pull`)
+
+The proto_front `.mcp.json` still exists for cases where a Brandy session needs the MCP toolset (advisors, branching, type generation), but for migrations + queries the CLI + PAT path is canonical.
 
 **Tables (18):**
 `clients`, `runs`, `run_logs`, `artifacts`, `hitl_decisions`, `rejection_categories`,
