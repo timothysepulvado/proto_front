@@ -1226,6 +1226,16 @@ export interface CampaignDeliverable {
   status: DeliverableStatus;
   retryCount: number;
   rejectionReason?: string;
+  format?: "before_after" | "carousel" | "testimonial" | "heritage"
+         | "problem_solution" | "review_ad" | "custom";
+  mediaType?: "image" | "video" | "mixed";
+  durationSeconds?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  platform?: string;
+  qualityTier?: "lite" | "fast" | "standard" | "pro";
+  referenceImages?: string[];
+  estimatedCost?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1239,6 +1249,8 @@ export interface Campaign {
   platforms?: string[];
   mode?: string;
   maxRetries: number;
+  referenceImages?: string[];
+  guardrails?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -1252,7 +1264,17 @@ interface DbCampaignDeliverable {
   original_prompt: string | null;
   status: string;
   retry_count: number;
-  rejection_reason: string | null;
+  rejection_reason?: string | null;
+  custom_rejection_note?: string | null;
+  format: string | null;
+  media_type: string | null;
+  duration_seconds: number | null;
+  aspect_ratio: string | null;
+  resolution: string | null;
+  platform: string | null;
+  quality_tier: string | null;
+  reference_images: string[] | null;
+  estimated_cost: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -1266,6 +1288,8 @@ interface DbCampaign {
   platforms: string[] | null;
   mode: string | null;
   max_retries: number;
+  reference_images?: string[] | null;
+  guardrails?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -1280,7 +1304,16 @@ function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliv
     originalPrompt: db.original_prompt ?? undefined,
     status: db.status as DeliverableStatus,
     retryCount: db.retry_count,
-    rejectionReason: db.rejection_reason ?? undefined,
+    rejectionReason: db.custom_rejection_note ?? db.rejection_reason ?? undefined,
+    format: (db.format as CampaignDeliverable["format"]) ?? undefined,
+    mediaType: (db.media_type as CampaignDeliverable["mediaType"]) ?? undefined,
+    durationSeconds: db.duration_seconds ?? undefined,
+    aspectRatio: db.aspect_ratio ?? undefined,
+    resolution: db.resolution ?? undefined,
+    platform: db.platform ?? undefined,
+    qualityTier: (db.quality_tier as CampaignDeliverable["qualityTier"]) ?? undefined,
+    referenceImages: db.reference_images ?? undefined,
+    estimatedCost: db.estimated_cost != null ? Number(db.estimated_cost) : undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
@@ -1296,9 +1329,23 @@ function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
     platforms: db.platforms ?? undefined,
     mode: db.mode ?? undefined,
     maxRetries: db.max_retries,
+    referenceImages: db.reference_images ?? undefined,
+    guardrails: db.guardrails ?? undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
+}
+
+// Get campaigns for a BrandStudios workspace
+export async function getCampaignsByClient(clientId: string): Promise<Campaign[]> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get campaigns: ${error.message}`);
+  return (data as DbCampaign[]).map(mapDbCampaignToCampaign);
 }
 
 // Get deliverables for a campaign

@@ -172,7 +172,7 @@
         "steps": [
           {
             "id": "step_name",
-            "label": "Client name",
+            "label": "BrandStudios workspace name",
             "type": "text_input",
             "required": true
           },
@@ -182,7 +182,7 @@
             "type": "triple_selector",
             "required": true,
             "fields": ["llm", "agent_tool", "creative_tool"],
-            "swap_behavior": "Each selector is swappable per client; changes persist per-project and are audit-logged."
+            "swap_behavior": "Each selector is swappable per BrandStudios workspace; changes persist per-project and are audit-logged."
           },
           {
             "id": "step_assets",
@@ -238,9 +238,9 @@
           "pancake_icon": "mock://assets/icons/pancake-bot.svg"
         },
         "behavior_notes": [
-          "Client cards float in a vertical stack; selecting a client expands its panel to show config + latest runs.",
+          "BrandStudios workspace cards float in a vertical stack; selecting a workspace expands its campaign dashboard.",
           "A right-side mini-timeline shows run events with timestamps and HITL checkpoints.",
-          "A top-left 'Pancake Bot' opens chat; bot can be context-scoped to selected client."
+          "A top-left 'Pancake Bot' opens chat; bot can be context-scoped to the selected BrandStudios workspace."
         ]
       }
     },

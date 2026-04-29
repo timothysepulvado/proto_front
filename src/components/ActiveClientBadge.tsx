@@ -4,6 +4,8 @@ interface ActiveClientBadgeProps {
   client: {
     id: string;
     name: string;
+    displayName?: string;
+    entityLabel?: string;
     status?: string;
     featured?: boolean;
   } | null;
@@ -22,10 +24,10 @@ export default function ActiveClientBadge({ client }: ActiveClientBadgeProps) {
           </div>
           <div className="min-w-0">
             <p className="truncate text-[9px] font-mono uppercase tracking-[0.32em] text-cyan-100/55">
-              Active Client
+              Active {client.entityLabel ?? "Brand"}
             </p>
             <p className="truncate text-sm font-black uppercase tracking-tight text-white">
-              {client.name}
+              {client.displayName ?? client.name}
             </p>
           </div>
         </div>
