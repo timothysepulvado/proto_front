@@ -196,9 +196,16 @@ agent-comm ask jackie "Read [files/docs]. [Analysis question]. Today is [date]."
 
 - `hud.json` is the source of truth for client/UI data — don't bypass it
 - Tailwind v4 via Vite plugin — no PostCSS config needed
-- Demo mode fallback when external tools unavailable (look for `[DEMO]` prefix)
+- **`[DEMO]`-prefix offline fallback** is a runtime safeguard for external-tool outages (sidecar down, network failure). It is NOT a development mode. Real client onboarding never goes through this path; if a real run hits it, that's a P1 incident — open an `asset_escalations` row and fix the upstream tool.
 - Pin all dependencies to exact versions
 - This repo is NOT the dashboard — `~/brandstudios-dashboard/` is separate (standalone, Brandy + Tim only)
+
+## Production posture (2026-04-29 canonical)
+
+- **No "demo" framing.** This product is in production for client onboarding. The Drift MV music video is the inaugural campaign + the final training/implementation set for the agentic system that will run client work — it is real production output, not a deliverable for a presentation event. The May 4 milestone is the first client onboarding kickoff, not a demo.
+- **Every commit ships at production rigor.** Tests, observability, documentation, error handling, cost monitoring, and rollback plan are all merge-blocking. "Get it working" is not enough — "get it production-ready" is the bar.
+- **Critical-path sequencing.** Stills are SHIPPED end-to-end (30/30 in `campaign_deliverables`). The unblocking work for client onboarding is: (1) Phase C productization of the stills critic-in-loop pattern (`mode: "stills"` runner + `/grade_image_v2` endpoint — see ADR-004), (2) Veo motion phase for the reviewing video deliverables, (3) HUD operator polish for client work. None of these have demo scope — all are production.
+- **Multi-client thinking.** Code paths must isolate per-campaign / per-client data. RLS in Supabase, audit log on all AI decisions (`orchestration_decisions` already does this), per-client cost ledger.
 
 ---
 
