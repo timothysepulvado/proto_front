@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync, readFileSync } from "node:fs";
+import { constants, createReadStream, existsSync, mkdirSync, statSync, unlinkSync, copyFileSync, readFileSync, readdirSync } from "node:fs";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -358,6 +358,75 @@ function replaceShotStill(productionSlug: string, shotNumber: number, sourcePath
   };
 }
 
+function snapshotTimestamp(): string {
+  return new Date().toISOString().replace(/[-:.]/g, "");
+}
+
+function validateSnapshotLabel(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw validationError("label must be a string");
+  const label = value.trim();
+  if (!label) throw validationError("label cannot be empty");
+  if (label.length > 80) throw validationError("label must be 80 characters or fewer");
+  if (!/^[A-Za-z0-9_-]+$/.test(label)) {
+    throw validationError("label may only include letters, numbers, underscores, and hyphens");
+  }
+  return label;
+}
+
+function nextSnapshotIter(productionSlug: string, shotNumber: number): number {
+  const root = safePath(productionRoot(productionSlug), "stills");
+  if (!existsSync(root)) return 1;
+
+  const padded = padShot(shotNumber);
+  const iterPattern = new RegExp(`^shot_${padded}_iter(\\d+).*_backup\\.png$`);
+  const maxIter = readdirSync(root).reduce((max, name) => {
+    const match = iterPattern.exec(name);
+    if (!match) return max;
+    const value = Number.parseInt(match[1] ?? "", 10);
+    return Number.isInteger(value) ? Math.max(max, value) : max;
+  }, 0);
+
+  return maxIter + 1;
+}
+
+function snapshotShotStill(productionSlug: string, shotNumber: number, requestedLabel?: unknown) {
+  const paths = shotPaths(productionSlug, shotNumber);
+  if (!existsSync(paths.still)) {
+    throw Object.assign(new Error("Starting still not found"), { name: "NotFoundError" });
+  }
+
+  const label = validateSnapshotLabel(requestedLabel) ?? `iter${nextSnapshotIter(productionSlug, shotNumber)}_${snapshotTimestamp()}`;
+  const snapshotPath = safePath(productionRoot(productionSlug), "stills", `shot_${padShot(shotNumber)}_${label}_backup.png`);
+  if (existsSync(snapshotPath)) {
+    return {
+      ok: false,
+      existed: true,
+      status: 409,
+      productionSlug,
+      shotNumber,
+      label,
+      snapshot_path: snapshotPath,
+      snapshot: fileMeta(snapshotPath),
+    };
+  }
+
+  mkdirSync(dirname(snapshotPath), { recursive: true });
+  copyFileSync(paths.still, snapshotPath, constants.COPYFILE_EXCL);
+
+  return {
+    ok: true,
+    existed: false,
+    status: 200,
+    productionSlug,
+    shotNumber,
+    label,
+    snapshot_path: snapshotPath,
+    snapshot: fileMeta(snapshotPath),
+    source_path: paths.still,
+  };
+}
+
 function metadataShotNumber(metadata: Record<string, unknown> | null): number | null {
   if (!metadata) return null;
   if (typeof metadata.shotNumber === "number") return metadata.shotNumber;
@@ -453,6 +522,80 @@ async function approveShotStill(productionSlug: string, shotNumber: number, deli
     referenceImages: (updatedDeliverable as DeliverableApprovalRow).reference_images ?? [],
     storage: "artifacts.metadata.starting_still_approval + campaign_deliverables.reference_images",
     note: "campaign_deliverables.metadata is not present in this schema; approval metadata is stored on the deliverable-backed artifact while reference_images is updated to fire deliverable realtime.",
+  };
+}
+
+function validateRequiredString(value: unknown, fieldName: string, maxLength: number): string {
+  if (typeof value !== "string") throw validationError(`${fieldName} must be a string`);
+  const trimmed = value.trim();
+  if (!trimmed) throw validationError(`${fieldName} cannot be empty`);
+  if (trimmed.length > maxLength) throw validationError(`${fieldName} must be ${maxLength} characters or fewer`);
+  return trimmed;
+}
+
+function validateOptionalNullableString(value: unknown, fieldName: string, maxLength: number): string | null {
+  if (value === undefined || value === null) return null;
+  return validateRequiredString(value, fieldName, maxLength);
+}
+
+async function rejectShotStill(productionSlug: string, shotNumber: number, reason: string, deniedBy: string | null, deliverableId?: string) {
+  const paths = shotPaths(productionSlug, shotNumber);
+  if (!existsSync(paths.still)) {
+    throw Object.assign(new Error("Starting still not found"), { name: "NotFoundError" });
+  }
+
+  const artifact = await findLatestArtifactForShot(shotNumber, deliverableId);
+  if (!artifact || !artifact.deliverable_id) {
+    throw Object.assign(new Error("No deliverable-backed artifact found for this shot"), { name: "NotFoundError" });
+  }
+
+  const rejectedAt = new Date().toISOString();
+  const nextArtifactMetadata = {
+    ...(artifact.metadata ?? {}),
+    still_rejected_at: rejectedAt,
+    still_rejection_reason: reason,
+    still_denied_by: deniedBy,
+  };
+  const { error: artifactError } = await supabase
+    .from("artifacts")
+    .update({ metadata: nextArtifactMetadata })
+    .eq("id", artifact.id);
+  if (artifactError) throw new Error(`Failed to update artifact rejection metadata: ${artifactError.message}`);
+
+  const { data: deliverable, error: deliverableReadError } = await supabase
+    .from("campaign_deliverables")
+    .select("id, reference_images, updated_at")
+    .eq("id", artifact.deliverable_id)
+    .maybeSingle();
+  if (deliverableReadError) throw new Error(`Failed to read deliverable reference images: ${deliverableReadError.message}`);
+  if (!deliverable) throw Object.assign(new Error("Deliverable not found"), { name: "NotFoundError" });
+
+  const currentRefs = Array.isArray((deliverable as DeliverableApprovalRow).reference_images)
+    ? ((deliverable as DeliverableApprovalRow).reference_images ?? [])
+    : [];
+  const nextRefs = [paths.still, ...currentRefs.filter((item) => item !== paths.still)];
+  const { data: updatedDeliverable, error: deliverableUpdateError } = await supabase
+    .from("campaign_deliverables")
+    .update({ reference_images: nextRefs })
+    .eq("id", artifact.deliverable_id)
+    .select("id, reference_images, updated_at")
+    .single();
+  if (deliverableUpdateError) throw new Error(`Failed to update deliverable reference images: ${deliverableUpdateError.message}`);
+
+  return {
+    ok: true,
+    shotNumber,
+    productionSlug,
+    still_rejected_at: rejectedAt,
+    still_rejection_reason: reason,
+    still_denied_by: deniedBy,
+    currentStillPath: paths.still,
+    artifactId: artifact.id,
+    deliverableId: artifact.deliverable_id,
+    campaignId: artifact.campaign_id,
+    referenceImages: (updatedDeliverable as DeliverableApprovalRow).reference_images ?? [],
+    storage: "artifacts.metadata.still_* rejection fields + campaign_deliverables.reference_images",
+    note: "campaign_deliverables.metadata is not present in this schema; rejection metadata is stored on the deliverable-backed artifact while reference_images is updated to fire deliverable realtime.",
   };
 }
 
@@ -867,6 +1010,57 @@ export function createProductionsRouter(): Router {
       res.json({ ok: true, ...replacement });
     } catch (err) {
       sendJsonError(res, err, "POST /api/productions/:productionSlug/shot/:shot/still");
+    }
+  });
+
+  router.post("/:productionSlug/shot/:shot/snapshot-still", (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "shot"));
+      const body = (req.body ?? {}) as { label?: unknown };
+      const snapshot = snapshotShotStill(productionSlug, shotNumber, body.label);
+
+      if (snapshot.status === 409) {
+        res.status(409).json(snapshot);
+        return;
+      }
+
+      emitProductionEvent(productionSlug, {
+        type: "shot_still_snapshot",
+        shotNumber,
+        label: snapshot.label,
+        snapshotPath: snapshot.snapshot_path,
+      });
+
+      res.json(snapshot);
+    } catch (err) {
+      sendJsonError(res, err, "POST /api/productions/:productionSlug/shot/:shot/snapshot-still");
+    }
+  });
+
+  router.post("/:productionSlug/shot/:shot/reject-still", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const shotNumber = parseShotNumber(getParam(req, "shot"));
+      const body = (req.body ?? {}) as { reason?: unknown; denied_by?: unknown; deliverableId?: unknown };
+      const reason = validateRequiredString(body.reason, "reason", 1000);
+      const deniedBy = validateOptionalNullableString(body.denied_by, "denied_by", 120);
+      const deliverableId = body.deliverableId === undefined
+        ? undefined
+        : validateOptionalString(body.deliverableId, "deliverableId", 80);
+      const result = await rejectShotStill(productionSlug, shotNumber, reason, deniedBy, deliverableId);
+
+      emitProductionEvent(productionSlug, {
+        type: "shot_still_rejected",
+        shotNumber,
+        rejectedAt: result.still_rejected_at,
+        deliverableId: result.deliverableId,
+        artifactId: result.artifactId,
+      });
+
+      res.json(result);
+    } catch (err) {
+      sendJsonError(res, err, "POST /api/productions/:productionSlug/shot/:shot/reject-still");
     }
   });
 
