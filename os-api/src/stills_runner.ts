@@ -761,7 +761,14 @@ async function runInLoopMode(
       let candidate: Artifact | undefined = artifacts
         .filter((a) => a.deliverableId === deliverable.id && a.path)
         .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))[0];
-      const imagePath = candidate?.path ?? stillPath;
+      // Phase B+ #7 (2026-04-30): when an artifact was registered via
+      // createArtifactWithUpload after a successful Storage upload, `path`
+      // is the public URL (correct for HUD/API consumers) but the local
+      // disk file lives at metadata.localPath. The brand-engine critic is
+      // a local HTTP service that reads from disk — it can't fetch the URL.
+      // Read order: metadata.localPath → path → fallback locked still on disk.
+      const candidateLocalPath = (candidate?.metadata as { localPath?: string } | undefined)?.localPath;
+      const imagePath = candidateLocalPath ?? candidate?.path ?? stillPath;
       if (!existsSync(imagePath)) {
         await emitLog(
           run.runId,
