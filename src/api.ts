@@ -1,7 +1,7 @@
 import { supabase } from "./lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export";
+export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 export type ClientStatus = "active" | "inactive" | "archived";
 

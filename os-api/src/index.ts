@@ -103,10 +103,24 @@ app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
 app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const { mode, campaignId } = req.body as RunCreatePayload;
+    const { mode, campaignId, auditMode } = req.body as RunCreatePayload;
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
+      return;
+    }
+
+    // ADR-004 Phase B: validate auditMode shape + scope.
+    // - auditMode is opt-in for mode === "stills"; ignored otherwise (logged
+    //   so misconfiguration surfaces in run history).
+    // - auditMode: true requires campaignId — audit fans out across the
+    //   campaign's locked stills, so a scope is mandatory.
+    if (auditMode !== undefined && typeof auditMode !== "boolean") {
+      res.status(400).json({ error: "auditMode must be boolean" });
+      return;
+    }
+    if (mode === "stills" && auditMode === true && !campaignId) {
+      res.status(400).json({ error: "auditMode=true requires campaignId" });
       return;
     }
 
@@ -135,8 +149,12 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
 
     const created = await createRun(run);
 
-    // Start execution asynchronously
-    setImmediate(() => executeRun(created).catch(console.error));
+    // Start execution asynchronously. ADR-004 Phase B: thread auditMode
+    // in-memory through executeRun rather than persisting to a runs.metadata
+    // column — keeps the schema additive-only (009 + 010) and makes audit/in-
+    // loop a runner-level decision the caller owns.
+    const runOpts = mode === "stills" ? { auditMode: auditMode ?? false } : undefined;
+    setImmediate(() => executeRun(created, runOpts).catch(console.error));
 
     res.status(201).json(created);
   } catch (err) {

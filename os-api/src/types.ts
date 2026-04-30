@@ -9,7 +9,7 @@
  * orchestrator asks for it (L1/L2/L3). Idempotent at the deliverable level —
  * deliverables already in terminal-good state (`approved`) are skipped.
  */
-export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade";
+export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 
@@ -237,6 +237,14 @@ export interface RunCreatePayload {
   campaignId?: string;
   deliverableIds?: string[];
   inputs?: Record<string, unknown>;
+  /**
+   * ADR-004 Phase B (mode === "stills"):
+   *   - true  → audit mode (parallel critic, no regen)
+   *   - false → in-loop mode (per-shot critic + orchestrator + regen)
+   * Ignored for all other modes. Audit mode requires `campaignId` to scope
+   * the audit; the route rejects `auditMode: true` without `campaignId`.
+   */
+  auditMode?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -761,5 +769,13 @@ export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> 
   ],
   regrade: [
     { id: "regrade", name: "Regrade Existing Artifacts" },
+  ],
+  // ADR-004 Phase B: stills critic-in-loop runner.
+  // - audit-mode: parallel critic verdicts → per-shot orchestration_decisions
+  // - in-loop mode: per-shot critic→orchestrator→regen with degenerate-loop guard
+  stills: [
+    { id: "load_manifest", name: "Load Campaign Manifest" },
+    { id: "grade", name: "Grade Stills" },
+    { id: "lock", name: "Lock Approved Stills" },
   ],
 };

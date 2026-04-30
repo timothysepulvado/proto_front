@@ -95,6 +95,13 @@ export interface QAFailureContext {
    * callers, tests).
    */
   narrativeContextOverride?: NarrativeContext;
+  /**
+   * ADR-004 Phase B: per-mode override for the per-shot cumulative cost cap.
+   * Stills mode passes ~$1.00 (image regens are cheaper than Veo), video
+   * defaults to PER_SHOT_HARD_CAP_USD ($4.00). Undefined = use the module
+   * default.
+   */
+  perShotCapOverride?: number;
 }
 
 export interface QAFailureResult {
@@ -232,10 +239,14 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
     escalationId: escalation.id,
     artifactId: artifact.id,
     cumulativeCost,
-    perShotHardCap: PER_SHOT_HARD_CAP_USD,
+    // ADR-004 Phase B: surface the effective cap so HUD watchers see the
+    // mode-specific budget (stills $1, video $4) not the global default.
+    perShotHardCap: ctx.perShotCapOverride ?? PER_SHOT_HARD_CAP_USD,
     consecutiveSameRegens,
     levelsUsed,
-    warnBudget: cumulativeCost + NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD >= PER_SHOT_HARD_CAP_USD,
+    warnBudget:
+      cumulativeCost + NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD >=
+      (ctx.perShotCapOverride ?? PER_SHOT_HARD_CAP_USD),
     warnLoop: consecutiveSameRegens >= 3,
   });
 
@@ -243,14 +254,16 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   // If another orchestrator+regen cycle would blow past the per-shot hard cap,
   // flag hitl_required BEFORE burning more spend. Conservative: we halt on
   // cumulative + est > cap rather than calling and letting Claude vote.
-  if (cumulativeCost + NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD > PER_SHOT_HARD_CAP_USD) {
+  // ADR-004 Phase B: stills mode passes a tighter cap via perShotCapOverride.
+  const effectiveCap = ctx.perShotCapOverride ?? PER_SHOT_HARD_CAP_USD;
+  if (cumulativeCost + NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD > effectiveCap) {
     await logger(
       "warn",
-      `Budget cap: cumCost=$${cumulativeCost.toFixed(4)} + est=$${NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD} exceeds per-shot cap $${PER_SHOT_HARD_CAP_USD}. Flagging hitl_required.`,
+      `Budget cap: cumCost=$${cumulativeCost.toFixed(4)} + est=$${NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD} exceeds per-shot cap $${effectiveCap}. Flagging hitl_required.`,
     );
     escalation = await updateEscalation(escalation.id, {
       status: "hitl_required",
-      resolutionNotes: `Budget cap exceeded: cumulative $${cumulativeCost.toFixed(4)} + next-call estimate $${NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD} > $${PER_SHOT_HARD_CAP_USD}`,
+      resolutionNotes: `Budget cap exceeded: cumulative $${cumulativeCost.toFixed(4)} + next-call estimate $${NEXT_ORCHESTRATOR_CALL_ESTIMATE_USD} > $${effectiveCap}`,
     });
     runEvents.emit(`escalation:${runId}`, escalation);
     return {

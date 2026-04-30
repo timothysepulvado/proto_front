@@ -72,7 +72,7 @@ const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulv
 // Brand asset base directory (where per-brand asset folders live)
 const BRAND_ASSETS_BASE = process.env.BRAND_ASSETS_BASE || path.join(BRAND_LINTER_PATH, "data");
 
-async function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
+export async function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
   const log = {
     runId,
     timestamp: new Date().toISOString(),
@@ -84,7 +84,7 @@ async function emitLog(runId: string, stage: string, level: "info" | "warn" | "e
   runEvents.emit(`log:${runId}`, log);
 }
 
-async function updateStageStatus(run: Run, stageId: string, status: StageStatus, error?: string): Promise<Run> {
+export async function updateStageStatus(run: Run, stageId: string, status: StageStatus, error?: string): Promise<Run> {
   const stages = run.stages.map((s) =>
     s.id === stageId
       ? {
@@ -165,18 +165,22 @@ function directoryExists(dirPath: string): boolean {
   }
 }
 
-// Brand Engine sidecar helper — POST JSON, parse response, handle errors
-async function callBrandEngine<T = unknown>(
+// Brand Engine sidecar helper — POST JSON, parse response, handle errors.
+// ADR-004 Phase B: extraHeaders allows callers to thread X-Trace-Id (or any
+// other correlation header) through without re-implementing the fetch wrapper.
+// Default Content-Type stays as application/json; overrides are merged.
+export async function callBrandEngine<T = unknown>(
   endpoint: string,
   body: Record<string, unknown>,
   runId: string,
   stage: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
   try {
     await emitLog(runId, stage, "info", `Calling brand-engine: POST ${endpoint}`);
     const response = await fetch(`${BRAND_ENGINE_URL}${endpoint}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(extraHeaders ?? {}) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(300_000), // 5 minute timeout — bumped 2026-04-25 PM after smoke timeout: brand-engine grade_video_with_consensus + Gemini 3.1 Pro on 8s clip + tiebreak can exceed 2 minutes when graded against a divergent new aesthetic intent.
     });
@@ -195,7 +199,7 @@ async function callBrandEngine<T = unknown>(
 }
 
 // Temp-gen sidecar helper — POST/GET JSON, parse response, handle errors
-async function callTempGen<T = unknown>(
+export async function callTempGen<T = unknown>(
   endpoint: string,
   method: "GET" | "POST" = "POST",
   body?: Record<string, unknown>,
@@ -1779,8 +1783,18 @@ export function _extractProductionBudget(
   };
 }
 
+// ADR-004 Phase B: opts threaded in-memory from the route handler.
+// Avoided persisting to a runs.metadata column to keep the migration set
+// additive-only (009 + 010); auditMode is a runner-level instruction the
+// caller owns. If a future mode needs more than one knob, expand this struct
+// rather than re-introducing a metadata column piecemeal.
+export interface ExecuteRunOptions {
+  /** Only meaningful when run.mode === "stills". Default: false (in-loop). */
+  auditMode?: boolean;
+}
+
 // Main run executor
-export async function executeRun(run: Run): Promise<void> {
+export async function executeRun(run: Run, opts: ExecuteRunOptions = {}): Promise<void> {
   await emitLog(run.runId, "system", "info", `Starting run ${run.runId} in mode: ${run.mode}`);
 
   // Update run status to running
@@ -1825,6 +1839,16 @@ export async function executeRun(run: Run): Promise<void> {
 
       case "regrade":
         success = await executeRegradeStage(run);
+        break;
+
+      case "stills":
+        // ADR-004 Phase B. Lazy import via dynamic to avoid a hard circular
+        // dependency at module-load time (stills_runner imports several
+        // utilities from this file).
+        {
+          const { executeStillsStage } = await import("./stills_runner.js");
+          success = await executeStillsStage(run, { auditMode: opts.auditMode });
+        }
         break;
     }
 
