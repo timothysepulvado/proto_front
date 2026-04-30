@@ -353,6 +353,258 @@ class TestGradeImageV2Smoke:
         assert result["recommendation"] == "ship"
 
 
+# ─── Phase 4 (2026-04-30) — Direction-drift deductions + campaign axiom ────
+#
+# Migration 012 introduced `<<DEDUCT: criterion=-N.N, ...>>` markers in
+# `known_limitations.mitigation` text. The critic rubric now:
+#   1. Tells the model to apply deductions when it flags the failure_class.
+#   2. Defensively re-applies deductions server-side
+#      (_apply_failure_class_deductions) — idempotent if the model already did.
+#   3. Recomputes aggregate from post-deduction criteria scores when any
+#      deduction fires.
+#
+# Plus: a `## CAMPAIGN DIRECTION` section is emitted into the system prompt
+# when `story_context.directional_history` is provided, carrying the canonical
+# mantra + abandoned_directions list. This closes the loop on Tim's 2026-04-30
+# observation that some Drift MV stills regressed back to mech-heavy after
+# the 2026-04-25 aftermath/realistic pivot.
+#
+# These three tests pin the new behavior:
+
+
+# Two minimal catalog fixtures matching migration 012 shape (just the fields
+# the deduction logic needs — failure_mode + severity + mitigation).
+_CATALOG_WITH_DEDUCT = [
+    {
+        "failure_mode": "campaign_direction_reversion_mech_heavy",
+        "severity": "blocking",
+        "mitigation": (
+            "<<DEDUCT: narrative_alignment=-1.5, aesthetic_match=-1.0>> "
+            "When detected, deduct 1.5 from narrative_alignment AND 1.0 from "
+            "aesthetic_match."
+        ),
+    },
+    {
+        "failure_mode": "literal_split_screen_for_panning_reveal",
+        "severity": "blocking",
+        "mitigation": "<<DEDUCT: composition=-2.0, narrative_alignment=-1.0>> Strip pan/zoom language.",
+    },
+    {
+        "failure_mode": "ember_glow_overinterpretation",
+        "severity": "warning",
+        "mitigation": "Use STRONGER positive language. (No DEDUCT marker — pre-012 catalog row.)",
+    },
+]
+
+
+def _ship_verdict_with_failure_class(
+    failure_classes: list[str],
+    aggregate_score: float = 4.5,
+    narrative_alignment: float = 4.5,
+    aesthetic_match: float = 4.8,
+    composition: float = 4.7,
+) -> dict[str, Any]:
+    """Verdict fixture with overridable scores so tests can simulate the
+    model NOT having self-applied deductions."""
+    base = _ship_verdict_fixture()
+    base["detected_failure_classes"] = failure_classes
+    base["aggregate_score"] = aggregate_score
+    # Inline-override criteria scores for the three we test deductions on.
+    for c in base["criteria"]:
+        if c["name"] == "narrative_alignment":
+            c["score"] = narrative_alignment
+        elif c["name"] == "aesthetic_match":
+            c["score"] = aesthetic_match
+        elif c["name"] == "composition":
+            c["score"] = composition
+    return base
+
+
+class TestGradeImageV2DirectionDriftDeductions:
+    """Phase 4 (migration 012) — server-side enforcement of `<<DEDUCT>>`.
+
+    Smoke #4 (2026-04-29) found the catalog-aware critic was too generous —
+    the existing mitigation text described FIXES, not DEDUCTIONS. Migration
+    012 added penalty-shaped markers; these tests pin that the server applies
+    them defensively even when the model self-scores at the un-deducted level.
+    """
+
+    def test_no_failure_classes_means_no_deductions(self):
+        """Sanity: no detected_failure_classes → no deductions, scores unchanged."""
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(_ship_verdict_fixture())
+            result = grade_image_v2(
+                image_path=str(SHOT_5_ITER_1_IMAGE),
+                still_prompt="...",
+                narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                story_context=SAMPLE_STORY_CONTEXT,
+                anchor_paths=SAMPLE_ANCHOR_PATHS,
+                reference_paths=[],
+                pivot_rewrite_history=None,
+                mode="audit",
+                known_limitations=_CATALOG_WITH_DEDUCT,
+            )
+        # Aggregate unchanged from fixture (4.46) within rounding tolerance.
+        assert abs(result["aggregate_score"] - 4.46) < 0.01, (
+            f"Expected aggregate ~4.46 (no deductions), got {result['aggregate_score']}"
+        )
+        assert result["verdict"] == "PASS"
+
+    def test_direction_reversion_failure_class_applies_deductions(self):
+        """Migration 012: campaign_direction_reversion_mech_heavy → -1.5/-1.0."""
+        # Model returns scores AS IF it didn't apply deductions (4.5 and 4.8).
+        # Server should defensively apply -1.5 from narrative_alignment and
+        # -1.0 from aesthetic_match → 3.0 and 3.8. Aggregate recomputes.
+        verdict = _ship_verdict_with_failure_class(
+            failure_classes=["campaign_direction_reversion_mech_heavy"],
+            narrative_alignment=4.5,  # pre-deduction
+            aesthetic_match=4.8,      # pre-deduction
+        )
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(verdict)
+            result = grade_image_v2(
+                image_path=str(SHOT_5_ITER_1_IMAGE),
+                still_prompt="...",
+                narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                story_context=SAMPLE_STORY_CONTEXT,
+                anchor_paths=SAMPLE_ANCHOR_PATHS,
+                reference_paths=[],
+                pivot_rewrite_history=None,
+                mode="audit",
+                known_limitations=_CATALOG_WITH_DEDUCT,
+            )
+        # Find post-deduction criteria scores in the result.
+        crit_by_name = {c["name"]: c for c in result["criteria"]}
+        assert crit_by_name["narrative_alignment"]["score"] == pytest.approx(3.0, abs=0.01), (
+            f"narrative_alignment: expected 3.0 (4.5 - 1.5), got {crit_by_name['narrative_alignment']['score']}"
+        )
+        assert crit_by_name["aesthetic_match"]["score"] == pytest.approx(3.8, abs=0.01), (
+            f"aesthetic_match: expected 3.8 (4.8 - 1.0), got {crit_by_name['aesthetic_match']['score']}"
+        )
+        # Aggregate must be RECOMPUTED from post-deduction criteria — it should
+        # be lower than the model-emitted aggregate_score=4.5.
+        assert result["aggregate_score"] < 4.5, (
+            f"Aggregate not recomputed post-deduction: {result['aggregate_score']}"
+        )
+
+    def test_idempotency_no_double_deduction_when_model_self_applied(self):
+        """Idempotency: if model already self-applied deductions, server doesn't double-punish.
+
+        Tolerance check inside _apply_failure_class_deductions: when criterion
+        is already at-or-below post-deduction floor, server skips re-applying.
+        """
+        # Model returns scores AS IF it correctly self-applied deductions
+        # already (3.0 and 3.8 — i.e. 4.5-1.5 and 4.8-1.0 already done).
+        verdict = _ship_verdict_with_failure_class(
+            failure_classes=["campaign_direction_reversion_mech_heavy"],
+            narrative_alignment=3.0,  # post-deduction
+            aesthetic_match=3.8,      # post-deduction
+        )
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(verdict)
+            result = grade_image_v2(
+                image_path=str(SHOT_5_ITER_1_IMAGE),
+                still_prompt="...",
+                narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                story_context=SAMPLE_STORY_CONTEXT,
+                anchor_paths=SAMPLE_ANCHOR_PATHS,
+                reference_paths=[],
+                pivot_rewrite_history=None,
+                mode="audit",
+                known_limitations=_CATALOG_WITH_DEDUCT,
+            )
+        # Server must NOT have deducted again — scores stay at the model's
+        # already-applied values.
+        crit_by_name = {c["name"]: c for c in result["criteria"]}
+        assert crit_by_name["narrative_alignment"]["score"] == pytest.approx(3.0, abs=0.05), (
+            f"Double-deducted! narrative_alignment expected 3.0, got "
+            f"{crit_by_name['narrative_alignment']['score']}"
+        )
+        assert crit_by_name["aesthetic_match"]["score"] == pytest.approx(3.8, abs=0.05), (
+            f"Double-deducted! aesthetic_match expected 3.8, got "
+            f"{crit_by_name['aesthetic_match']['score']}"
+        )
+
+
+class TestGradeImageV2CampaignDirectionAxiom:
+    """Phase 4 (2026-04-30) — `## CAMPAIGN DIRECTION` section in the system prompt.
+
+    When story_context.directional_history is provided (manifest carries it
+    after the Phase 8 Drift MV manifest update), the critic system prompt
+    must emit a CAMPAIGN DIRECTION section with mantra + abandoned_directions.
+    This is the data substrate that lets the critic apply direction-integrity
+    as a hard rule rather than inferring it from BRIEF.md prose.
+    """
+
+    def test_campaign_direction_section_emitted_when_directional_history_present(self):
+        """story_context.directional_history → ## CAMPAIGN DIRECTION in prompt."""
+        story_context_with_direction = {
+            **SAMPLE_STORY_CONTEXT,
+            "directional_history": {
+                "current_direction_mantra": (
+                    "Cinematically beautiful · Documentary dry · No effects/gloss/polish · Nothing falling"
+                ),
+                "current_direction_summary": "Aftermath / realistic / documentary-dry.",
+                "abandoned_directions": [
+                    {
+                        "name": "mech_heavy_hero_framing",
+                        "rejected_at": "2026-04-25",
+                        "reason": "Tim pivoted to aftermath/realistic.",
+                    }
+                ],
+            },
+        }
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(_ship_verdict_fixture())
+            grade_image_v2(
+                image_path=str(SHOT_5_ITER_1_IMAGE),
+                still_prompt="...",
+                narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                story_context=story_context_with_direction,
+                anchor_paths=SAMPLE_ANCHOR_PATHS,
+                reference_paths=[],
+                pivot_rewrite_history=None,
+                mode="audit",
+                known_limitations=_CATALOG_WITH_DEDUCT,
+            )
+        # The system_prompt is the last positional arg or kwargs in the call.
+        call = mock_gemini.call_args
+        system_prompt = call.kwargs.get("system_prompt") or (
+            call.args[0] if call.args else ""
+        )
+        assert "## CAMPAIGN DIRECTION" in system_prompt, (
+            "CAMPAIGN DIRECTION section missing from system prompt"
+        )
+        assert "Cinematically beautiful" in system_prompt
+        assert "ABANDONED DIRECTIONS" in system_prompt
+        assert "mech_heavy_hero_framing" in system_prompt
+        assert "Direction integrity" in system_prompt or "direction integrity" in system_prompt.lower()
+
+    def test_campaign_direction_section_absent_when_directional_history_missing(self):
+        """No directional_history → no ## CAMPAIGN DIRECTION section (back-compat)."""
+        # Plain story_context without directional_history (legacy campaigns).
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(_ship_verdict_fixture())
+            grade_image_v2(
+                image_path=str(SHOT_5_ITER_1_IMAGE),
+                still_prompt="...",
+                narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                story_context=SAMPLE_STORY_CONTEXT,  # no directional_history key
+                anchor_paths=SAMPLE_ANCHOR_PATHS,
+                reference_paths=[],
+                pivot_rewrite_history=None,
+                mode="audit",
+                known_limitations=_CATALOG_WITH_DEDUCT,
+            )
+        call = mock_gemini.call_args
+        system_prompt = call.kwargs.get("system_prompt") or (
+            call.args[0] if call.args else ""
+        )
+        assert "## CAMPAIGN DIRECTION" not in system_prompt, (
+            "CAMPAIGN DIRECTION emitted when no directional_history was provided"
+        )
+
+
 # ─── Production rigor TODOs (Phase F integration) ───────────────────────────
 #
 # When Phase F (observability) lands, add to every test above:

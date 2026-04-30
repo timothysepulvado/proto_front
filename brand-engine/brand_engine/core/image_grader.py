@@ -37,6 +37,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -133,8 +134,127 @@ MAX_PROMPT_CHARS = 2000  # NB Pro hard limit (productized pre-flight check)
 RETRY_BACKOFFS_S: list[float] = [1.0, 2.0, 4.0]  # 3-attempt exponential backoff
 GEMINI_MAX_OUTPUT_TOKENS = 16384  # Mirror video_grader; truncation recovery handles overflow
 
+# Penalty-marker syntax embedded in known_limitations.mitigation text. Migration
+# 012 (`012_direction_drift_failure_classes.sql`) introduces this format because
+# Phase B+ smoke #4 found the existing descriptive mitigation text was too soft
+# — the model treated the catalog as "here's how to fix" rather than "deduct
+# points if detected." Format: `<<DEDUCT: criterion_a=-N.N, criterion_b=-M.M>>`.
+# Phase H replaces this with a typed `deductions` JSONB column on
+# known_limitations; for now it stays in mitigation text (additive, no schema
+# migration). The deductions are applied SERVER-SIDE in
+# `_apply_failure_class_deductions` after the model returns — defensive recompute.
+_DEDUCT_MARKER_RE = re.compile(r"<<DEDUCT:\s*([^>]+?)\s*>>")
+_DEDUCT_PAIR_RE = re.compile(r"([a-z_][a-z0-9_]*)\s*=\s*(-?\d+(?:\.\d+)?)")
+
 # ── Module-scope client cache (lazy-init via _get_client) ───────────────────
 _genai_client: Optional[genai.Client] = None
+
+
+def _parse_deductions_from_mitigation(mitigation: Optional[str]) -> dict[str, float]:
+    """Parse a `<<DEDUCT: criterion=-N.N, ...>>` marker from a mitigation string.
+
+    Returns a dict mapping criterion name (snake_case) to deduction (negative
+    float). Returns empty dict when no marker is present, when mitigation is
+    None/empty, or when the marker is malformed.
+
+    Examples:
+        >>> _parse_deductions_from_mitigation("<<DEDUCT: narrative_alignment=-1.5, aesthetic_match=-1.0>>")
+        {"narrative_alignment": -1.5, "aesthetic_match": -1.0}
+        >>> _parse_deductions_from_mitigation("plain text, no marker")
+        {}
+    """
+    if not mitigation:
+        return {}
+    m = _DEDUCT_MARKER_RE.search(mitigation)
+    if not m:
+        return {}
+    body = m.group(1)
+    out: dict[str, float] = {}
+    for pair in _DEDUCT_PAIR_RE.finditer(body):
+        try:
+            out[pair.group(1)] = float(pair.group(2))
+        except (ValueError, TypeError):
+            # Malformed numeric — skip this pair, keep parsing rest defensively.
+            continue
+    return out
+
+
+def _apply_failure_class_deductions(
+    criteria: list["VideoGradeCriterion"],
+    detected_failure_classes: list[str],
+    known_limitations: list[dict],
+) -> tuple[list["VideoGradeCriterion"], dict[str, dict[str, float]]]:
+    """Apply server-side deductions for detected failure classes.
+
+    For each failure_class in `detected_failure_classes` that maps to a
+    known_limitations row with a parseable `<<DEDUCT: ...>>` marker, subtract
+    the deduction from the named criterion's score. Floors at 0.0; never goes
+    negative.
+
+    Returns the updated criteria list AND an audit trail
+    (`{failure_class: {criterion: deducted_amount, ...}}`) for the structured
+    log line and reasoning string.
+
+    Idempotency: this function recomputes scores from the current `criteria`
+    state. If the model already self-applied the deductions in its response,
+    re-applying server-side would double-deduct. To prevent that, we use a
+    tolerance check: if the criterion score is already AT or below the
+    expected post-deduction floor, we DON'T re-apply. This is the
+    smoke-#4-finding fix: the model is unreliable about applying deductions,
+    so we apply them defensively, but we don't double-punish if it did.
+    """
+    if not detected_failure_classes or not known_limitations:
+        return criteria, {}
+
+    # Build a quick lookup from failure_mode → mitigation text.
+    mitigation_by_mode: dict[str, str] = {}
+    for lim in known_limitations:
+        fm = lim.get("failure_mode")
+        if isinstance(fm, str):
+            mitigation_by_mode[fm] = str(lim.get("mitigation") or "")
+
+    # Index criteria by name for in-place updates.
+    criteria_by_name: dict[str, "VideoGradeCriterion"] = {c.name: c for c in criteria}
+
+    audit: dict[str, dict[str, float]] = {}
+
+    for fc in detected_failure_classes:
+        # Skip new_candidate:* classes — by definition not in catalog yet.
+        if not isinstance(fc, str) or fc.startswith("new_candidate:"):
+            continue
+        mitigation = mitigation_by_mode.get(fc)
+        if not mitigation:
+            continue
+        deductions = _parse_deductions_from_mitigation(mitigation)
+        if not deductions:
+            continue
+
+        applied: dict[str, float] = {}
+        for crit_name, delta in deductions.items():
+            target = criteria_by_name.get(crit_name)
+            if target is None:
+                # Criterion in marker doesn't exist on this rubric — skip
+                # rather than silently mismap. Surface in audit as 0.0 so the
+                # log line shows an unresolvable target.
+                applied[crit_name] = 0.0
+                continue
+            # Idempotency check: if score is already at-or-below 5.0+delta
+            # tolerance, the model self-applied. Don't double-punish.
+            # (delta is negative, so 5.0+delta is the post-deduction ceiling.)
+            tolerance = 0.05
+            if target.score <= 5.0 + delta + tolerance:
+                # Model likely already applied the deduction; record 0 applied.
+                applied[crit_name] = 0.0
+                continue
+            new_score = max(0.0, target.score + delta)
+            actual_delta = round(new_score - target.score, 3)
+            target.score = new_score
+            applied[crit_name] = actual_delta
+
+        if applied:
+            audit[fc] = applied
+
+    return list(criteria_by_name.values()), audit
 
 
 def _get_client(backend: str) -> genai.Client:
@@ -211,6 +331,47 @@ def _build_critic_system_prompt(
     )
     lines.append("")
 
+    # ─── Campaign direction axiom (2026-04-30 — closes the loop on Tim's     ─
+    #     observation that some Drift MV stills regressed back to mech-heavy  ─
+    #     after the 2026-04-25 aftermath/realistic pivot) ─────────────────────
+    directional_history = (story_context or {}).get("directional_history") if story_context else None
+    if isinstance(directional_history, dict):
+        mantra = directional_history.get("current_direction_mantra")
+        summary = directional_history.get("current_direction_summary")
+        abandoned = directional_history.get("abandoned_directions") or []
+        if mantra or summary or abandoned:
+            lines.append("## CAMPAIGN DIRECTION (canonical, applies to ALL shots in this campaign)")
+            if mantra:
+                lines.append(f"Mantra: `{mantra}`")
+            if summary:
+                lines.append(f"Direction summary: {summary}")
+            if abandoned:
+                lines.append("")
+                lines.append("### ABANDONED DIRECTIONS (canonical-rejected — flag if reintroduced)")
+                for entry in abandoned:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name", "(unnamed)")
+                    reason = entry.get("reason", "")
+                    rejected_at = entry.get("rejected_at", "")
+                    line = f"- `{name}`"
+                    if rejected_at:
+                        line += f" (rejected {rejected_at})"
+                    if reason:
+                        line += f": {reason[:300]}"
+                    lines.append(line)
+            lines.append("")
+            lines.append(
+                "**HARD RULE — Direction integrity:** if the rendered image violates the "
+                "campaign mantra OR reintroduces a listed abandoned direction, list "
+                "`campaign_direction_reversion_mech_heavy` (or the closest catalog match) "
+                "in `detected_failure_classes` AND apply its `<<DEDUCT: ...>>` markers per "
+                "the SCORING DEDUCTIONS section below. Direction integrity overrides per-shot "
+                "criterion scoring — a directionally-broken still cannot ship even if other "
+                "criteria score well."
+            )
+            lines.append("")
+
     # ─── Story context ──────────────────────────────────────────────────────
     if story_context:
         if story_context.get("brief_md"):
@@ -263,6 +424,44 @@ def _build_critic_system_prompt(
     lines.append("")
     lines.append("`aggregate_score` = mean of the 6 criterion scores.")
     lines.append("")
+
+    # ─── SCORING DEDUCTIONS preamble (Phase B+ smoke #4 fix) ────────────────
+    # Some catalog mitigations carry `<<DEDUCT: criterion=-N.N, ...>>` markers
+    # (added in migration 012). The model MUST apply these deductions when it
+    # flags the corresponding failure_class. The server defensively re-applies
+    # post-response via _apply_failure_class_deductions, but emitting the
+    # instruction here aligns the model's self-scoring with the server.
+    has_deduct_markers = any(
+        _DEDUCT_MARKER_RE.search(str(lim.get("mitigation") or ""))
+        for lim in (known_limitations or [])
+    )
+    if has_deduct_markers:
+        lines.append("## SCORING DEDUCTIONS (mandatory, not advisory)")
+        lines.append(
+            "Some failure classes in the catalog below carry an inline marker of the "
+            "form `<<DEDUCT: criterion=-N.N, ...>>`. When you detect one of these "
+            "patterns, you MUST subtract the named amount from each named criterion's "
+            "score for THIS image. Examples:"
+        )
+        lines.append(
+            "- Catalog mitigation contains `<<DEDUCT: narrative_alignment=-1.5, aesthetic_match=-1.0>>`"
+        )
+        lines.append(
+            "- You detect this pattern → subtract 1.5 from your `narrative_alignment` score"
+        )
+        lines.append(
+            "  AND subtract 1.0 from your `aesthetic_match` score before computing aggregate."
+        )
+        lines.append("")
+        lines.append(
+            "Deductions floor at 0.0 (never negative). Multiple failure_classes stack — "
+            "if two classes both deduct from `narrative_alignment`, both deductions apply."
+        )
+        lines.append(
+            "The verdict gate (PASS/WARN/FAIL) computes from the post-deduction "
+            "aggregate, so deductions can flip a borderline PASS to FAIL."
+        )
+        lines.append("")
 
     # ─── Known-limitation catalog ───────────────────────────────────────────
     lines.append("## KNOWN LIMITATION CATALOG (image-class)")
@@ -620,12 +819,30 @@ def grade_image_v2(
         if lim.get("severity") == "blocking"
     }
 
-    # Recompute aggregate defensively — never trust the model's mean blindly
-    aggregate = float(
-        parsed.get("aggregate_score") or (
+    # ─── Server-side deduction recompute (Phase B+ smoke #4 fix) ────────────
+    # When migration 012's `<<DEDUCT: ...>>` markers are present in the catalog
+    # AND the model flagged the corresponding failure_classes, apply the
+    # deductions defensively. Idempotency guard inside _apply_failure_class_deductions
+    # prevents double-deduction when the model already self-applied. This is
+    # the server-side enforcement of the smoke #4 calibration fix — the model
+    # is unreliable about applying deductions, so we apply them here.
+    criteria, deduction_audit = _apply_failure_class_deductions(
+        criteria, detected, known_limitations or [],
+    )
+
+    # Recompute aggregate from POST-deduction criteria scores. Don't trust
+    # the model's `aggregate_score` field if deductions were applied — it
+    # was computed before the server-side adjustment.
+    if deduction_audit:
+        aggregate = (
             sum(c.score for c in criteria) / len(criteria) if criteria else 0.0
         )
-    )
+    else:
+        aggregate = float(
+            parsed.get("aggregate_score") or (
+                sum(c.score for c in criteria) / len(criteria) if criteria else 0.0
+            )
+        )
 
     # Recompute verdict; prefer stricter of (server-derived, model-emitted)
     verdict_server = _compute_verdict_for_stills(aggregate, criteria, detected, blocking_modes)
@@ -681,6 +898,10 @@ def grade_image_v2(
         recommendation=result.recommendation,
         failure_classes=result.detected_failure_classes,
         shot_number=shot_number,
+        # Phase 4 (migration 012): record any server-side deductions applied
+        # so observability surfaces show calibration is firing as designed.
+        # Empty dict when no deductions applied.
+        deductions_applied=deduction_audit,
     )
 
     return result.model_dump()
