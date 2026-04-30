@@ -265,6 +265,31 @@ Every call emits one structured `logger.info` JSON line tagged `event=critic_cal
 
 ---
 
+## Phase 4 (2026-04-30): Direction-drift deductions + CAMPAIGN DIRECTION axiom
+
+Migration 012 (`012_direction_drift_failure_classes.sql`) added 4 image-class failure modes with parseable `<<DEDUCT: criterion=-N.N, ...>>` markers in their mitigation text. The endpoint:
+
+1. **Emits a `## SCORING DEDUCTIONS` preamble** in the system prompt when any catalog row has a DEDUCT marker. Tells the model to apply the deduction when it flags the corresponding failure class.
+2. **Server-side defensive recompute** — `_apply_failure_class_deductions` re-applies any unapplied deductions after the model returns. Idempotency tolerance (±0.05) prevents double-deduction when the model already self-applied.
+3. **Recomputes `aggregate_score` from post-deduction criteria** when any deduction fires; otherwise the model's reported aggregate is preserved. Verdict gate runs on the post-deduction state, so deductions can flip a borderline PASS to FAIL.
+4. **Structured log includes `deductions_applied` audit trail** — empty `{}` when no deductions; otherwise `{failure_class: {criterion: actual_delta, ...}}`.
+
+### CAMPAIGN DIRECTION axiom
+
+When the request body's `story_context.directional_history` field is present (object with `current_direction_mantra` and/or `abandoned_directions[]`), the endpoint emits a `## CAMPAIGN DIRECTION` section in the critic system prompt. This carries:
+
+- The canonical mantra string (e.g., Drift MV: `Cinematically beautiful · Documentary dry · No effects/gloss/polish · Nothing falling out of the sky`)
+- The list of explicitly-rejected approaches with provenance (date + reason + optional snapshot ref)
+- A HARD RULE — direction integrity overrides per-shot criterion scoring. A directionally-broken still cannot ship even if other criteria score well.
+
+The os-api stills_runner threads `manifest.directional_history` (Drift MV manifest top-level field, populated 2026-04-30 per ADR-005 Phase 8) into `story_context` automatically. Legacy campaigns without the field continue working — the section is omitted entirely.
+
+### Live evidence (Phase 6 re-audit, 2026-04-30, run `a4aa3aff`)
+
+Shot 7 (drifted in 2026-04-30 audit) → `verdict=FAIL`, `aggregate_score=3.167`, `recommendation=L2_approach_change`, `failure_classes=["campaign_direction_reversion_mech_heavy", "documentary_polish_drift_3d_render"]`. The new failure class fired correctly; the L2 recommendation came from the migration 012 mitigation text ("Recommend L2 (approach change) NOT L1"); the score is a real FAIL post-deduction. Pre-Phase-4 baseline (smoke #4 2026-04-29) had the same shot at PASS/ship.
+
+---
+
 ## Rollback / failure modes
 
 1. **Sidecar down → 503 from os-api caller** — Phase B feature-flags `STILLS_MODE_ENABLED`; flip to false to halt all `mode: "stills"` runs.

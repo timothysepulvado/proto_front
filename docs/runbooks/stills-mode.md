@@ -167,6 +167,38 @@ Rule of thumb: bias toward KEEP_AS_IS. The audit pattern proven 14:1 on Drift MV
 
 ---
 
+## Direction integrity (Phase 4/5, 2026-04-30)
+
+The critic and orchestrator both consume a campaign-level direction axiom when `manifest.directional_history` is populated. The Drift MV manifest carries:
+
+```json
+"directional_history": {
+  "current_direction_mantra": "Cinematically beautiful · Documentary dry · No effects/gloss/polish · Nothing falling out of the sky",
+  "abandoned_directions": [
+    {
+      "name": "mech_heavy_hero_framing",
+      "rejected_at": "2026-04-25",
+      "reason": "...",
+      "snapshot_ref": "manifest_pre_pivot_backup.json"
+    }
+  ]
+}
+```
+
+The brand-engine critic emits a `## CAMPAIGN DIRECTION` section in its system prompt (with the mantra + abandoned-directions list); when it detects a violation, it lists `campaign_direction_reversion_mech_heavy` (or similar) in `detected_failure_classes` and the server applies the migration-012 deductions. The orchestrator's HARD RULE 6 — direction integrity — fires before any `new_still_prompt`/`new_veo_prompt` is finalized: if the proposal would re-introduce an abandoned direction, the orchestrator escalates the level (L1→L2 or L2→L3) and proposes a structurally different approach.
+
+**Why this matters for operators:** if you see a still that LOOKS aftermath/realistic but the critic flagged `campaign_direction_reversion_mech_heavy`, you should usually trust the critic — direction reversion at composition level is harder to spot at a glance than at the rubric level. Don't override on a Rule 6 escalation without strong evidence.
+
+**Calibration ceiling (2026-04-30 re-audit):** Phase 6 found the calibration partial — some drifted shots fire Rule 6 cleanly (shot 7 → FAIL 3.167 + L2), others slip through (shot 4 → PASS 4.5). When the audit triage table shows a borderline-PASS on a shot that LOOKS drifted to you, fall back to manual override + log via `runs.metadata.operator_override`.
+
+To capture a new directional pivot:
+1. `~/Temp-gen/productions/<slug>/checkpoint.sh <name>` — snapshot the current state
+2. Edit `manifest.directional_history.abandoned_directions[]` — add the previous direction with `rejected_at`, `reason`, and `snapshot_ref` pointer to the fresh checkpoint
+3. Edit per-shot `visual` / `still_prompt` / `veo_prompt` fields to honor the new direction
+4. Re-fire `mode: "stills"` audit to validate
+
+---
+
 ## When to override the critic
 
 Per critic rubric Rule 4 (in `~/agent-vault/briefs/2026-04-29-stills-critic-rubric.md`): the critic can be too literal. If a prompt aspect is technically violated but the result is visually superior, the critic should score actual quality not rules-lawyering. The orchestrator overrides on rules-lawyering.
