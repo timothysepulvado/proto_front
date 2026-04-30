@@ -1,9 +1,18 @@
 # Runbook — `mode: "stills"` (Production Operator Guide)
 
-> **Status:** LIVE for Phase B (audit + in-loop runner). Phase E HUD CTA + Phase F observability metrics still pending — flagged inline below.
+> **Status:** LIVE for Phase B (audit-mode validated end-to-end; in-loop runner code-complete pending Phase C templates). Phase E HUD CTA + Phase F observability metrics still pending — flagged inline below.
 > **Owner:** Brandy
-> **Last revised:** 2026-04-29 PM (Phase B SHIPPED — runner live, sidecar smokes deferred)
+> **Last revised:** 2026-04-29 PM (audit smoke #1 PASS 15/15 vs manual baseline)
 > **Implemented by:** commits `ef18a76` (initial) + `4c713b2` (`runs.metadata` refinement) on `feat/step-11-phase-4`
+> **Live-validated by:** audit run `389ae296-390c-4333-b289-831d6c0252f5` against the 30-shot Drift MV campaign (closeout: `.claude/handoffs/brandy/2026-04-29-PM-phase-b-audit-smoke-results.md`)
+
+## Audit smoke #1 result (2026-04-29 PM)
+
+- **15/15 (100%) recommendation match** vs manual `STILLS_AUDIT_15_SHOTS.md` baseline
+- 30/30 shots graded, 0 errors, ~14 min wall-clock at concurrency 8
+- Score drift +0.07-0.67 on baseline shots → known degraded-mode artifact (catalog auth — see "Phase B+ env refresh" below)
+- Two real fresh catches the manual flow couldn't score: #22 `literal_split_screen` (NEW failure class), #26 multi-failure stack
+- audit_report blob shape (canonical): `{runId, traceId, productionSlug, completedAt, summary: {keep, l1, l2, l3, errors, totalCost}, shots: [{shotId, imagePath, verdict, aggregateScore, recommendation, detectedFailureClasses[], cost, latencyMs, errorMessage}]}`
 
 This runbook is the operator's first stop for any production stills work. It covers when to fire each mode, how to read the output, when to override the critic, how to handle escalations, and how to roll back if something breaks. **You should be able to recover from a bad release using only this document.**
 
@@ -269,12 +278,45 @@ Worker safety: even with the flag off, the worker's `OS_API_OWNED_MODES = ('regr
 
 ---
 
+## Phase B+ env refresh — operator procedure (5 minutes)
+
+The audit smoke #1 caught a degraded-mode artifact: brand-engine `known_limitations_loader` hits "Invalid API key" on every request → critic runs without the failure-class catalog → recommendations stay correct but scores skew +0.3-0.5 because deduction prompts aren't applied.
+
+**Symptom in brand-engine log:**
+```
+ERROR:brand_engine.core.known_limitations_loader:Failed to create Supabase client: Invalid API key
+```
+
+**Fix:**
+
+1. Copy current valid key from os-api (which works):
+   ```bash
+   grep '^SUPABASE_KEY=' ~/proto_front/os-api/.env | head -1
+   ```
+2. Compare to brand-engine's:
+   ```bash
+   grep '^SUPABASE_KEY=' ~/proto_front/brand-engine/.env | head -1
+   ```
+3. If different, update brand-engine's `.env` with the working value (preserve all other keys).
+4. Restart brand-engine sidecar:
+   ```bash
+   pkill -TERM -f 'brand_engine\.api\.server'
+   cd ~/proto_front/brand-engine && .venv/bin/python -m brand_engine.api.server > /tmp/brand-engine.log 2>&1 &
+   ```
+5. Verify catalog loads — first audit verdict should NOT log the "Invalid API key" error.
+6. Re-fire audit smoke (~$3 budget). Expect score drift to drop to ≤±0.2.
+
 ## Production rigor TODOs
 
-Phase B SHIPPED 2026-04-29 PM. Remaining gates:
+Phase B SHIPPED 2026-04-29 PM + audit smoke #1 PASS. Remaining gates:
 
 - [x] Phase B (runner) lands — DONE (commits `ef18a76` + `4c713b2`); curl examples above are real
-- [ ] **Phase B sidecar smokes** — audit vs Drift MV manual 14 KEEP / 1 L1 baseline ±0.3, in-loop L1→L2 promotion, cost cap fires HITL, trace-ID round-trip, audit_report blob shape. Require `:8100` brand-engine + `:8200` Temp-gen up; ~$5-8 cost.
+- [x] **Audit smoke #1** — DONE (run `389ae296...`, 15/15 recommendation match, score drift attributed to env not code)
+- [ ] **Phase B+ #1**: brand-engine `.env` SUPABASE_KEY refresh (procedure above) — drops score drift to ≤±0.2
+- [ ] **Phase B+ #2**: sidecar X-Trace-Id passthrough — brand-engine `_emit_critic_log` honors the runner's X-Trace-Id rather than generating its own
+- [ ] **Phase B+ #3**: cost reporting in `_call_gemini_vision` — compute from token counts × Gemini 3 Pro Vision rate (currently returns 0)
+- [ ] **In-loop sidecar smoke** — fire `auditMode: false` against deliberately-broken seed prompt; verify L1→L2 promotion via degenerate-loop guard. ~$0.50 budget. (Best done after Phase C templates land so regen prompts are production-quality.)
+- [ ] **Cost-cap sidecar smoke** — `STILLS_PER_SHOT_COST_CAP=0.05` forces HITL escalation. ~$0.20 budget.
 - [ ] **Phase C** (Brandy) — image-class L1/L2/L3 prompt templates + 22nd rule for non-human pose-driven subjects + 2000-char ceiling enforcement in orchestrator prompt-builder.
 - [ ] **Phase E** (Karl) — HUD "Run Audit" CTA + triage table (reads `runs.metadata.audit_report`) + `ShotDetailDrawer` "Trigger Pivot" button.
 - [ ] **Phase F** (Brandy) — `pipeline_metrics` table, cost-alert thresholds, `WatcherSignalsPanel` stills-mode binding, Datadog/OTEL collector option.

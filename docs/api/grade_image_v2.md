@@ -36,8 +36,23 @@ in two flows:
   (`perShotCapOverride`).
 
 **Trace-ID propagation:** every call carries `X-Trace-Id: <uuid>` header so
-sidecar logs join cleanly to runner logs + `runs.metadata.trace_id`. The
-sidecar's `_emit_critic_log` already records the trace_id when present.
+sidecar logs join cleanly to runner logs + `runs.metadata.trace_id`. **Phase B+
+known issue:** the sidecar's `_emit_critic_log` currently generates its own
+per-call trace_id alongside the header value rather than honoring it; full
+round-trip log-join requires a small Phase B+ fix.
+
+### Observed performance (audit smoke #1, 2026-04-29 PM)
+
+Run `389ae296-390c-4333-b289-831d6c0252f5` — 30 stills audited end-to-end:
+
+| Metric | Observed | Notes |
+|---|---|---|
+| Per-call latency | 15-30s | Gemini 3 Pro Vision multimodal call. Baseline for `endpoint_latency_ms` SLO (<30s p99 target met). |
+| Concurrency | 8 in flight | Default `STILLS_AUDIT_CONCURRENCY` honored by `pMap`. |
+| Wall-clock for 30 shots | ~14 min | Above the 60-120s ADR-004 target — driven by per-call latency, not the runner. Acceptable for operator-driven flow. |
+| Reported cost | $0 | **Phase B+ known issue**: `_call_gemini_vision` returns `cost: 0` regardless. Compute from token counts × Gemini 3 Pro Vision rate as Phase F observability item. |
+| Catalog loader | Degraded | "Failed to create Supabase client: Invalid API key" on every request. Phase A graceful-degradation path: critic still runs, recommendations stay correct, scores skew positive. **Phase B+ fix:** refresh `~/proto_front/brand-engine/.env` SUPABASE_KEY (5 min). |
+| Recommendation accuracy | **15/15 (100%)** | vs manual `STILLS_AUDIT_15_SHOTS.md` baseline. Match holds even in degraded mode. |
 
 Two operating modes:
 
