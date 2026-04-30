@@ -104,8 +104,13 @@ export async function updateStageStatus(run: Run, stageId: string, status: Stage
  * Create an artifact record with Supabase Storage upload.
  * Uploads the local file, then writes the artifact row with the public URL.
  * If upload fails, falls back to the local path (non-fatal).
+ *
+ * Exported (Phase B+ #6, 2026-04-30): the stills_runner needs the same
+ * helper to close the regen→artifact→re-grade loop. Keeping a single
+ * implementation prevents drift between video- and stills-pipeline asset
+ * lifecycle.
  */
-async function createArtifactWithUpload(opts: {
+export async function createArtifactWithUpload(opts: {
   runId: string;
   clientId: string;
   campaignId?: string;

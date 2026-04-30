@@ -46,6 +46,7 @@ import {
   updateStageStatus,
   callBrandEngine,
   callTempGen,
+  createArtifactWithUpload,
   runEvents,
 } from "./runner.js";
 import {
@@ -979,20 +980,64 @@ async function runInLoopMode(
           );
           break;
         }
-        // Successor artifact intentionally not auto-created here — the
-        // existing video pipeline pattern goes through createArtifactWithUpload
-        // which the current stills runner doesn't import to keep the
-        // module self-contained. The next iteration's getArtifactsByRun
-        // call will pick it up after the operator (or a future Phase B+
-        // refinement) records the new artifact row.
-        await emitLog(
-          run.runId,
-          stageId,
-          "info",
-          `[in_loop] shot ${shot.id} iter ${iter}: regen wrote ${tempGenRes.data.local_path ?? outDir}. Pending artifact row.`,
-        );
-        lastArtifact = candidate;
-        break; // Phase B halts the in-loop here; Phase B+ closes the regen→artifact loop fully.
+
+        // Phase B+ #6 (2026-04-30): close the regen → artifact → re-grade loop.
+        // Previously this branch ended at `break` with the comment "Phase B+
+        // closes the regen→artifact loop fully" — now we close it.
+        //
+        // The flow:
+        //   1. Temp-gen wrote the regenerated still to disk (`local_path`).
+        //   2. Register it as an artifact row tied to THIS run + deliverable
+        //      so the next iter's getArtifactsByRun picks it up as `candidate`
+        //      and the critic grades the regenerated image (not the locked
+        //      original) on iter+1.
+        //   3. Continue the while loop. Termination is enforced by:
+        //        * cost cap (handleQAFailure tracks per-shot cumulative spend
+        //          via STILLS_PER_SHOT_HARD_CAP_USD)
+        //        * STILLS_IN_LOOP_HARD_CAP iter ceiling (defense-in-depth)
+        //        * degenerate-loop guard (Rule 5; same prompt 3× → HITL)
+        //        * verdict.recommendation === "ship" (success exit)
+        const regenLocalPath = tempGenRes.data.local_path ?? outDir;
+        try {
+          const newArtifact = await createArtifactWithUpload({
+            runId: run.runId,
+            clientId: run.clientId,
+            campaignId: run.campaignId,
+            deliverableId: deliverable.id,
+            type: "image",
+            name: `shot_${padded}_iter${iter + 1}.png`,
+            localPath: regenLocalPath,
+            stage: stageId,
+            metadata: {
+              source: "stills_runner_in_loop_regen",
+              iter: iter + 1,
+              parentArtifactId: candidate.id,
+              orchestratorAction: result.decision?.action ?? "regenerate",
+              orchestratorLevel: result.decision?.level ?? null,
+              orchestratorFailureClass: result.decision?.failure_class ?? null,
+              tempGenCost: tempGenRes.data.cost ?? null,
+            },
+          });
+          await emitLog(
+            run.runId,
+            stageId,
+            "info",
+            `[in_loop] shot ${shot.id} iter ${iter}: regen wrote ${regenLocalPath}; registered artifact ${newArtifact.id}. Continuing to iter ${iter + 1} for re-grade.`,
+          );
+          lastArtifact = newArtifact;
+          // Continue → next iter's getArtifactsByRun + filter picks newArtifact
+          // as `candidate` (most recent for this deliverable + this run).
+          continue;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await emitLog(
+            run.runId,
+            stageId,
+            "warn",
+            `[in_loop] shot ${shot.id} iter ${iter}: regen wrote ${regenLocalPath} but artifact registration failed (${msg}). Stopping shot to avoid infinite re-grade on stale image.`,
+          );
+          break;
+        }
       }
     }
 
