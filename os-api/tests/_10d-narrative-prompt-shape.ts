@@ -511,6 +511,95 @@ check("buildSystemPrompt(non-MV): no rendered CAMPAIGN DIRECTION section", () =>
   );
 });
 
+// ─── Rule 7 — prompt-length budget (Phase B+ #5, 2026-04-30) ────────────────
+
+check("buildSystemPrompt: Rule 7 prompt-length budget rendered with 2000-char ceiling", () => {
+  const sp = buildSystemPrompt();
+  assert.ok(sp.includes("Rule 7 — Prompt-length budget"), "Rule 7 heading present");
+  assert.ok(sp.includes("≤ **2000 characters**"), "explicit 2000-char ceiling rendered");
+  assert.ok(sp.includes("HTTP 500"), "Temp-gen rejection symptom documented");
+  assert.ok(sp.includes("HTTP 422"), "brand-engine rejection symptom documented");
+});
+
+check("OUTPUT JSON SCHEMA references Rule 7 ceiling for new_still_prompt + new_veo_prompt", () => {
+  const sp = buildSystemPrompt();
+  assert.ok(
+    sp.includes("\"new_still_prompt\": \"<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>\""),
+    "schema row for new_still_prompt cites Rule 7",
+  );
+  assert.ok(
+    sp.includes("\"new_veo_prompt\": \"<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>\""),
+    "schema row for new_veo_prompt cites Rule 7",
+  );
+});
+
+// _enforcePromptBudget tests — load via dynamic import so we don't break the
+// test file's existing import pattern.
+{
+  const orch = await import("../src/orchestrator.js");
+  const enforce = orch._enforcePromptBudget;
+  const BUDGET = orch.ORCHESTRATOR_PROMPT_BUDGET_CHARS;
+
+  check("_enforcePromptBudget: null in → null out", () => {
+    assert.equal(enforce(null, "new_still_prompt"), null);
+    assert.equal(enforce(null, "new_veo_prompt"), null);
+  });
+
+  check("_enforcePromptBudget: under-budget passes through unchanged", () => {
+    const short = "A photographic still of a foreground rubble pile, mid-ground subject, distant background. Documentary tradition.";
+    assert.equal(enforce(short, "new_still_prompt"), short);
+    assert.ok(short.length < BUDGET, "fixture is actually under budget");
+  });
+
+  check("_enforcePromptBudget: at-budget exactly passes through", () => {
+    const at = "x".repeat(BUDGET);
+    assert.equal(enforce(at, "new_still_prompt"), at);
+  });
+
+  check("_enforcePromptBudget: over-budget truncates at last sentence terminator before 1990", () => {
+    // Build a prompt whose first 1989 chars end with a "." then more sentences after.
+    const head = "A".repeat(1900);
+    const sentenceEnd = ". Plenty of room here.";
+    const tail = " ".concat("More content that should be cut. ".repeat(20));
+    const full = head + sentenceEnd + tail;
+    assert.ok(full.length > BUDGET, "fixture exceeds budget");
+    const trimmed = enforce(full, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET, `trimmed length ${trimmed.length} <= ${BUDGET}`);
+    assert.ok(trimmed.endsWith(".") || trimmed.endsWith("?") || trimmed.endsWith("!"), "ends on sentence terminator");
+  });
+
+  check("_enforcePromptBudget: over-budget with no sentence terminators falls back to whitespace cut", () => {
+    // Single very long word-stream (no periods) followed by spaces.
+    const stream = "WordOne WordTwo ".repeat(200);
+    assert.ok(stream.length > BUDGET, "fixture exceeds budget");
+    const trimmed = enforce(stream, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET);
+    assert.ok(!trimmed.endsWith(" "), "trailing whitespace stripped after cut");
+  });
+
+  check("_enforcePromptBudget: hard cut last-resort when no boundaries available in budget", () => {
+    // Pathological input: one giant token, no spaces, no terminators.
+    const blob = "x".repeat(3000);
+    const trimmed = enforce(blob, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET);
+    assert.ok(trimmed.length >= 1989, "hard cut lands at the soft ceiling");
+  });
+
+  check("_enforcePromptBudget: applies independently to still vs veo (no cross-talk)", () => {
+    // Different lengths, different terminators — verify the helper treats each
+    // call independently (no shared state, no last-call memo).
+    const aOver = "First sentence ends here. " + "B".repeat(1800);
+    const bUnder = "Short prompt.";
+    const aTrimmed = enforce(aOver, "new_still_prompt");
+    const bResult = enforce(bUnder, "new_veo_prompt");
+    assert.ok(aTrimmed !== null && aTrimmed.length <= BUDGET);
+    assert.equal(bResult, bUnder);
+  });
+}
+
 // ─── Run ─────────────────────────────────────────────────────────────────
 
 let passed = 0;

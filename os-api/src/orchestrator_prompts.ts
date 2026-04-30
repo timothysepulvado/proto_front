@@ -172,6 +172,27 @@ Pass-through: if the campaign has NO \`## CAMPAIGN DIRECTION\` block in the syst
 
 Why this matters: the catalog detects symptoms (mech-heavy composition, parade formation, etc.) AFTER the still is rendered. Rule 6 stops the orchestrator from PROPOSING those symptoms in the first place — which is the cheaper and more reliable intervention.
 
+## Rule 7 — Prompt-length budget (autonomous-ops, non-negotiable)
+
+\`new_still_prompt\` and \`new_veo_prompt\` MUST each be ≤ **2000 characters** (whitespace and punctuation count). This is a hard model-side limit:
+
+- Gemini 3 Pro Image (the still generator) rejects \`HTTP 500: "Prompt exceeds maximum length of 2000 characters."\` — **rejection is the runtime outcome**, not a soft warning. Any over-budget prompt loses the iteration outright and the runner records a \`regen failed\` warn.
+- The brand-engine critic enforces the same ceiling at pre-flight on \`/grade_image_v2\` (returns HTTP 422).
+
+Budget guidance (~2000 chars ≈ 300-330 words ≈ 2-3 dense paragraphs):
+
+1. **Lead with the anti-patterns.** Anti-CGI opener at line 1, faction-color hex codes early, locked-camera + documentary-tradition framing in the first paragraph. The model's attention budget is heaviest on the leading 600-800 chars.
+2. **Cut adjective stacks before philosophy paragraphs.** "weathered, scuffed, dust-coated, chipped, partially exposed steel" → "weathered welded steel" preserves the compositional signal at a fraction of the token cost.
+3. **Compress hex+color descriptors.** "deep purple welded-steel armor (\`#9B59B6\`) with burnt-orange (\`#E67E22\`) accent panels" → "#9B59B6 purple armor / #E67E22 accent panels".
+4. **One foreground anchor + one mid-ground subject + one background scenery item.** Three layered descriptions, ~400-500 chars each, beats five layered descriptions at 200 each.
+5. **Keep \`new_negative_prompt\` separate.** Negation lives in its own field; do NOT inline it as "no X, no Y, no Z" prose inside \`new_still_prompt\`.
+
+If after self-editing the prompt still exceeds 2000 chars, **escalate the level** (L1 → L2, or L2 → L3 with \`redesign_option: "B"\`) and propose a structurally shorter approach. Do NOT submit an over-budget prompt.
+
+The runner ALSO truncates defensively at 1990 chars on a sentence boundary if you forget — but truncation is a guardrail, not a strategy. A truncated prompt loses its closing instruction (often the negative-pattern reinforcement). Stay under budget yourself.
+
+Pass-through: this rule applies even when no music-video direction context is present. The 2000-char ceiling is universal.
+
 ## Staleness discipline (tool use)
 Before proposing any **new** model id, tool version, SDK version, prompt pattern, external fact, or industry claim that could have changed since your training cutoff, you MUST use the \`web_search\` tool to verify currency. Do NOT rely on training-data knowledge for anything model-version, tool-version, or industry-news related. The \`Today's date\` in the user message is authoritative — reason about staleness relative to it, not your training cutoff.
 
@@ -209,8 +230,8 @@ Override when the catalog has a specific mitigation that contradicts the matrix 
   "action": "prompt_fix" | "approach_change" | "accept" | "redesign" | "replace" | "post_vfx",
   "failure_class": "<failure_mode from catalog, or null>",
   "known_limitation_id": "<uuid from catalog, or null>",
-  "new_still_prompt": "<full prompt text, or null>",
-  "new_veo_prompt": "<full prompt text, or null>",
+  "new_still_prompt": "<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>",
+  "new_veo_prompt": "<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>",
   "new_negative_prompt": "<comma-separated exclusions, or null>",
   "redesign_option": "B" | "C" | null,
   "reasoning": "<3-5 sentences: what failed, why, what you're changing and why it should work. If action is accept or post_vfx, describe the trim or the compositor instructions here.>",

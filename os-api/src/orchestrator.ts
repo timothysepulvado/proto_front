@@ -137,14 +137,85 @@ function _parseDecision(raw: string): OrchestratorDecision {
     action: _coerceAction(obj.action),
     failure_class: _coerceNullableString(obj.failure_class),
     known_limitation_id: _coerceNullableString(obj.known_limitation_id),
-    new_still_prompt: _coerceNullableString(obj.new_still_prompt),
-    new_veo_prompt: _coerceNullableString(obj.new_veo_prompt),
+    new_still_prompt: _enforcePromptBudget(
+      _coerceNullableString(obj.new_still_prompt),
+      "new_still_prompt",
+    ),
+    new_veo_prompt: _enforcePromptBudget(
+      _coerceNullableString(obj.new_veo_prompt),
+      "new_veo_prompt",
+    ),
     new_negative_prompt: _coerceNullableString(obj.new_negative_prompt),
     redesign_option: _coerceRedesignOption(obj.redesign_option),
     reasoning: typeof obj.reasoning === "string" ? obj.reasoning : "",
     confidence: _coerceConfidence(obj.confidence),
     new_candidate_limitation: _coerceCandidate(obj.new_candidate_limitation),
   };
+}
+
+/**
+ * Hard model-side ceiling for image-gen prompts.
+ *
+ * Gemini 3 Pro Image (Temp-gen) returns HTTP 500 for inputs beyond this; the
+ * brand-engine critic returns HTTP 422 (pre-flight). 2000 is the canonical
+ * NB Pro limit per ~/Temp-gen/productions/drift-mv/STILLS_AUDIT_15_SHOTS.md.
+ * We give ourselves a small headroom (1990) so the truncation cut never lands
+ * exactly on the limit and gets rounded up by an off-by-one elsewhere.
+ */
+export const ORCHESTRATOR_PROMPT_BUDGET_CHARS = 2000;
+const ORCHESTRATOR_PROMPT_BUDGET_SOFT = 1990;
+
+/**
+ * Phase B+ #5 (2026-04-30): defensive prompt-length truncation.
+ *
+ * Rule 7 instructs the orchestrator to keep \`new_still_prompt\` and
+ * \`new_veo_prompt\` ≤ 2000 chars; this helper is the runtime guardrail
+ * for when the model ignores the instruction. We truncate at the last
+ * sentence boundary BEFORE the soft ceiling (1990 chars) so the prompt
+ * still reads as a finished instruction, not a mid-clause fragment.
+ *
+ * Logged via \`console.warn\` when truncation fires — operators can grep
+ * the os-api log for "[orchestrator] truncated" and treat it as a Rule 7
+ * compliance signal. A clean run produces zero such warns.
+ *
+ * Returns null pass-through; null prompts are the orchestrator's signal
+ * that no prompt change is needed (e.g., \`accept\` or \`post_vfx\`).
+ */
+export function _enforcePromptBudget(
+  raw: string | null,
+  fieldName: "new_still_prompt" | "new_veo_prompt",
+): string | null {
+  if (raw === null) return null;
+  if (raw.length <= ORCHESTRATOR_PROMPT_BUDGET_CHARS) return raw;
+
+  // Find the last sentence-terminator (".", "!", "?") at-or-before the soft
+  // ceiling. Includes the punctuation in the cut so the prompt ends naturally.
+  // If none exists in the budget, fall back to last whitespace boundary;
+  // last-resort: hard cut at soft ceiling.
+  const window = raw.slice(0, ORCHESTRATOR_PROMPT_BUDGET_SOFT);
+  let cutAt = -1;
+  for (const terminator of [". ", "! ", "? ", ".\n", "!\n", "?\n"]) {
+    const idx = window.lastIndexOf(terminator);
+    if (idx > cutAt) cutAt = idx + 1; // include the terminator char itself
+  }
+  if (cutAt < 200) {
+    // Sentence-boundary search came up empty (or weirdly short). Try whitespace.
+    const wsIdx = window.lastIndexOf(" ");
+    if (wsIdx > 200) cutAt = wsIdx;
+  }
+  if (cutAt < 200) {
+    // Last resort: hard cut. Adds an ellipsis so consumers see it was clipped.
+    cutAt = ORCHESTRATOR_PROMPT_BUDGET_SOFT;
+  }
+
+  const trimmed = raw.slice(0, cutAt).trimEnd();
+
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[orchestrator] truncated ${fieldName} from ${raw.length} → ${trimmed.length} chars (Rule 7 budget = ${ORCHESTRATOR_PROMPT_BUDGET_CHARS}). The model emitted an over-budget prompt; runner used the truncation guardrail. Add HITL review on this run.`,
+  );
+
+  return trimmed;
 }
 
 function _coerceLevel(v: unknown): EscalationLevel {
