@@ -259,6 +259,19 @@ export interface RunCreatePayload {
    * the audit; the route rejects `auditMode: true` without `campaignId`.
    */
   auditMode?: boolean;
+  /**
+   * Phase B+ targeted-regen (2026-04-30, mode === "stills" + auditMode: false):
+   * when set, the in-loop runner treats this list as authoritative scope —
+   * iterates exactly these manifest shot IDs and bypasses the default
+   * `status NOT IN (approved, rejected)` deliverable filter. Every entry must
+   * be a valid manifest shot id (1-based integer). When unset/empty, the
+   * default behavior is unchanged (iterate all non-terminal deliverables).
+   *
+   * Use case: re-grading a small set of stills that were operator-approved
+   * before a critic-rubric calibration shipped (drift-mv 2026-04-30 fix).
+   * Also the operator-control surface for client-onboarding regen workflows.
+   */
+  shotIds?: number[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────

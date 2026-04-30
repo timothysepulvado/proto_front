@@ -41,6 +41,7 @@ const stillsRunnerImport = await import("../src/stills_runner.js");
 const {
   loadCampaignManifest,
   resolveProductionSlug,
+  pickInLoopTargets,
   STILLS_MODE_ENABLED,
   STILLS_PER_SHOT_HARD_CAP_USD,
   STILLS_AUDIT_CONCURRENCY,
@@ -266,6 +267,165 @@ async function pMap<T, R>(
   );
 }
 
+// ─── Tests 9-14: pickInLoopTargets (Phase B+ targeted-regen, 2026-04-30) ───
+//
+// pickInLoopTargets is a pure helper extracted from runInLoopMode so the
+// targeted-regen path (run.metadata.shot_ids) can be unit-tested without
+// fetch / Supabase mocks. The fixture below mirrors the inaugural Drift MV
+// deliverable shape: description encodes "Shot N · section · …" and status
+// is one of {approved, reviewing, rejected}.
+
+type ManifestPayloadFixture = Parameters<typeof pickInLoopTargets>[0];
+type CampaignDeliverableFixture = Parameters<typeof pickInLoopTargets>[1][number];
+
+const NOW = "2026-04-30T22:00:00.000Z";
+const mkDeliverable = (
+  id: string,
+  description: string,
+  status: CampaignDeliverableFixture["status"],
+): CampaignDeliverableFixture => ({
+  id,
+  campaignId: "c",
+  description,
+  status,
+  retryCount: 0,
+  createdAt: NOW,
+  updatedAt: NOW,
+});
+
+const fixtureManifest: ManifestPayloadFixture = {
+  productionSlug: "drift-mv",
+  shots: [
+    { id: 1, section: "intro", visual: "intro shot" },
+    { id: 4, section: "hook_1", visual: "the orb beat" },
+    { id: 7, section: "verse_1", visual: "mech faceplate close-up" },
+    { id: 16, section: "verse_2", visual: "fortune 5" },
+    { id: 18, section: "verse_2", visual: "we the signal" },
+    { id: 20, section: "hook_3", visual: "gargoyle mechs" },
+    { id: 22, section: "bridge", visual: "empathetic close-up" },
+  ],
+  storyContext: {},
+  anchorPaths: [],
+  referencePaths: [],
+};
+
+const fixtureDeliverables: CampaignDeliverableFixture[] = [
+  mkDeliverable("deliv-1",  "Shot 1 · intro · skyscraper",        "approved"),
+  mkDeliverable("deliv-4",  "Shot 04 · hook_1 · the orb beat",    "approved"),
+  mkDeliverable("deliv-7",  "Shot 07 · verse_1 · mech faceplate", "approved"),
+  mkDeliverable("deliv-16", "Shot 16 · verse_2 · fortune 5",      "approved"),
+  mkDeliverable("deliv-18", "Shot 18 · verse_2 · we the signal",  "approved"),
+  mkDeliverable("deliv-20", "Shot 20 · hook_3 · gargoyles",       "approved"),
+  mkDeliverable("deliv-22", "Shot 22 · bridge · close-up",        "approved"),
+  // 2 "reviewing" deliverables WITHOUT shot-N descriptions — matches the
+  // production drift-mv state where prior regen attempts wrote raw visuals.
+  mkDeliverable("deliv-x1", "Brandy walks forward in sharp focus while …",       "reviewing"),
+  mkDeliverable("deliv-x2", "A massive smoking crater where one converted …",    "reviewing"),
+];
+
+// ─── Test 9: targeted-regen happy path — bypass status filter ─────────────
+{
+  const decision = pickInLoopTargets(
+    fixtureManifest,
+    fixtureDeliverables,
+    [7, 16, 18, 20, 22],
+  );
+  assert.equal(decision.targets.length, 5, "5 shots resolved");
+  assert.deepEqual(
+    decision.targets.map((t) => t.shot.id),
+    [7, 16, 18, 20, 22],
+    "iteration order matches input shotIds order",
+  );
+  assert.deepEqual(
+    decision.targets.map((t) => t.deliverable.id),
+    ["deliv-7", "deliv-16", "deliv-18", "deliv-20", "deliv-22"],
+    "each shot resolved to its 'Shot N · …' deliverable despite all being approved",
+  );
+  assert.equal(decision.skipped.length, 0, "no skips in happy path");
+  console.log("  ✓ pickInLoopTargets — targeted-regen bypasses approved filter (drift-mv 5-shot case)");
+}
+
+// ─── Test 10: targeted regen — non-existent shot id is skipped, not thrown ─
+{
+  const decision = pickInLoopTargets(
+    fixtureManifest,
+    fixtureDeliverables,
+    [7, 99],
+  );
+  assert.equal(decision.targets.length, 1, "valid shot resolved");
+  assert.equal(decision.targets[0].shot.id, 7);
+  assert.equal(decision.skipped.length, 1, "one skip");
+  assert.equal(decision.skipped[0].reason, "shot_not_in_manifest");
+  assert.equal(decision.skipped[0].shotId, 99);
+  console.log("  ✓ pickInLoopTargets — invalid shotId reported as skip with reason code");
+}
+
+// ─── Test 11: targeted regen — shot exists but no matching deliverable ─────
+{
+  const decision = pickInLoopTargets(
+    fixtureManifest,
+    fixtureDeliverables.filter((d) => d.id !== "deliv-7"),
+    [7, 16],
+  );
+  assert.equal(decision.targets.length, 1);
+  assert.equal(decision.targets[0].shot.id, 16);
+  assert.equal(decision.skipped.length, 1);
+  assert.equal(decision.skipped[0].reason, "no_deliverable_row_for_shot");
+  assert.equal(decision.skipped[0].shotId, 7);
+  console.log("  ✓ pickInLoopTargets — missing deliverable row surfaces a skip with reason code");
+}
+
+// ─── Test 12: default path — non-terminal filter applies, terminal skipped ─
+{
+  const mixedStatusDeliverables: CampaignDeliverableFixture[] = [
+    mkDeliverable("a", "Shot 1 · intro",    "reviewing"),
+    mkDeliverable("b", "Shot 4 · hook_1",   "approved"),
+    mkDeliverable("c", "Shot 7 · verse_1",  "rejected"),
+    mkDeliverable("d", "Shot 16 · verse_2", "regenerating"),
+  ];
+  const decision = pickInLoopTargets(fixtureManifest, mixedStatusDeliverables, undefined);
+  assert.equal(decision.targets.length, 2, "only the 2 non-terminal deliverables surface");
+  assert.deepEqual(
+    decision.targets.map((t) => t.deliverable.id).sort(),
+    ["a", "d"],
+  );
+  // Terminal-status skips are NOT operator-warns (expected behavior); they're
+  // still in `skipped` for diagnostics.
+  const terminalSkips = decision.skipped.filter((s) => s.reason === "deliverable_terminal_status");
+  assert.equal(terminalSkips.length, 2, "both approved + rejected surface as terminal-status skips");
+  console.log("  ✓ pickInLoopTargets — default path honors non-terminal filter, classifies terminal skips");
+}
+
+// ─── Test 13: default path — non-shot-N descriptions are skip-warned ───────
+{
+  const decision = pickInLoopTargets(fixtureManifest, fixtureDeliverables, undefined);
+  // 7 approved (Shot N) + 2 reviewing (no Shot N) = 9 total. Default path
+  // skips approved (terminal_status) and emits "couldnt_parse" for the 2
+  // reviewing ones. No targets.
+  assert.equal(decision.targets.length, 0);
+  const parseFails = decision.skipped.filter((s) => s.reason === "couldnt_parse_shot_number");
+  assert.equal(parseFails.length, 2, "both raw-visual descriptions reported as parse-fail");
+  assert.ok(parseFails[0].deliverableId);
+  console.log("  ✓ pickInLoopTargets — non-Shot-N descriptions reported as couldnt_parse_shot_number skips");
+}
+
+// ─── Test 14: empty / null shotIds falls back to default path ──────────────
+{
+  // null === undefined === [] all behave identically: default path.
+  const a = pickInLoopTargets(fixtureManifest, fixtureDeliverables, undefined);
+  const b = pickInLoopTargets(fixtureManifest, fixtureDeliverables, null);
+  const c = pickInLoopTargets(fixtureManifest, fixtureDeliverables, []);
+  assert.deepEqual(
+    a.targets.map((t) => t.deliverable.id),
+    b.targets.map((t) => t.deliverable.id),
+  );
+  assert.deepEqual(
+    a.targets.map((t) => t.deliverable.id),
+    c.targets.map((t) => t.deliverable.id),
+  );
+  console.log("  ✓ pickInLoopTargets — undefined/null/[] shotIds all route to default path");
+}
+
 // ─── Cleanup ───────────────────────────────────────────────────────────────
 try {
   rmSync(fixtureRoot, { recursive: true, force: true });
@@ -273,4 +433,4 @@ try {
   // best-effort
 }
 
-console.log("\nPhase B stills-runner unit tests: 8/8 passed");
+console.log("\nPhase B stills-runner unit tests: 14/14 passed");

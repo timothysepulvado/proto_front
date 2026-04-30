@@ -568,6 +568,119 @@ async function runAuditMode(
  */
 const STILLS_IN_LOOP_HARD_CAP = 8;
 
+// ─── In-loop targeting (pure helper, exported for unit testing) ────────────
+
+/** "Shot 7", "Shot 07", "shot_7", "shot-7" — case-insensitive. */
+const SHOT_DESCRIPTION_RE = /\bshot[\s_-]*(\d{1,2})\b/i;
+
+export type InLoopTarget = {
+  shot: ManifestShot;
+  deliverable: CampaignDeliverable;
+};
+
+export type InLoopTargetingDecision = {
+  targets: InLoopTarget[];
+  /** Reason-coded skips so callers (runInLoopMode) can emit operator-friendly
+   *  warn lines without re-deriving the diagnosis. */
+  skipped: Array<{
+    reason:
+      | "shot_not_in_manifest"
+      | "no_deliverable_row_for_shot"
+      | "couldnt_parse_shot_number"
+      | "deliverable_terminal_status";
+    shotId?: number;
+    deliverableId?: string;
+    description?: string;
+  }>;
+};
+
+/**
+ * Decide which (shot, deliverable) pairs to iterate in in-loop mode.
+ *
+ * Two paths:
+ *
+ *  1. **Default** — when ``shotIds`` is empty/null, iterate non-terminal
+ *     deliverables and parse shot numbers from each ``description`` via
+ *     {@link SHOT_DESCRIPTION_RE}. Matches the convention used by the
+ *     inaugural Drift MV deliverables ("Shot 7 · verse_1 · …").
+ *
+ *  2. **Targeted regen** (Phase B+ 2026-04-30) — when ``shotIds`` is
+ *     provided, iterate exactly those manifest shot IDs and bypass the
+ *     ``status NOT IN (approved, rejected)`` deliverable filter. Each
+ *     shot must have (a) a manifest entry and (b) at least one deliverable
+ *     row whose description encodes its shot number — otherwise it's
+ *     skipped with a reason-code.
+ *
+ * Pure function — no I/O, easy to unit-test. The order of returned targets
+ * matches input order: default = deliverable order from caller; targeted =
+ * shotIds order from caller (operators can prioritize).
+ */
+export function pickInLoopTargets(
+  manifest: ManifestPayload,
+  allDeliverables: readonly CampaignDeliverable[],
+  shotIds: readonly number[] | null | undefined,
+): InLoopTargetingDecision {
+  const targets: InLoopTarget[] = [];
+  const skipped: InLoopTargetingDecision["skipped"] = [];
+
+  const findDeliverableForShot = (shotId: number): CampaignDeliverable | null => {
+    const found = allDeliverables.find((d) => {
+      const m = d.description?.match(SHOT_DESCRIPTION_RE);
+      return m ? Number.parseInt(m[1], 10) === shotId : false;
+    });
+    return found ?? null;
+  };
+
+  if (shotIds && shotIds.length > 0) {
+    for (const shotId of shotIds) {
+      const shot = manifest.shots.find((s) => s.id === shotId);
+      if (!shot) {
+        skipped.push({ reason: "shot_not_in_manifest", shotId });
+        continue;
+      }
+      const deliverable = findDeliverableForShot(shotId);
+      if (!deliverable) {
+        skipped.push({ reason: "no_deliverable_row_for_shot", shotId });
+        continue;
+      }
+      targets.push({ shot, deliverable });
+    }
+    return { targets, skipped };
+  }
+
+  // Default: status filter + per-deliverable shot-number parse.
+  for (const d of allDeliverables) {
+    if (d.status === "approved" || d.status === "rejected") {
+      skipped.push({
+        reason: "deliverable_terminal_status",
+        deliverableId: d.id,
+      });
+      continue;
+    }
+    const m = d.description?.match(SHOT_DESCRIPTION_RE);
+    const shotNumber = m ? Number.parseInt(m[1], 10) : null;
+    if (shotNumber === null || !Number.isFinite(shotNumber)) {
+      skipped.push({
+        reason: "couldnt_parse_shot_number",
+        deliverableId: d.id,
+        description: d.description ?? "",
+      });
+      continue;
+    }
+    const shot = manifest.shots.find((s) => s.id === shotNumber);
+    if (!shot) {
+      skipped.push({
+        reason: "shot_not_in_manifest",
+        shotId: shotNumber,
+        deliverableId: d.id,
+      });
+      continue;
+    }
+    targets.push({ shot, deliverable: d });
+  }
+  return { targets, skipped };
+}
+
 async function runInLoopMode(
   run: Run,
   manifest: ManifestPayload,
@@ -575,63 +688,61 @@ async function runInLoopMode(
 ): Promise<boolean> {
   const stageId = "grade";
 
-  // Phase B in-loop targets deliverables in the campaign that are still in
-  // a non-terminal state. If no campaign rows exist, fall back to manifest
-  // shots (matches the manual flow's filesystem-first approach).
-  let deliverables: CampaignDeliverable[] = [];
+  // Phase B+ (2026-04-30): targeted-regen scope from run.metadata.shot_ids.
+  // When present + non-empty, this becomes the authoritative shot set and
+  // bypasses the default `status NOT IN (approved, rejected)` filter.
+  const persistedShotIds =
+    (run.metadata as { shot_ids?: number[] } | undefined)?.shot_ids ?? null;
+
+  // Load all deliverables for the campaign — pickInLoopTargets does the
+  // filtering. We still emit an info log with the campaign name so the run
+  // history shows scope.
+  let allDeliverables: CampaignDeliverable[] = [];
   if (run.campaignId) {
     const campaign = await getCampaign(run.campaignId);
     if (campaign) {
-      const all = await getDeliverablesByCampaign(run.campaignId);
-      deliverables = all.filter(
-        (d) => d.status !== "approved" && d.status !== "rejected",
-      );
+      allDeliverables = await getDeliverablesByCampaign(run.campaignId);
+      const scope =
+        persistedShotIds && persistedShotIds.length > 0
+          ? `targeted-regen shotIds=[${persistedShotIds.join(",")}]`
+          : "default (non-terminal deliverables)";
       await emitLog(
         run.runId,
         stageId,
         "info",
-        `[in_loop] Campaign '${campaign.name}' — ${deliverables.length} non-terminal deliverable(s) of ${all.length} total`,
+        `[in_loop] Campaign '${campaign.name}' — ${allDeliverables.length} total deliverable(s); scope=${scope}`,
       );
     }
   }
 
-  // Phase B safety: in-loop without deliverable rows is operator-error.
-  // Audit-mode is the right tool for filesystem-only stills. Refuse rather
-  // than do something silently surprising.
-  if (deliverables.length === 0) {
+  const decision = pickInLoopTargets(manifest, allDeliverables, persistedShotIds);
+
+  // Surface skipped entries so operators can diagnose without crawling logs.
+  for (const s of decision.skipped) {
+    if (s.reason === "deliverable_terminal_status") continue; // expected silent default-path skip
     await emitLog(
       run.runId,
       stageId,
       "warn",
-      "[in_loop] No non-terminal deliverables found for this campaign. In-loop mode requires deliverable rows to track regen state. Use auditMode=true for filesystem-only stills.",
+      `[in_loop] Skipped (${s.reason}): shotId=${s.shotId ?? "?"} deliverableId=${s.deliverableId ?? "?"}${s.description ? ` description='${s.description}'` : ""}`,
+    );
+  }
+
+  if (decision.targets.length === 0) {
+    await emitLog(
+      run.runId,
+      stageId,
+      "warn",
+      persistedShotIds && persistedShotIds.length > 0
+        ? `[in_loop] No targetable shots from shotIds=[${persistedShotIds.join(",")}] — every requested shot was skipped (see warns above). Nothing to regen.`
+        : "[in_loop] No non-terminal deliverables found for this campaign. In-loop mode requires deliverable rows to track regen state. Use auditMode=true for filesystem-only stills.",
     );
     return true;
   }
 
   const productionRoot = join(TEMP_GEN_PATH, "productions", manifest.productionSlug);
 
-  for (const deliverable of deliverables) {
-    // Phase B mapping: parse "Shot N" from deliverable.description. This
-    // matches the convention used by the inaugural Drift MV deliverables
-    // (description: "Shot 5 — verse 1 …"). Phase E (Karl HUD) will replace
-    // this with explicit shot_number metadata when the deliverable type is
-    // extended; the regex match is the bridge until then.
-    const shotMatch = deliverable.description?.match(/\bshot[\s_-]*(\d{1,2})\b/i);
-    const shotNumber = shotMatch ? Number.parseInt(shotMatch[1], 10) : null;
-    const shot =
-      shotNumber !== null && Number.isFinite(shotNumber)
-        ? manifest.shots.find((s) => s.id === shotNumber)
-        : undefined;
-    if (!shot) {
-      await emitLog(
-        run.runId,
-        stageId,
-        "warn",
-        `[in_loop] Skipping deliverable ${deliverable.id} — couldn't parse shot number from description '${deliverable.description ?? ""}'.`,
-      );
-      continue;
-    }
-
+  for (const { shot, deliverable } of decision.targets) {
     const padded = String(shot.id).padStart(2, "0");
     const stillPath = join(productionRoot, "stills", `shot_${padded}.png`);
 

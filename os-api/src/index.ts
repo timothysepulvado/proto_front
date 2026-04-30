@@ -103,7 +103,7 @@ app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
 app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const { mode, campaignId, auditMode } = req.body as RunCreatePayload;
+    const { mode, campaignId, auditMode, shotIds } = req.body as RunCreatePayload;
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
@@ -122,6 +122,49 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
     if (mode === "stills" && auditMode === true && !campaignId) {
       res.status(400).json({ error: "auditMode=true requires campaignId" });
       return;
+    }
+
+    // Phase B+ targeted-regen (2026-04-30): validate shotIds shape + scope.
+    // - shotIds is opt-in for mode === "stills" + auditMode !== true; rejected
+    //   for other modes / audit-mode runs (audit fans out across the campaign,
+    //   shotIds would be ambiguous there).
+    // - Every entry must be a positive integer in [1, 100] (manifest shot ids
+    //   are 1-based; 100 is a generous upper bound for any future production).
+    let normalizedShotIds: number[] | undefined;
+    if (shotIds !== undefined) {
+      if (!Array.isArray(shotIds) || shotIds.length === 0) {
+        res.status(400).json({ error: "shotIds must be a non-empty array of integers when provided" });
+        return;
+      }
+      if (mode !== "stills" || auditMode === true) {
+        res.status(400).json({
+          error: "shotIds is only valid for mode=stills with auditMode=false (in-loop targeted regen)",
+        });
+        return;
+      }
+      if (!campaignId) {
+        res.status(400).json({ error: "shotIds requires campaignId" });
+        return;
+      }
+      const invalid = shotIds.find(
+        (s) => typeof s !== "number" || !Number.isInteger(s) || s < 1 || s > 100,
+      );
+      if (invalid !== undefined) {
+        res.status(400).json({
+          error: `shotIds entries must be integers in [1, 100]; got ${JSON.stringify(invalid)}`,
+        });
+        return;
+      }
+      // De-dup while preserving order — the runner's iteration matches input
+      // order so operators can prioritize.
+      const seen = new Set<number>();
+      normalizedShotIds = [];
+      for (const s of shotIds) {
+        if (!seen.has(s)) {
+          seen.add(s);
+          normalizedShotIds.push(s);
+        }
+      }
     }
 
     const client = await getClient(clientId);
@@ -144,6 +187,12 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
     const runMetadata: Record<string, unknown> = {};
     if (mode === "stills") {
       runMetadata.audit_mode = auditMode ?? false;
+      // Phase B+ targeted-regen: persist normalized shotIds so the runner
+      // (which reads run.metadata at exec time) can scope iteration. Survives
+      // os-api restart mid-run, same as audit_mode.
+      if (normalizedShotIds && normalizedShotIds.length > 0) {
+        runMetadata.shot_ids = normalizedShotIds;
+      }
     }
 
     const run: Run = {
