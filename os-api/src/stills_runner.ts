@@ -52,6 +52,7 @@ import {
   getCampaign,
   getDeliverablesByCampaign,
   getArtifactsByRun,
+  updateRun,
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
 import type {
@@ -474,6 +475,48 @@ async function runAuditMode(
     `[audit] complete: ${summary.keep} KEEP / ${summary.l1} L1 / ${summary.l2} L2 / ${summary.l3} L3 / ${summary.errors} errors. Total cost: $${summary.totalCost.toFixed(4)}`,
   );
 
+  // Persist the audit_report blob to runs.metadata so the HUD can render the
+  // triage table from one row instead of grep-scanning run_logs. Migration
+  // 011_runs_metadata.sql backs this column. Read-modify-write to avoid
+  // clobbering peer keys (audit_mode, trace_id) the route handler set at
+  // creation.
+  const auditReport = {
+    runId: run.runId,
+    traceId,
+    productionSlug: manifest.productionSlug,
+    completedAt: new Date().toISOString(),
+    summary,
+    shots: results.map((r) => ({
+      shotId: r.shotId,
+      imagePath: r.imagePath,
+      verdict: r.verdict?.verdict ?? null,
+      aggregateScore: r.verdict?.aggregate_score ?? null,
+      recommendation: r.verdict?.recommendation ?? null,
+      detectedFailureClasses: r.verdict?.detected_failure_classes ?? [],
+      cost: r.verdict?.cost ?? null,
+      latencyMs: r.verdict?.latency_ms ?? null,
+      errorMessage: r.errorMessage,
+    })),
+  };
+  try {
+    const merged = { ...(run.metadata ?? {}), audit_report: auditReport };
+    await updateRun(run.runId, { metadata: merged });
+    await emitLog(
+      run.runId,
+      stageId,
+      "info",
+      `[audit] audit_report written to runs.metadata (${results.length} shots, $${summary.totalCost.toFixed(4)} total).`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await emitLog(
+      run.runId,
+      stageId,
+      "warn",
+      `[audit] failed to persist audit_report blob (non-fatal — log lines retain the data): ${msg}`,
+    );
+  }
+
   // Audit never fails the run on individual WARN/FAIL verdicts — it reports.
   return true;
 }
@@ -748,6 +791,11 @@ async function runInLoopMode(
  * Returns `true` when the stage finished without a runner-fatal error.
  * Per-shot WARN/FAIL is recorded but does NOT fail the run — operators
  * triage the verdicts via the HUD.
+ *
+ * Reads `auditMode` from `run.metadata.audit_mode` (set by the route handler
+ * at creation, persisted via migration 011_runs_metadata.sql). The
+ * `opts.auditMode` override exists for tests + any future runtime injection
+ * that shouldn't persist; production callers leave it undefined.
  */
 export async function executeStillsStage(
   run: Run,
@@ -755,11 +803,18 @@ export async function executeStillsStage(
 ): Promise<boolean> {
   const stageId = "load_manifest";
   const traceId = randomUUID();
+  // Auth source: persisted run.metadata wins; opts is an explicit override
+  // path (tests, future runtime knobs). Production callers leave opts empty.
+  const persistedAuditMode = Boolean(
+    (run.metadata as { audit_mode?: boolean } | undefined)?.audit_mode,
+  );
+  const auditMode = opts.auditMode ?? persistedAuditMode;
+
   await emitLog(
     run.runId,
     stageId,
     "info",
-    `[stills] Starting stills stage. auditMode=${opts.auditMode ?? false}, traceId=${traceId}`,
+    `[stills] Starting stills stage. auditMode=${auditMode} (persisted=${persistedAuditMode}, opts=${opts.auditMode ?? "none"}), traceId=${traceId}`,
   );
 
   if (!STILLS_MODE_ENABLED) {
@@ -777,6 +832,26 @@ export async function executeStillsStage(
     const slug = resolveProductionSlug(run);
     await updateStageStatus(run, "load_manifest", "running");
     manifest = loadCampaignManifest(slug);
+    // Persist trace_id + production_slug to runs.metadata so the HUD shows
+    // them and post-mortem queries can join logs to the run row. Read-modify-
+    // write to preserve audit_mode (route-set) and any future peer keys.
+    try {
+      const merged = {
+        ...(run.metadata ?? {}),
+        trace_id: traceId,
+        production_slug: slug,
+      };
+      const updated = await updateRun(run.runId, { metadata: merged });
+      if (updated) run = updated;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await emitLog(
+        run.runId,
+        stageId,
+        "warn",
+        `[stills] failed to persist trace_id/production_slug to runs.metadata (non-fatal): ${msg}`,
+      );
+    }
     await emitLog(
       run.runId,
       stageId,
@@ -807,7 +882,7 @@ export async function executeStillsStage(
   }
 
   run = await updateStageStatus(run, "grade", "running");
-  const ok = opts.auditMode
+  const ok = auditMode
     ? await runAuditMode(run, manifest, traceId)
     : await runInLoopMode(run, manifest, traceId);
   run = await updateStageStatus(run, "grade", ok ? "completed" : "failed");

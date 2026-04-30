@@ -136,6 +136,16 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       status: "pending" as const,
     }));
 
+    // ADR-004 Phase B (revision after migration 011_runs_metadata.sql):
+    // persist auditMode on the run row at creation time. Survives os-api
+    // restart mid-run; the runner reads run.metadata.audit_mode at exec time
+    // and the HUD can show audit-vs-in-loop status without an in-memory
+    // round-trip. Tim authorized migration 011 explicitly 2026-04-29 PM.
+    const runMetadata: Record<string, unknown> = {};
+    if (mode === "stills") {
+      runMetadata.audit_mode = auditMode ?? false;
+    }
+
     const run: Run = {
       runId: uuidv4(),
       clientId,
@@ -145,16 +155,14 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       stages,
       createdAt: now,
       updatedAt: now,
+      metadata: runMetadata,
     };
 
     const created = await createRun(run);
 
-    // Start execution asynchronously. ADR-004 Phase B: thread auditMode
-    // in-memory through executeRun rather than persisting to a runs.metadata
-    // column — keeps the schema additive-only (009 + 010) and makes audit/in-
-    // loop a runner-level decision the caller owns.
-    const runOpts = mode === "stills" ? { auditMode: auditMode ?? false } : undefined;
-    setImmediate(() => executeRun(created, runOpts).catch(console.error));
+    // Start execution asynchronously. opts is now optional (kept on
+    // executeRun for any future runtime override that shouldn't persist).
+    setImmediate(() => executeRun(created).catch(console.error));
 
     res.status(201).json(created);
   } catch (err) {

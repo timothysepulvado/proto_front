@@ -50,6 +50,20 @@ export interface Run {
   error?: string;
   hitlRequired?: boolean;
   hitlNotes?: string;
+  /**
+   * Free-form per-run JSONB. ADR-004 Phase B uses two keys:
+   *   - `audit_mode: boolean` — set at run creation by the route handler so
+   *     the runner knows audit vs in-loop without depending on in-memory
+   *     state surviving an os-api restart.
+   *   - `audit_report: { runId, traceId, summary, shots: [...] }` — written
+   *     at audit-mode completion as the canonical triage payload the HUD
+   *     queries (one row, vs grep-scanning run_logs).
+   *   - `trace_id: string` — propagated as X-Trace-Id on brand-engine calls.
+   *   - `production_slug: string` — runner-resolved slug for the manifest.
+   * Other modes may add their own keys; runner writes are read-modify-write.
+   * Backed by migration 011_runs_metadata.sql (NOT NULL DEFAULT '{}').
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface DriftMetric {

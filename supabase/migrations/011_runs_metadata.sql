@@ -1,0 +1,35 @@
+-- 011_runs_metadata.sql
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Adds a `metadata` JSONB column to the `runs` table for ADR-004 Phase B.
+--
+-- Tim authorized this migration explicitly 2026-04-29 PM ("migrations are
+-- allowed with full auth") after the harness initially blocked the agent-
+-- inferred schema change in the first Phase B pass. The pivot to in-memory
+-- ExecuteRunOptions (commit ef18a76) was a workaround; this migration is the
+-- production-correct path because:
+--
+--   1. auditMode persisted on the run row survives os-api restarts mid-run
+--      (in-memory state is lost when the process recycles — fragile for any
+--      run that lasts longer than a deploy cycle).
+--   2. audit_report as a JSONB blob is ONE query for the HUD; reconstructing
+--      the triage table from grep'd run_logs text is operator-hostile.
+--   3. trace_id, production_slug, and any future runner-level instruction
+--      have a canonical home rather than scattered across logs/inputs/options.
+--
+-- Pattern: identical to Artifact.metadata + KnownLimitation.metadata — JSONB
+-- with default '{}'. No CHECK constraint; schema is owned by the runner code.
+--
+-- Source: ADR-004 Phase B, brief lines 92-93 ("write to runs.metadata.audit_report").
+--
+-- Idempotent via IF NOT EXISTS. Safe to re-apply.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Verification query (manual smoke after apply):
+--   SELECT column_name, data_type, column_default
+--   FROM information_schema.columns
+--   WHERE table_name = 'runs' AND column_name = 'metadata';
+-- Expected: 1 row, jsonb, '{}'::jsonb default.
+-- ─────────────────────────────────────────────────────────────────────────────

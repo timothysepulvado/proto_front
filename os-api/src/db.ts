@@ -26,6 +26,9 @@ interface DbRun {
   error: string | null;
   hitl_required: boolean;
   hitl_notes: string | null;
+  // ADR-004 Phase B: migration 011_runs_metadata.sql added this column.
+  // Default '{}'::jsonb so existing rows fall through cleanly.
+  metadata: Record<string, unknown> | null;
 }
 
 interface DbRunLog {
@@ -81,6 +84,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
     error: dbRun.error ?? undefined,
     hitlRequired: dbRun.hitl_required,
     hitlNotes: dbRun.hitl_notes ?? undefined,
+    metadata: dbRun.metadata ?? undefined,
   };
 }
 
@@ -135,6 +139,10 @@ function mapRunUpdatesToDb(updates: Partial<Run>): Record<string, unknown> {
   if (updates.error !== undefined) mapped.error = updates.error;
   if (updates.hitlRequired !== undefined) mapped.hitl_required = updates.hitlRequired;
   if (updates.hitlNotes !== undefined) mapped.hitl_notes = updates.hitlNotes;
+  // ADR-004 Phase B: stills runner uses runs.metadata to persist auditMode at
+  // creation and audit_report at completion. Pass through whole-object writes
+  // (callers typically read-modify-write to avoid clobbering peer keys).
+  if (updates.metadata !== undefined) mapped.metadata = updates.metadata;
   return mapped;
 }
 
@@ -155,6 +163,10 @@ export async function createRun(run: Run): Promise<Run> {
       error: run.error ?? null,
       hitl_required: run.hitlRequired ?? false,
       hitl_notes: run.hitlNotes ?? null,
+      // ADR-004 Phase B: stills runner reads metadata.audit_mode at execution
+      // time to choose the audit vs in-loop path. Default '{}' if caller
+      // hasn't set it so the column never holds NULL (matches DB default).
+      metadata: run.metadata ?? {},
     })
     .select()
     .single();
