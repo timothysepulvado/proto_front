@@ -153,6 +153,25 @@ Each shot has a hard spend ceiling across all levels: **~\$4.00**. The user mess
 
 Human watchers also see these signals via SSE — they may manually cancel the escalation on their side. Your job is to not loop unnecessarily in the first place.
 
+## Rule 6 — Direction integrity (autonomous-ops, non-negotiable)
+When the system prompt's \`## CAMPAIGN DIRECTION\` section is present (music-video campaigns post-2026-04-30), it carries:
+- A canonical \`Mantra\` string that ALL proposed prompts must honor
+- An optional \`## ABANDONED DIRECTIONS\` list naming explicitly-rejected approaches with provenance
+
+**Before** finalizing any \`new_still_prompt\`, \`new_veo_prompt\`, or \`new_negative_prompt\`, you MUST:
+
+1. **Mantra check.** Does the proposed prompt honor the Mantra? Specifically: does it preserve the campaign's documentary-dry / aftermath / realistic / no-gloss tone (or whatever the Mantra specifies)?
+2. **Abandoned-direction check.** Does the proposed approach match anything on the \`## ABANDONED DIRECTIONS\` list? Examples of matches: a prompt that re-introduces "mech-heavy hero framing" when that direction is rejected; a prompt that brings back gloss/polish when the campaign is documentary-dry; a prompt that re-introduces parade-formation symmetry when explicitly canonical-rejected.
+
+If the proposed prompt fails EITHER check:
+- **Escalate the level** (L1 → L2, L2 → L3) — direction reversion almost never resolves at prompt level because the underlying problem is composition/framing/aesthetic posture, not language.
+- **Propose a structurally different approach** that satisfies the Mantra and avoids the abandoned direction.
+- **Document in \`reasoning\`**: e.g., "Rule 6 fired — proposed approach X matched abandoned direction \`mech_heavy_hero_framing\`; escalating to L2 with landscape-dominant composition instead."
+
+Pass-through: if the campaign has NO \`## CAMPAIGN DIRECTION\` block in the system prompt (legacy campaigns or campaigns where direction wasn't ingested), Rule 6 is a no-op.
+
+Why this matters: the catalog detects symptoms (mech-heavy composition, parade formation, etc.) AFTER the still is rendered. Rule 6 stops the orchestrator from PROPOSING those symptoms in the first place — which is the cheaper and more reliable intervention.
+
 ## Staleness discipline (tool use)
 Before proposing any **new** model id, tool version, SDK version, prompt pattern, external fact, or industry claim that could have changed since your training cutoff, you MUST use the \`web_search\` tool to verify currency. Do NOT rely on training-data knowledge for anything model-version, tool-version, or industry-news related. The \`Today's date\` in the user message is authoritative — reason about staleness relative to it, not your training cutoff.
 
@@ -245,6 +264,39 @@ export function buildSystemPrompt(musicVideoContext?: MusicVideoContext): string
       parts.push(
         `- Shot ${s.shot_number} (${s.beat_name}): ${s.visual_intent_summary}`,
       );
+    }
+
+    // ─── Phase 5 (2026-04-30) — CAMPAIGN DIRECTION + ABANDONED DIRECTIONS ─
+    // These sections drive Rule 6 (direction integrity). They live in the
+    // cache-stable system prompt because they're per-campaign, not per-shot
+    // — the 5-minute Anthropic ephemeral cache TTL amortizes the token cost.
+    if (musicVideoContext.direction_mantra || (musicVideoContext.abandoned_directions?.length ?? 0) > 0) {
+      parts.push("");
+      parts.push(`## CAMPAIGN DIRECTION (canonical, applies to ALL shots)`);
+      if (musicVideoContext.direction_mantra) {
+        parts.push(`**Mantra:** \`${musicVideoContext.direction_mantra}\``);
+        parts.push("");
+        parts.push(
+          `Every \`new_still_prompt\` and \`new_veo_prompt\` you propose MUST honor this mantra. ` +
+          `Per Rule 6 (direction integrity), violation triggers level escalation, not a prompt rewrite.`,
+        );
+      }
+
+      const abandoned = musicVideoContext.abandoned_directions ?? [];
+      if (abandoned.length > 0) {
+        parts.push("");
+        parts.push(`### ABANDONED DIRECTIONS (canonical-rejected — do NOT re-introduce)`);
+        for (const a of abandoned) {
+          const refStr = a.snapshot_ref ? ` [ref: ${a.snapshot_ref}]` : "";
+          parts.push(`- \`${a.name}\` (rejected ${a.rejected_at})${refStr}`);
+          parts.push(`    Reason: ${a.reason}`);
+        }
+        parts.push("");
+        parts.push(
+          `Per Rule 6: before finalizing any proposed prompt, verify it does NOT re-introduce any direction listed above. ` +
+          `If it does, escalate the level (L1→L2 or L2→L3) and propose a structurally different approach.`,
+        );
+      }
     }
   }
   return parts.join("\n");

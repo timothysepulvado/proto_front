@@ -412,6 +412,105 @@ check("buildUserMessage: section order is SHOT POSITION → NEIGHBOR SHOTS → S
   assert.ok(iSp > 0 && iNs > iSp && iSb > iNs && iQa > iSb, "section order wrong");
 });
 
+// ─── Phase 5 (2026-04-30): Direction integrity (Rule 6) gate ──────────────
+//
+// Closes the loop on Tim's 2026-04-30 observation that some Drift MV stills
+// regressed to mech-heavy. The orchestrator now sees campaign-level direction
+// as a first-class axiom AND a list of explicitly-rejected approaches it
+// must not propose. These checks pin the system-prompt rendering of
+// MusicVideoContext.direction_mantra and .abandoned_directions.
+
+const MV_CONTEXT_WITH_DIRECTION: MusicVideoContext = {
+  ...MV_CONTEXT,
+  direction_mantra:
+    "Cinematically beautiful · Documentary dry · No effects/gloss/polish · Nothing falling out of the sky",
+  abandoned_directions: [
+    {
+      name: "mech_heavy_hero_framing",
+      rejected_at: "2026-04-25",
+      reason:
+        "Tim pivoted from mech-heavy to aftermath/realistic. Multiple mechs as primary subjects, parade-formation arrangements, action-figure diorama composition, and mech-as-hero framing are all explicitly rejected.",
+      snapshot_ref: "manifest_pre_pivot_backup.json",
+    },
+  ],
+};
+
+check("buildSystemPrompt(mvc+direction): emits CAMPAIGN DIRECTION section", () => {
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  // Section heading is rendered with the unique-to-emitted-section
+  // "(canonical, applies to ALL shots)" suffix; Rule 6 doctrine just
+  // mentions the bare phrase, so this assertion targets the rendered form.
+  assert.ok(
+    sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION section missing when direction_mantra is set",
+  );
+  assert.ok(
+    sp.includes("Cinematically beautiful"),
+    "mantra string not rendered",
+  );
+});
+
+check("buildSystemPrompt(mvc+direction): emits ABANDONED DIRECTIONS list", () => {
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  assert.ok(
+    sp.includes("ABANDONED DIRECTIONS"),
+    "ABANDONED DIRECTIONS heading missing",
+  );
+  assert.ok(
+    sp.includes("mech_heavy_hero_framing"),
+    "abandoned-direction name not rendered",
+  );
+  assert.ok(
+    sp.includes("rejected 2026-04-25"),
+    "abandoned-direction date not rendered",
+  );
+  assert.ok(
+    sp.includes("manifest_pre_pivot_backup.json"),
+    "snapshot_ref pointer not rendered",
+  );
+});
+
+check("buildSystemPrompt(mvc): doctrine carries Rule 6 direction integrity", () => {
+  // Rule 6 lives in SYSTEM_PROMPT_CORE so it's present whether or not the
+  // campaign has direction data — the rule degrades to no-op without context.
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  assert.ok(
+    sp.includes("Rule 6 — Direction integrity"),
+    "Rule 6 direction-integrity hard rule missing from doctrine",
+  );
+  assert.ok(
+    sp.includes("direction reversion almost never resolves at prompt level"),
+    "Rule 6 escalation guidance missing",
+  );
+});
+
+check("buildSystemPrompt(mvc, no direction fields): no rendered CAMPAIGN DIRECTION section", () => {
+  // Back-compat: campaigns seeded before Phase 5 that don't carry
+  // direction_mantra/abandoned_directions still work — Rule 6 becomes a no-op.
+  // We assert on the rendered-section marker (with "(canonical..." suffix),
+  // not the bare phrase, because Rule 6 doctrine references the section by
+  // name and that reference is always present in the cached doctrine.
+  const sp = buildSystemPrompt(MV_CONTEXT);
+  assert.ok(
+    !sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION rendered-section leaked into MVC without direction fields",
+  );
+  assert.ok(
+    !sp.includes("### ABANDONED DIRECTIONS (canonical-rejected"),
+    "ABANDONED DIRECTIONS rendered-section leaked into MVC without direction fields",
+  );
+});
+
+check("buildSystemPrompt(non-MV): no rendered CAMPAIGN DIRECTION section", () => {
+  const sp = buildSystemPrompt();
+  // Same logic: Rule 6 doctrine references "## CAMPAIGN DIRECTION" by name;
+  // assert on the rendered-section marker only.
+  assert.ok(
+    !sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION rendered-section leaked into non-MV prompt",
+  );
+});
+
 // ─── Run ─────────────────────────────────────────────────────────────────
 
 let passed = 0;

@@ -110,6 +110,23 @@ export interface ManifestShot {
   pivot_rewrite_history?: Array<Record<string, unknown>>;
 }
 
+/**
+ * Phase 5 (2026-04-30) — directional integrity payload mirrored from
+ * `manifest.directional_history`. Threaded into the critic's `story_context`
+ * so brand-engine `_build_critic_system_prompt` can emit the
+ * `## CAMPAIGN DIRECTION` axiom + `## ABANDONED DIRECTIONS` list.
+ */
+export interface DirectionalHistory {
+  current_direction_mantra?: string;
+  current_direction_summary?: string;
+  abandoned_directions?: Array<{
+    name: string;
+    rejected_at: string;
+    reason: string;
+    snapshot_ref?: string;
+  }>;
+}
+
 export interface ManifestPayload {
   productionSlug: string;
   shots: ManifestShot[];
@@ -117,6 +134,10 @@ export interface ManifestPayload {
     brief?: string;
     narrative?: string;
     lyrics?: string;
+    /** Phase 5: campaign direction axiom + abandoned-directions list. The
+     *  brand-engine critic reads this from `story_context.directional_history`
+     *  and emits a `## CAMPAIGN DIRECTION` section in its system prompt. */
+    directional_history?: DirectionalHistory;
   };
   anchorPaths: string[];
   referencePaths: string[];
@@ -143,7 +164,10 @@ export function loadCampaignManifest(productionSlug: string): ManifestPayload {
   }
 
   const raw = readFileSync(manifestPath, "utf8");
-  const parsed = JSON.parse(raw) as { shots?: ManifestShot[] };
+  const parsed = JSON.parse(raw) as {
+    shots?: ManifestShot[];
+    directional_history?: DirectionalHistory;
+  };
   if (!Array.isArray(parsed.shots)) {
     throw new Error(`Manifest at ${manifestPath} is missing shots[].`);
   }
@@ -163,6 +187,19 @@ export function loadCampaignManifest(productionSlug: string): ManifestPayload {
         // Non-fatal: the critic operates without story context, just less
         // grounded. Logged at run start.
       }
+    }
+  }
+
+  // Phase 5: thread the directional_history block from manifest top-level
+  // into story_context so the critic's `## CAMPAIGN DIRECTION` axiom fires.
+  // Defensive: only attach when the shape looks correct (object with at least
+  // a mantra OR an abandoned_directions array).
+  if (parsed.directional_history && typeof parsed.directional_history === "object") {
+    const dh = parsed.directional_history;
+    const hasMantra = typeof dh.current_direction_mantra === "string";
+    const hasAbandoned = Array.isArray(dh.abandoned_directions);
+    if (hasMantra || hasAbandoned) {
+      storyContext.directional_history = dh;
     }
   }
 

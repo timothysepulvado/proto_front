@@ -499,6 +499,34 @@ export interface MusicVideoContext {
   }>;
   ingested_at: string;
   manifest_sha256: string;
+
+  // ─── Phase 5 (2026-04-30) — campaign direction integrity ───────────────
+  // Closes the loop on Tim's 2026-04-30 observation that some Drift MV
+  // stills regressed back to mech-heavy after the 2026-04-25 aftermath/
+  // realistic pivot. The orchestrator now sees campaign-level direction as
+  // a first-class axiom AND a list of explicitly-rejected approaches it
+  // must not propose. Both fields are optional for back-compat — campaigns
+  // seeded before this addition continue working without these.
+
+  /** Canonical mantra string applying to ALL shots in this campaign.
+   *  Drift MV: "Cinematically beautiful · Documentary dry · No effects/
+   *  gloss/polish · Nothing falling out of the sky". Sourced from
+   *  manifest.directional_history.current_direction_mantra (manifest is
+   *  the source of truth; the JSONB blob mirrors at MVC-ingest time). */
+  direction_mantra?: string;
+
+  /** Explicitly-rejected approaches the orchestrator must NOT propose. Each
+   *  entry has a short snake_case name + a date + 1-2 sentence reason. The
+   *  orchestrator's HARD RULE 6 (direction integrity) verifies any proposed
+   *  prompt against this list before recommending regen.
+   *
+   *  Drift MV (2026-04-30): one entry — `mech_heavy_hero_framing`. */
+  abandoned_directions?: Array<{
+    name: string;
+    rejected_at: string; // YYYY-MM-DD
+    reason: string;
+    snapshot_ref?: string; // Filesystem snapshot pointer (ADR-005 lightweight)
+  }>;
 }
 
 /**
