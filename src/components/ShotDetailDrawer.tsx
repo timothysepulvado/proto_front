@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import * as api from "../api";
 import type { Artifact, CampaignDeliverable, DeliverableStatus, ProductionShotState, RunLog } from "../api";
+import type { AuditReportShot } from "../lib/auditReport";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -49,6 +50,15 @@ type VideoGradeResult = {
   detectedFailureClasses: string[];
   reasoning: string;
   consensusNote: string | null;
+};
+
+type CriticDisplayResult = VideoGradeResult & {
+  sourceLabel?: string;
+  recommendation?: string | null;
+  cost?: number | null;
+  latencyMs?: number | null;
+  imagePath?: string | null;
+  errorMessage?: string | null;
 };
 
 type OrchestratorDecisionPayload = {
@@ -102,6 +112,8 @@ interface ShotDetailDrawerProps {
   shotNumber: number | null;
   deliverableId: string | null;
   runId?: string;
+  initialTab?: DrawerTab;
+  auditShot?: AuditReportShot | null;
   onClose: () => void;
 }
 
@@ -293,7 +305,7 @@ function buildTimelineEvents(
   const shortId = deliverableId.slice(0, 8).toLowerCase();
   const shotMatchers = shotNumber === null
     ? []
-    : [`shot ${shotNumber}`, `shot_${shotNumber}`, `shot#${shotNumber}`, `shot_number=${shotNumber}`];
+    : [`shot ${shotNumber}`, `shot_${shotNumber}`, `shot#${shotNumber}`, `shot=${shotNumber}`, `shot_number=${shotNumber}`];
 
   const filteredLogs = logs.filter((log) => {
     const message = log.message.toLowerCase();
@@ -356,6 +368,37 @@ async function fetchTrail(runId: string, deliverableId: string): Promise<Deliver
   return report.deliverables?.find((item) => item.deliverable?.id === deliverableId) ?? null;
 }
 
+function formatCriticMeta(value: string | null | undefined) {
+  return value ? value.replace(/_/g, " ") : "—";
+}
+
+function formatMs(value: number | null | undefined) {
+  if (value == null) return "—";
+  return value < 1000 ? `${Math.round(value)}ms` : `${Math.round(value / 1000)}s`;
+}
+
+function buildAuditCriticPayload(auditShot: AuditReportShot | null | undefined): CriticDisplayResult | null {
+  if (!auditShot) return null;
+  if (!auditShot.verdict && !auditShot.errorMessage) return null;
+
+  return {
+    verdict: auditShot.verdict ?? "FAIL",
+    aggregateScore: auditShot.aggregateScore,
+    criteria: [],
+    detectedFailureClasses: auditShot.detectedFailureClasses,
+    reasoning: auditShot.errorMessage
+      ? `Audit critic error: ${auditShot.errorMessage}`
+      : "Audit-mode report persisted aggregate verdict, recommendation, failure classes, cost, and latency. Per-criterion scores and full reasoning text are intentionally deferred to Phase E+.",
+    consensusNote: null,
+    sourceLabel: "Audit report",
+    recommendation: auditShot.recommendation,
+    cost: auditShot.cost,
+    latencyMs: auditShot.latencyMs,
+    imagePath: auditShot.imagePath,
+    errorMessage: auditShot.errorMessage,
+  };
+}
+
 function TimelineIcon({ kind }: { kind: TimelineEvent["kind"] }) {
   if (kind === "artifact") return <Film size={12} className="text-cyan-300" />;
   if (kind === "grade") return <CheckCircle2 size={12} className="text-emerald-300" />;
@@ -363,7 +406,7 @@ function TimelineIcon({ kind }: { kind: TimelineEvent["kind"] }) {
   return <Archive size={12} className="text-white/45" />;
 }
 
-export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onClose }: ShotDetailDrawerProps) {
+export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, initialTab, auditShot, onClose }: ShotDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>("narrative");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
@@ -378,7 +421,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    setActiveTab("narrative");
+    setActiveTab(initialTab ?? "narrative");
     setExpandedDecisionId(null);
     setArtifacts([]);
     setLogs([]);
@@ -389,7 +432,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
     if (!deliverableId) {
       setIsLoading(false);
     }
-  }, [deliverableId, runId]);
+  }, [deliverableId, initialTab, runId]);
 
   useEffect(() => {
     if (!deliverableId) return;
@@ -505,6 +548,8 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
     );
   }, [trail]);
   const qaVerdict = useMemo(() => extractQaVerdict(decisionsNewestFirst), [decisionsNewestFirst]);
+  const auditQaVerdict = useMemo(() => buildAuditCriticPayload(auditShot), [auditShot]);
+  const criticVerdict: CriticDisplayResult | null = auditQaVerdict ?? qaVerdict;
   const resolvedShotNumber = narrative?.shot_number ?? shotNumber;
   const productionShot = productionShots.find((item) => item.shotNumber === resolvedShotNumber) ?? null;
   const previousProductionShot = productionShots.find((item) => item.shotNumber === (resolvedShotNumber ?? 0) - 1) ?? null;
@@ -671,24 +716,45 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
               </div>
             </div>
           ) : activeTab === "critic" ? (
-            qaVerdict ? (
+            criticVerdict ? (
               <div className="space-y-4">
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <span className={`rounded-full border px-2.5 py-1 text-[9px] font-mono uppercase tracking-widest ${verdictStyles[qaVerdict.verdict]}`}>
-                      {qaVerdict.verdict}
+                    <span className={`rounded-full border px-2.5 py-1 text-[9px] font-mono uppercase tracking-widest ${verdictStyles[criticVerdict.verdict]}`}>
+                      {criticVerdict.verdict}
                     </span>
                     <span className="text-3xl font-semibold tracking-tight text-white">
-                      {qaVerdict.aggregateScore !== null ? qaVerdict.aggregateScore.toFixed(1) : "—"}
+                      {criticVerdict.aggregateScore !== null ? criticVerdict.aggregateScore.toFixed(1) : "—"}
                     </span>
                   </div>
                 </div>
 
-                {qaVerdict.criteria.length > 0 && (
+                {(criticVerdict.sourceLabel || criticVerdict.recommendation || criticVerdict.cost != null || criticVerdict.latencyMs != null) && (
+                  <div className="grid grid-cols-2 gap-3 text-[9px] font-mono uppercase tracking-wider text-white/55">
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                      <p className="text-white/35">Source</p>
+                      <p className="mt-1 text-white">{criticVerdict.sourceLabel ?? "Escalation trail"}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                      <p className="text-white/35">Recommendation</p>
+                      <p className="mt-1 text-white">{formatCriticMeta(criticVerdict.recommendation)}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                      <p className="text-white/35">Cost</p>
+                      <p className="mt-1 text-white">{formatMoney(criticVerdict.cost)}</p>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                      <p className="text-white/35">Latency</p>
+                      <p className="mt-1 text-white">{formatMs(criticVerdict.latencyMs)}</p>
+                    </div>
+                  </div>
+                )}
+
+                {criticVerdict.criteria.length > 0 && (
                   <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                     <p className="text-[8px] font-mono uppercase tracking-widest text-white/45">Criteria</p>
                     <div className="mt-3 space-y-3">
-                      {qaVerdict.criteria.map((criterion) => (
+                      {criticVerdict.criteria.map((criterion) => (
                         <div key={criterion.name} className="space-y-1.5">
                           <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-white/60">
                             <span>{criterion.name}</span>
@@ -707,7 +773,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                   <p className="text-[8px] font-mono uppercase tracking-widest text-white/45">Failure classes</p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    {qaVerdict.detectedFailureClasses.length > 0 ? qaVerdict.detectedFailureClasses.map((failureClass) => (
+                    {criticVerdict.detectedFailureClasses.length > 0 ? criticVerdict.detectedFailureClasses.map((failureClass) => (
                       <span key={failureClass} className="rounded-full border border-red-500/20 bg-red-500/10 px-2 py-1 text-[8px] font-mono uppercase tracking-widest text-red-300">
                         {failureClass.replace(/_/g, " ")}
                       </span>
@@ -717,9 +783,12 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, onC
 
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
                   <p className="text-[8px] font-mono uppercase tracking-widest text-white/45">Critic reasoning</p>
-                  <p className="mt-3 whitespace-pre-wrap text-[12px] leading-6 text-white/70">{qaVerdict.reasoning || "No critic reasoning recorded."}</p>
-                  {qaVerdict.consensusNote && (
-                    <p className="mt-3 text-[11px] italic leading-5 text-white/50">{qaVerdict.consensusNote}</p>
+                  <p className="mt-3 whitespace-pre-wrap text-[12px] leading-6 text-white/70">{criticVerdict.reasoning || "No critic reasoning recorded."}</p>
+                  {criticVerdict.imagePath && (
+                    <p className="mt-3 break-all text-[10px] font-mono leading-5 text-white/35">Image: {criticVerdict.imagePath}</p>
+                  )}
+                  {criticVerdict.consensusNote && (
+                    <p className="mt-3 text-[11px] italic leading-5 text-white/50">{criticVerdict.consensusNote}</p>
                   )}
                 </div>
               </div>

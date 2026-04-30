@@ -28,6 +28,7 @@ export interface Run {
   error?: string;
   hitlRequired?: boolean;
   hitlNotes?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface RunLog {
@@ -82,6 +83,7 @@ interface DbRun {
   error: string | null;
   hitl_required: boolean;
   hitl_notes: string | null;
+  metadata: Record<string, unknown> | null;
 }
 
 interface DbRunLog {
@@ -136,6 +138,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
     error: dbRun.error ?? undefined,
     hitlRequired: dbRun.hitl_required,
     hitlNotes: dbRun.hitl_notes ?? undefined,
+    metadata: dbRun.metadata ?? undefined,
   };
 }
 
@@ -268,6 +271,29 @@ export async function getClientRuns(clientId: string): Promise<Run[]> {
   }
 
   return (data as DbRun[]).map(mapDbRunToRun);
+}
+
+export async function getLatestStillsAuditRun(campaignId: string): Promise<Run | null> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .eq("mode", "stills")
+    .order("created_at", { ascending: false })
+    .limit(25);
+
+  if (error) {
+    throw new Error(`Failed to get latest stills audit run: ${error.message}`);
+  }
+
+  const auditRuns = (data as DbRun[])
+    .map(mapDbRunToRun)
+    .filter((run) => run.metadata?.audit_mode === true || Boolean(run.metadata?.audit_report));
+
+  return auditRuns.find((run) => run.status === "completed" && Boolean(run.metadata?.audit_report))
+    ?? auditRuns.find((run) => run.status === "running" || run.status === "pending")
+    ?? auditRuns[0]
+    ?? null;
 }
 
 // Update run status
@@ -1048,6 +1074,21 @@ export function subscribeToDriftAlerts(
 // ============ Platform Variant Operations ============
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
+
+export async function createStillsAuditRun(clientId: string, campaignId: string): Promise<Run> {
+  const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "stills",
+      campaignId,
+      auditMode: true,
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Run;
+}
 
 export interface PlatformVariant {
   platform: string;

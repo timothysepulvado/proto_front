@@ -32,6 +32,8 @@ import ReshootPanel from "./components/ReshootPanel";
 import AnchorStillPanel, { EmptyAnchorState } from "./components/AnchorStillPanel";
 import ActiveClientBadge from "./components/ActiveClientBadge";
 import CampaignDashboard from "./components/CampaignDashboard";
+import AuditTriageTable from "./components/AuditTriageTable";
+import type { AuditReportShot } from "./lib/auditReport";
 import {
   createRun,
   cancelRun,
@@ -53,6 +55,14 @@ import {
 type Orientation = "horizontal" | "vertical";
 type PillarId = "memory" | "creative" | "drift" | "review" | "insight";
 type CreativeSubtab = "deliverables" | "reshoots" | "stills";
+type ShotDrawerTab = "narrative" | "critic" | "orchestrator" | "timeline";
+type SelectedShot = {
+  n: number | null;
+  id: string | null;
+  runId?: string;
+  auditShot?: AuditReportShot | null;
+  initialTab?: ShotDrawerTab;
+};
 
 type LogEntry = {
   time: string;
@@ -330,7 +340,7 @@ export default function App() {
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
-  const [selectedShot, setSelectedShot] = useState<{ n: number | null; id: string | null }>({ n: null, id: null });
+  const [selectedShot, setSelectedShot] = useState<SelectedShot>({ n: null, id: null });
   const [selectedAnchorShot, setSelectedAnchorShot] = useState<number | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -478,7 +488,7 @@ export default function App() {
   const isAnchorStillLayout = activePillar === "creative" && creativeSubtab === "stills" && isFeaturedClient && Boolean(selectedCampaign);
   const workspaceMaxClass = isAnchorStillLayout
     ? "max-w-[1320px]"
-    : isCampaignDashboard
+    : isCampaignDashboard || selectedCampaign
       ? "max-w-[1180px]"
       : "max-w-[620px]";
   const selectedCampaignName = selectedCampaign?.name.split("—")[0]?.trim() || selectedCampaign?.name || "Campaign";
@@ -620,6 +630,54 @@ export default function App() {
   useEffect(() => {
     return teardownRunSubscriptions;
   }, [teardownRunSubscriptions]);
+
+  const handleAuditLog = useCallback((log: RunLog) => {
+    if (log.stage && log.stage !== "system") {
+      setCurrentStage(log.stage);
+    }
+    setLogs((prev) => {
+      const entry: LogEntry = {
+        time: new Date(log.timestamp).toLocaleTimeString("en-US", { hour12: false }),
+        msg: log.message,
+        status: log.level === "error" ? "WAIT" : log.level === "warn" ? "BUSY" : "OK",
+        stage: log.stage,
+      };
+      const next = [...prev, entry];
+      if (next.length > 50) next.shift();
+      return next;
+    });
+    setTimeout(() => {
+      if (logsContainerRef.current) {
+        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+      }
+    }, 10);
+  }, []);
+
+  const handleAuditRunStarted = useCallback((run: Run) => {
+    teardownRunSubscriptions();
+    setCurrentRun(run);
+    setRunError(null);
+    setIsRunning(true);
+    setCurrentStage("grade");
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs([{ time: now, msg: `AUDIT_STARTED_${run.runId.slice(0, 8).toUpperCase()}`, status: "BUSY", stage: "grade" }]);
+  }, [teardownRunSubscriptions]);
+
+  const handleAuditRunSettled = useCallback((run: Run) => {
+    setCurrentRun(run);
+    setIsRunning(false);
+    setCurrentStage(null);
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [
+      ...prev,
+      {
+        time: now,
+        msg: `AUDIT_${run.status.toUpperCase()}`,
+        status: run.status === "completed" ? "OK" : "WAIT",
+        stage: "complete",
+      },
+    ]);
+  }, []);
 
   const handleStartRun = useCallback(async (mode: RunMode) => {
     if (!activeClient) return;
@@ -1135,6 +1193,24 @@ export default function App() {
                             <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
                           ) : (
                             <>
+                              {isFeaturedClient && (
+                                <AuditTriageTable
+                                  key={`audit:${activeClient}:${currentRun.campaignId}`}
+                                  clientId={currentClient.id}
+                                  campaignId={currentRun.campaignId}
+                                  campaignName={selectedCampaignName}
+                                  onAuditRunStarted={handleAuditRunStarted}
+                                  onAuditRunSettled={handleAuditRunSettled}
+                                  onAuditLog={handleAuditLog}
+                                  onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
+                                    n: shotNumber,
+                                    id: deliverableId,
+                                    runId,
+                                    auditShot,
+                                    initialTab: "critic",
+                                  })}
+                                />
+                              )}
                               {isFeaturedClient && <DeliverableTimeline />}
                               <DeliverableTracker
                                 key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
@@ -1369,10 +1445,12 @@ export default function App() {
       </div>
 
       <ShotDetailDrawer
-        key={`${activeClient}:${currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}`}
+        key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}`}
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
-        runId={currentRun?.runId}
+        runId={selectedShot.runId ?? currentRun?.runId}
+        initialTab={selectedShot.initialTab}
+        auditShot={selectedShot.auditShot}
         onClose={() => setSelectedShot({ n: null, id: null })}
       />
 
