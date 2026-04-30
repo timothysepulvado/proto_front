@@ -11,7 +11,7 @@ import os
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
 from brand_engine import __version__
 from brand_engine.core.embeddings import get_embedding_client
@@ -34,7 +34,10 @@ from brand_engine.core.models import (
     VideoGradeRequest,
     VideoGradeResult,
 )
-from brand_engine.core.image_grader import grade_image_v2 as _grade_image_v2
+from brand_engine.core.image_grader import (
+    _TRACE_ID_CTX as _IMAGE_GRADER_TRACE_ID_CTX,
+    grade_image_v2 as _grade_image_v2,
+)
 from brand_engine.core.pinecone_client import check_connectivity as check_pinecone
 from brand_engine.core.retriever import DualFusionRetriever, load_brand_profile
 from brand_engine.core.trainer import ThresholdTrainer
@@ -227,7 +230,10 @@ async def grade_video(request: VideoGradeRequest):
 
 
 @app.post("/grade_image_v2", response_model=ImageGradeResult)
-async def grade_image_v2_route(request: ImageGradeRequest):
+async def grade_image_v2_route(
+    request: ImageGradeRequest,
+    x_trace_id: str | None = Header(default=None, alias="X-Trace-Id"),
+):
     """Grade a single still image using Gemini 3 Pro Vision (ADR-004 Phase A).
 
     Two modes:
@@ -242,7 +248,19 @@ async def grade_image_v2_route(request: ImageGradeRequest):
 
     Returns ImageGradeResult — the JSON contract that os-api's runner.ts
     (Phase B) will consume to feed orchestrator escalation decisions.
+
+    Phase B+ #2 (2026-04-30): the optional ``X-Trace-Id`` request header is
+    bound to a per-request ContextVar so the critic_call metric emit carries
+    the caller's trace ID. Lets us correlate os-api logs with brand-engine
+    logs across the X-call boundary.
     """
+    # Bind the caller's trace ID for the duration of this request.
+    # ContextVar.set returns a Token we MUST reset to keep the previous
+    # request's value from leaking onto a recycled task. Truncate to 12 chars
+    # so log lines stay aligned with the legacy uuid hex format.
+    trace_token = None
+    if x_trace_id:
+        trace_token = _IMAGE_GRADER_TRACE_ID_CTX.set(x_trace_id[:64])
     try:
         result_dict = _grade_image_v2(
             image_path=request.image_path,
@@ -274,6 +292,11 @@ async def grade_image_v2_route(request: ImageGradeRequest):
     except Exception as e:
         logger.error("Image grade failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Always reset the ContextVar so a subsequent request running on the
+        # same task context doesn't inherit this caller's trace ID.
+        if trace_token is not None:
+            _IMAGE_GRADER_TRACE_ID_CTX.reset(trace_token)
 
 
 @app.post("/ingest", response_model=IngestResult)

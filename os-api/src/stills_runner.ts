@@ -904,9 +904,14 @@ export async function executeStillsStage(
 
   // Health check the brand-engine sidecar before fanning out — operators
   // get a clear failure rather than 30 timeouts when :8100 is down.
+  // Phase B+ #4 (2026-04-30): timeout bumped 5s → 30s. Under load,
+  // brand-engine's /health endpoint serializes behind the request queue
+  // (single-worker uvicorn + sync handlers on the threadpool). A 5s budget
+  // produced spurious aborts during concurrent audit/regen runs; 30s lines
+  // up with the per-call budget on /grade_image_v2 and is operator-friendly.
   try {
     const health = await fetch(`${process.env.BRAND_ENGINE_URL ?? "http://localhost:8100"}/health`, {
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(30_000),
     });
     if (!health.ok) {
       await emitLog(run.runId, "grade", "error", `[stills] brand-engine /health returned HTTP ${health.status}. Aborting.`);

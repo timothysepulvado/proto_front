@@ -227,6 +227,35 @@ class TestTraceId:
         assert len(b) == 12
         assert a != b
 
+    def test_contextvar_takes_precedence_over_env(self, monkeypatch):
+        """Phase B+ #2 (2026-04-30): X-Trace-Id from the FastAPI route is bound
+        to a ContextVar that must win over the BRAND_ENGINE_TRACE_ID env var.
+        """
+        from brand_engine.core.image_grader import _TRACE_ID_CTX
+
+        monkeypatch.setenv("BRAND_ENGINE_TRACE_ID", "from-env-fixed")
+        token = _TRACE_ID_CTX.set("from-x-trace-header")
+        try:
+            assert _trace_id() == "from-x-trace-header"
+        finally:
+            _TRACE_ID_CTX.reset(token)
+        # After reset: env var fallback re-engages.
+        assert _trace_id() == "from-env-fixed"
+
+    def test_contextvar_reset_returns_to_uuid_when_no_env(self, monkeypatch):
+        """Reset of the per-request ContextVar must restore the default
+        uuid-fresh resolution path (no leakage of a prior caller's trace ID
+        onto a recycled task context)."""
+        from brand_engine.core.image_grader import _TRACE_ID_CTX
+
+        monkeypatch.delenv("BRAND_ENGINE_TRACE_ID", raising=False)
+        token = _TRACE_ID_CTX.set("caller-trace-abc")
+        assert _trace_id() == "caller-trace-abc"
+        _TRACE_ID_CTX.reset(token)
+        post_reset = _trace_id()
+        assert post_reset != "caller-trace-abc"
+        assert len(post_reset) == 12
+
 
 # ─── Structured log emission ────────────────────────────────────────────────
 

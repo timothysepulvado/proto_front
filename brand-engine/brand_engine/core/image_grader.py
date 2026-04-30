@@ -33,6 +33,7 @@ it part of the production critical path.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import mimetypes
@@ -285,9 +286,30 @@ def _get_client(backend: str) -> genai.Client:
     return _genai_client
 
 
+# Phase B+ #2 (2026-04-30): per-request trace ID propagation. The FastAPI
+# route at /grade_image_v2 reads the X-Trace-Id request header and binds it
+# to this ContextVar for the duration of the call, so emitted metrics carry
+# the caller's trace ID instead of a fresh-per-call uuid. ContextVar (not
+# env var) is the right primitive here — env var would race under uvicorn
+# concurrency. Synchronous helpers called from the async route inherit the
+# context automatically.
+_TRACE_ID_CTX: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "brand_engine_trace_id", default=None
+)
+
+
 def _trace_id() -> str:
-    """Return a 12-char trace ID. Honors ``BRAND_ENGINE_TRACE_ID`` if set
-    (caller-propagated trace), else generates a fresh hex-12."""
+    """Return a 12-char trace ID.
+
+    Resolution order:
+      1. ContextVar set by the FastAPI route from the X-Trace-Id header
+         (per-request, isolated under concurrency).
+      2. ``BRAND_ENGINE_TRACE_ID`` env var (fallback for CLI / test contexts).
+      3. Fresh ``uuid.uuid4().hex[:12]`` (no caller trace propagated).
+    """
+    ctx_val = _TRACE_ID_CTX.get()
+    if ctx_val:
+        return ctx_val
     return os.getenv("BRAND_ENGINE_TRACE_ID") or uuid.uuid4().hex[:12]
 
 
