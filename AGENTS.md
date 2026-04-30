@@ -120,10 +120,12 @@ cd ~/Temp-gen && python main.py veo generate    # Veo 3.1
 |------|-------------|
 | `full` | Complete pipeline: ingest → generate → drift → hitl → export |
 | `ingest` | Index brand assets only |
-| `images` | Generate images only |
+| `images` | Generate images only (generic Temp-gen path) |
 | `video` | Generate video only |
 | `drift` | Run drift check only |
 | `export` | Package artifacts |
+| `regrade` | Re-grade existing artifacts via consensus critic + escalation loop, no fresh generation up-front |
+| `stills` | **ADR-004 Phase B.** Critic-in-loop on a campaign's stills. Body field `auditMode: true` runs parallel critics with a triage report (`runs.metadata.audit_report`); `auditMode: false` runs the per-shot critic→orchestrator→regen loop with degenerate-loop guard + $1.00/shot cost cap. Feature flag `STILLS_MODE_ENABLED` (default OFF). Runbook: `docs/runbooks/stills-mode.md`. |
 
 ---
 

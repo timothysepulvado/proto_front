@@ -14,8 +14,30 @@
 Score a single rendered still image against the 6-criterion stills rubric using
 Gemini 3 Pro Vision. Returns a structured verdict (`PASS | WARN | FAIL`) + a
 narrowed escalation recommendation (`ship | L1_prompt_fix | L2_approach_change
-| L3_redesign`). Phase B's `mode: "stills"` runner consumes this once per shot;
-Phase E's HUD audit-mode operator surface displays the triage table.
+| L3_redesign`). Phase B's `mode: "stills"` runner consumes this once per shot
+(SHIPPED 2026-04-29 PM, commit `4c713b2`); Phase E's HUD audit-mode operator
+surface (pending) will render the triage table from `runs.metadata.audit_report`.
+
+### Phase B integration (live as of 2026-04-29)
+
+The os-api stills runner (`os-api/src/stills_runner.ts`) calls this endpoint
+in two flows:
+
+- **Audit mode** — `pMap`-bounded parallel calls (concurrency 8 default via
+  `STILLS_AUDIT_CONCURRENCY` env), `mode: "audit"`, `pivot_rewrite_history:
+  null` (Rules 6+7 skipped). Per-shot results emit a structured
+  `[audit_verdict shot=N path=… verdict=PASS score=4.46 recommendation=ship
+  cost=0.10 …]` log line and aggregate into `runs.metadata.audit_report` JSONB.
+- **In-loop mode** — sequential per-shot iterations, `mode: "in_loop"`,
+  `pivot_rewrite_history` from `manifest.shots[i].pivot_rewrite_history`
+  (Rules 6+7 active). Non-ship verdicts route into
+  `escalation_loop.ts::handleQAFailure` which delegates regen via Temp-gen
+  `/generate/image` with stills-specific $1.00/shot cost cap
+  (`perShotCapOverride`).
+
+**Trace-ID propagation:** every call carries `X-Trace-Id: <uuid>` header so
+sidecar logs join cleanly to runner logs + `runs.metadata.trace_id`. The
+sidecar's `_emit_critic_log` already records the trace_id when present.
 
 Two operating modes:
 

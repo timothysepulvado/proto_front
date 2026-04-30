@@ -1,8 +1,9 @@
 # Runbook — `mode: "stills"` (Production Operator Guide)
 
-> **Status:** SCAFFOLD — completes when Phase B/F implementations land per ADR-004 Phase G acceptance gate.
+> **Status:** LIVE for Phase B (audit + in-loop runner). Phase E HUD CTA + Phase F observability metrics still pending — flagged inline below.
 > **Owner:** Brandy
-> **Last revised:** 2026-04-29 PM (initial scaffold)
+> **Last revised:** 2026-04-29 PM (Phase B SHIPPED — runner live, sidecar smokes deferred)
+> **Implemented by:** commits `ef18a76` (initial) + `4c713b2` (`runs.metadata` refinement) on `feat/step-11-phase-4`
 
 This runbook is the operator's first stop for any production stills work. It covers when to fire each mode, how to read the output, when to override the critic, how to handle escalations, and how to roll back if something breaks. **You should be able to recover from a bad release using only this document.**
 
@@ -21,41 +22,125 @@ Productized from the manual orchestration that shipped the Drift MV inaugural ca
 
 ## Quick start — operator workflows
 
-### Pre-Veo readiness check (most common use case)
+### Phase B: fire from curl (Phase E HUD CTA pending — Karl)
+
+Until the HUD "Run Audit" button lands (Phase E), operators fire stills runs via curl against the os-api endpoint.
+
+**One-time per environment** — enable the feature flag:
+
+```bash
+# In ~/proto_front/os-api/.env
+STILLS_MODE_ENABLED=true
+# Optional tuning (defaults shown):
+STILLS_AUDIT_CONCURRENCY=8         # parallel critics in flight
+STILLS_PER_SHOT_COST_CAP=1.0       # USD; HITL escalation when exceeded
+```
+
+Restart os-api after editing `.env`.
+
+**Start the sidecars** (separate terminals):
+
+```bash
+cd ~/proto_front/brand-engine && python -m brand_engine.api.server   # :8100
+cd ~/Temp-gen && python -m api.server                                # :8200
+cd ~/proto_front && npm run dev:api                                  # :3001
+```
+
+Confirm both are reachable:
+
+```bash
+curl -s http://localhost:8100/health && echo
+curl -s http://localhost:8200/health && echo
+```
+
+### Audit-mode run (most common Phase B use case)
 
 You're about to fire Veo motion phase on a campaign. Want to know if any starting frames are below quality bar before burning $0.50-1.60 per Veo iteration.
 
-1. Open HUD → BrandStudios → Campaigns → **<your campaign>**
-2. Click **Run Audit** (top-right of campaign workspace)
-3. Confirm cost (~$0.10 × N stills; for a 30-shot campaign ≈ $3)
-4. Wait 60-120s for parallel critic batch to complete
-5. Triage table appears: each shot row shows verdict, aggregate_score, audit_recommendation
-6. **Read the table:**
-   - `KEEP_AS_IS` rows → ship as-is, no regen needed
-   - `L1_PROMPT_FIX` rows → minor language fix; cheap regen (1 iter ≈ $0.14)
-   - `L2_APPROACH_CHANGE` rows → composition redesign; medium cost (2-3 iters ≈ $0.30-0.50)
-   - `L3_REDESIGN` rows → fundamental redesign; expect HITL involvement
-7. Click any row → opens `ShotDetailDrawer.Critic` with full per-criterion verdict + reasoning + anticipated_pivot_strategy
+```bash
+curl -X POST http://localhost:3001/api/clients/client_drift-mv/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "stills",
+    "campaignId": "<drift-mv-campaign-id>",
+    "auditMode": true
+  }'
+```
 
-### Pivot batch on a curated list
+The route validates: `auditMode` must be boolean; `auditMode: true` requires `campaignId`. Returns the new `Run` row with `metadata.audit_mode: true`.
 
-After audit, you've decided which shots need regen. Fire in-loop mode on just those shots.
+**Watch progress:**
+- HUD's existing `WatcherSignalsPanel` realtime stream surfaces `[audit_verdict shot=N path=… verdict=PASS score=4.46 recommendation=ship cost=0.10 …]` log lines as critics return.
+- Aggregate summary log line at run close: `[audit] complete: 14 KEEP / 1 L1 / 0 L2 / 0 L3 / 0 errors. Total cost: $1.50`
+- Wall-clock: 60-120s for a 30-shot campaign at concurrency 8.
 
-1. Select shots in triage table (checkboxes; sticky multi-select)
-2. Click **Pivot Selected** (replaces the legacy single-shot regen button)
-3. Confirm cost (~$0.24/iter × shots × expected iters)
-4. Per-shot iteration runs in parallel; HUD `WatcherSignalsPanel` streams live cost + iter count + verdict per shot
-5. SHIP verdicts auto-promote (artifact metadata + reference_images touch)
-6. WARN/FAIL with degenerate-loop guard fires HITL escalation → `asset_escalations` row → operator review
+**Read the triage table** (one-query JSONB):
 
-### Ad-hoc single-shot pivot (Tim flagged X manually)
+```bash
+PROTO_PAT=$(grep "^SUPABASE_ACCESS_TOKEN=" ~/proto_front/os-api/.env | cut -d= -f2-)
+SUPABASE_ACCESS_TOKEN="$PROTO_PAT" supabase db query --linked \
+  "SELECT metadata->'audit_report' FROM runs WHERE id = '<run-id>';"
+```
 
-If you have a single shot that needs work and audit-mode is overkill:
+The `audit_report` blob shape (persisted to `runs.metadata.audit_report` at audit close):
 
-1. Open `ShotDetailDrawer` for that shot
-2. Click **Trigger Pivot** (specifies failure_class if known)
-3. Same iteration loop, single shot
-4. Same SHIP/HITL outcomes
+```json
+{
+  "runId": "...",
+  "traceId": "...",
+  "productionSlug": "drift-mv",
+  "completedAt": "2026-04-29T...",
+  "summary": { "keep": 14, "l1": 1, "l2": 0, "l3": 0, "errors": 0, "totalCost": 1.50 },
+  "shots": [
+    {
+      "shotId": 5,
+      "imagePath": "/Users/.../shot_05.png",
+      "verdict": "PASS",
+      "aggregateScore": 4.46,
+      "recommendation": "ship",
+      "detectedFailureClasses": [],
+      "cost": 0.10,
+      "latencyMs": 5234,
+      "errorMessage": null
+    },
+    ...
+  ]
+}
+```
+
+**Per-recommendation operator guidance:**
+- `ship` (KEEP_AS_IS) → no regen needed
+- `L1_prompt_fix` → minor language fix; cheap in-loop regen (1 iter ≈ $0.14)
+- `L2_approach_change` → composition redesign; medium cost (2-3 iters ≈ $0.30-0.50)
+- `L3_redesign` → fundamental redesign; expect HITL involvement
+
+⏸ **Phase E pending:** HUD will render this triage table inline + click-through to `ShotDetailDrawer.Critic` for full per-criterion verdict.
+
+### In-loop run (after audit identifies shots that need pivot)
+
+```bash
+curl -X POST http://localhost:3001/api/clients/client_drift-mv/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "stills",
+    "campaignId": "<drift-mv-campaign-id>",
+    "auditMode": false
+  }'
+```
+
+In-loop mode iterates `campaign_deliverables` in non-terminal status (`generating`, `reviewing`, `regenerating`). Phase B parses "Shot N" from `deliverable.description` to map to manifest shots; if a deliverable description doesn't include "Shot N", the runner logs a clear warning and skips it (Phase E will replace this with explicit `shot_number` metadata).
+
+**Per-shot loop:**
+1. POST to `/grade_image_v2` with `mode: "in_loop"` + `pivot_rewrite_history` from manifest
+2. If verdict is `ship` → log SHIP at iter N, move on (operator approves via HUD)
+3. Else delegate to `escalation_loop.ts::handleQAFailure` — runs degenerate-loop guard (`_countConsecutiveSamePromptRegens` + `_maybePromoteLevel` L1×3 → L2×2 → L3×2 → HITL), records `orchestration_decisions` row, applies $1.00/shot cumulative cost cap (`STILLS_PER_SHOT_COST_CAP`)
+4. On `outcome === "regenerate"` → POST Temp-gen `/generate/image` with the orchestrator's new still prompt + manifest anchors as references
+
+⏸ **Phase B+ refinement pending:** the regen → artifact-row closure step (auto-create successor `artifacts` row so the next iter picks it up) is left for Phase E HUD wiring or a Phase B+ pass. Today the operator drives the rest manually.
+
+### Ad-hoc single-shot pivot
+
+⏸ **Phase E pending:** the `ShotDetailDrawer` "Trigger Pivot" button. Until then, seed a deliverable row with description `"Shot N: ..."` and fire `auditMode: false` against the campaign — only the unresolved deliverables process.
 
 ---
 
@@ -169,28 +254,33 @@ Critic returned `verdict=FAIL` with reasoning indicating bad path or unreadable 
 
 If `mode: "stills"` introduces a regression:
 
-1. **Feature flag off:** Set `STILLS_MODE_ENABLED=false` in os-api `.env`, restart os-api
-2. **HUD CTA hidden:** Run-mode dropdown filters out 'stills' when flag is off; no user-visible breakage
-3. **Database state preserved:** migrations 009 + 010 are additive; no rollback needed
-4. **Manual fallback:** Brandy session two-voices pattern works as before — see `~/Temp-gen/productions/drift-mv/STILLS_AUDIT_15_SHOTS.md` for the manual workflow that shipped the inaugural campaign
+1. **Feature flag off:** Set `STILLS_MODE_ENABLED=false` in os-api `.env`, restart os-api. The runner returns `false` with a clear log line ("[stills] STILLS_MODE_ENABLED=false. …rollback lever per ADR-004 quality gate #21.") rather than running.
+2. **HUD CTA hidden** (Phase E) — when the audit CTA lands, it'll be guarded by the same flag.
+3. **Database state preserved:** migrations `009` (image-class known_limitations seed), `010` (stills enum value), `011` (runs.metadata JSONB) are all additive. No rollback needed.
+4. **Manual fallback:** the Brandy-session two-voices pattern works as before — see `~/Temp-gen/productions/drift-mv/STILLS_AUDIT_15_SHOTS.md` for the manual workflow that shipped the inaugural campaign.
 
 If a specific PR introduces the regression:
 
-1. Identify the PR via `git log --oneline` (look for runner.ts, image_grader.py, orchestrator_prompts.ts changes)
-2. Revert the PR: `git revert <sha>`; rebuild + redeploy
-3. Verify by re-running an audit on Drift MV — verdicts should match the 2026-04-29 baseline within ±0.3 aggregate per shot
+1. Identify the PR via `git log --oneline` (look for changes to `runner.ts`, `stills_runner.ts`, `image_grader.py`, `orchestrator_prompts.ts`, `escalation_loop.ts`).
+2. Revert the PR: `git revert <sha>`; rebuild + redeploy.
+3. Verify by re-running an audit on Drift MV — verdicts should match the 2026-04-29 baseline within ±0.3 aggregate per shot.
+
+Worker safety: even with the flag off, the worker's `OS_API_OWNED_MODES = ('regrade', 'stills')` filter prevents the Python worker from claiming stills runs. No race-condition risk during rollback.
 
 ---
 
 ## Production rigor TODOs
 
-This scaffold completes when:
+Phase B SHIPPED 2026-04-29 PM. Remaining gates:
 
-- [ ] Phase B (runner) lands → fill in actual run trigger curl examples + endpoint paths
-- [ ] Phase F (observability) lands → fill in Datadog / Supabase metric query examples + alert thresholds
-- [ ] Phase E (HUD) lands → screenshots for "Run Audit" CTA + triage table
-- [ ] Phase H (multi-campaign isolation) lands → cross-campaign access control examples
-- [ ] First production audit on a non-Drift-MV campaign → adjust thresholds, document edge cases
+- [x] Phase B (runner) lands — DONE (commits `ef18a76` + `4c713b2`); curl examples above are real
+- [ ] **Phase B sidecar smokes** — audit vs Drift MV manual 14 KEEP / 1 L1 baseline ±0.3, in-loop L1→L2 promotion, cost cap fires HITL, trace-ID round-trip, audit_report blob shape. Require `:8100` brand-engine + `:8200` Temp-gen up; ~$5-8 cost.
+- [ ] **Phase C** (Brandy) — image-class L1/L2/L3 prompt templates + 22nd rule for non-human pose-driven subjects + 2000-char ceiling enforcement in orchestrator prompt-builder.
+- [ ] **Phase E** (Karl) — HUD "Run Audit" CTA + triage table (reads `runs.metadata.audit_report`) + `ShotDetailDrawer` "Trigger Pivot" button.
+- [ ] **Phase F** (Brandy) — `pipeline_metrics` table, cost-alert thresholds, `WatcherSignalsPanel` stills-mode binding, Datadog/OTEL collector option.
+- [ ] **Phase G** (Brandy) — architecture mermaid diagram (`docs/architecture/stills-pipeline.md`), troubleshooting failure-mode → recovery table (`docs/troubleshooting/stills-mode.md`).
+- [ ] **Phase H** (Brandy) — multi-campaign RLS audit, `GET /api/campaigns/:id/cost-ledger`, `GET /api/campaigns/:id/audit-log`, cross-campaign isolation smoke.
+- [ ] First production audit on a non-Drift-MV campaign → adjust thresholds, document edge cases.
 
 ---
 
