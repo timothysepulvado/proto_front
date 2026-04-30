@@ -52,6 +52,8 @@ import {
   getCampaign,
   getDeliverablesByCampaign,
   getArtifactsByRun,
+  getLatestArtifactByDeliverable,
+  addArtifact,
   updateRun,
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
@@ -755,7 +757,7 @@ async function runInLoopMode(
       // critic grades regen output rather than the locked file. Falls back
       // to the locked file on iter 1.
       const artifacts = await getArtifactsByRun(run.runId);
-      const candidate = artifacts
+      let candidate: Artifact | undefined = artifacts
         .filter((a) => a.deliverableId === deliverable.id && a.path)
         .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))[0];
       const imagePath = candidate?.path ?? stillPath;
@@ -816,13 +818,92 @@ async function runInLoopMode(
       // orchestration_decision row, applies the degenerate-loop guard, and
       // returns a regen instruction or HITL flag.
       if (!candidate) {
-        await emitLog(
-          run.runId,
-          stageId,
-          "warn",
-          `[in_loop] shot ${shot.id}: no artifact row for deliverable ${deliverable.id}; cannot escalate. Operator must seed an artifact first.`,
-        );
-        break;
+        // Phase B+ auto-seed (2026-04-30): if no artifact row exists for THIS
+        // run + deliverable, register the locked still as a seed artifact so
+        // the escalation loop has something to attach orchestration_decisions
+        // to. Two paths:
+        //   1. Carry forward the most recent prior-run artifact's public URL
+        //      + storage_path so the HUD continues to render the same asset
+        //      without re-uploading. Path of least cost; preferred.
+        //   2. If no prior artifact exists, register a minimal artifact row
+        //      pointing at the on-disk locked still. Public URL absent; HUD
+        //      shows nothing but the regen flow proceeds.
+        // Eliminates the legacy "Operator must seed an artifact first" error
+        // that blocked targeted-regen on operator-approved deliverables (the
+        // direction-drift fix on the drift-mv campaign 2026-04-30 hit this).
+        try {
+          const prior = await getLatestArtifactByDeliverable(deliverable.id, "image");
+          if (prior) {
+            const seeded: Artifact = {
+              id: randomUUID(),
+              runId: run.runId,
+              clientId: run.clientId,
+              campaignId: run.campaignId,
+              deliverableId: deliverable.id,
+              type: "image",
+              name: prior.name ?? `shot_${padded}.png`,
+              path: prior.path,
+              storagePath: prior.storagePath,
+              stage: stageId,
+              size: prior.size,
+              metadata: {
+                ...(prior.metadata ?? {}),
+                localPath: existsSync(stillPath) ? stillPath : (prior.metadata as { localPath?: string } | undefined)?.localPath,
+                seededFromArtifactId: prior.id,
+                seedReason: "no_artifact_for_current_run",
+              },
+              createdAt: new Date().toISOString(),
+            };
+            candidate = await addArtifact(seeded);
+            await emitLog(
+              run.runId,
+              stageId,
+              "info",
+              `[in_loop] shot ${shot.id}: seeded artifact ${candidate.id} for deliverable ${deliverable.id} from prior artifact ${prior.id} (carry-forward path + URL).`,
+            );
+          } else if (existsSync(stillPath)) {
+            const seeded: Artifact = {
+              id: randomUUID(),
+              runId: run.runId,
+              clientId: run.clientId,
+              campaignId: run.campaignId,
+              deliverableId: deliverable.id,
+              type: "image",
+              name: `shot_${padded}.png`,
+              path: stillPath,
+              stage: stageId,
+              metadata: {
+                localPath: stillPath,
+                seedReason: "no_prior_artifact_disk_only",
+              },
+              createdAt: new Date().toISOString(),
+            };
+            candidate = await addArtifact(seeded);
+            await emitLog(
+              run.runId,
+              stageId,
+              "info",
+              `[in_loop] shot ${shot.id}: seeded artifact ${candidate.id} for deliverable ${deliverable.id} from on-disk still (no prior artifact found).`,
+            );
+          } else {
+            await emitLog(
+              run.runId,
+              stageId,
+              "warn",
+              `[in_loop] shot ${shot.id}: no prior artifact AND no still on disk at ${stillPath}; cannot escalate.`,
+            );
+            break;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await emitLog(
+            run.runId,
+            stageId,
+            "warn",
+            `[in_loop] shot ${shot.id}: artifact auto-seed failed (${msg}); cannot escalate.`,
+          );
+          break;
+        }
       }
 
       const failureCtx = {
