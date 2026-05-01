@@ -126,6 +126,9 @@ export default function AuditTriageTable({
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Gap 2 (2026-04-30): in-loop runs since the last audit-mode pass.
+  // null = no audit run exists yet OR query failed (banner falls back).
+  const [inLoopRunsSinceAudit, setInLoopRunsSinceAudit] = useState<number | null>(null);
 
   const loadAuditState = useCallback(async () => {
     setIsLoading(true);
@@ -149,6 +152,12 @@ export default function AuditTriageTable({
       } else {
         setLiveShots([]);
       }
+      // Gap 2: count in-loop runs that have happened SINCE this audit run
+      // landed. The cutoff is the audit's createdAt — anything after it is
+      // a regen the operator may want reflected in a fresh audit.
+      const auditCutoff = latestAuditRun?.createdAt ?? null;
+      const sinceCount = await api.getInLoopRunsSinceAudit(campaignId, auditCutoff);
+      setInLoopRunsSinceAudit(sinceCount);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load audit state");
     } finally {
@@ -331,6 +340,41 @@ export default function AuditTriageTable({
             {lastCompletedAt && <span>{lastCompletedAt.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}</span>}
             {auditRunId && <span>Run {auditRunId.slice(0, 8)}</span>}
             {auditReport.traceId && <span>Trace {auditReport.traceId.slice(0, 8)}</span>}
+          </div>
+        )}
+
+        {/* Gap 2 (2026-04-30): staleness banner — fires when in-loop regen
+            runs have happened since the last audit-mode pass. Operator
+            knows the triage data is N runs behind reality and can hit
+            Run Audit to refresh. */}
+        {!active && auditReport && inLoopRunsSinceAudit != null && inLoopRunsSinceAudit > 0 && (
+          <div className="mt-3 rounded-2xl border border-[#ED4C14]/35 bg-[#ED4C14]/10 px-3 py-2.5 text-[9px] font-mono uppercase tracking-[0.18em] text-orange-100">
+            <div className="flex flex-wrap items-center gap-2">
+              <Clock3 size={11} className="text-orange-200/85" />
+              <span>
+                <strong className="font-bold text-orange-100">{inLoopRunsSinceAudit}</strong>
+                {" "}in-loop run{inLoopRunsSinceAudit === 1 ? "" : "s"} since this audit
+              </span>
+              <span className="text-orange-200/60">·</span>
+              <span className="text-orange-200/60">
+                triage may be stale — fire a fresh audit to refresh
+              </span>
+            </div>
+          </div>
+        )}
+        {!active && !auditReport && inLoopRunsSinceAudit != null && inLoopRunsSinceAudit > 0 && (
+          /* Edge case: no audit_report on the latest audit run (e.g., audit
+             never wrote metadata.audit_report) but in-loop runs exist after.
+             Still surface the staleness so the operator isn't blind. */
+          <div className="mt-3 rounded-2xl border border-[#ED4C14]/35 bg-[#ED4C14]/10 px-3 py-2.5 text-[9px] font-mono uppercase tracking-[0.18em] text-orange-100">
+            <div className="flex flex-wrap items-center gap-2">
+              <Clock3 size={11} className="text-orange-200/85" />
+              <span>
+                <strong className="font-bold text-orange-100">{inLoopRunsSinceAudit}</strong>
+                {" "}in-loop run{inLoopRunsSinceAudit === 1 ? "" : "s"} since last audit attempt
+              </span>
+              <span className="text-orange-200/60">· no triage report — fire a fresh audit</span>
+            </div>
           </div>
         )}
 

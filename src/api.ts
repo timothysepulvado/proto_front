@@ -296,6 +296,54 @@ export async function getLatestStillsAuditRun(campaignId: string): Promise<Run |
     ?? null;
 }
 
+/**
+ * Gap 2 (2026-04-30) — staleness signal for the audit triage panel.
+ *
+ * Counts in-loop stills runs (`mode:'stills'` + `metadata.audit_mode != true`)
+ * created strictly after the provided cutoff. The cutoff is the
+ * `created_at` of the most recent audit-mode run for the campaign. If no
+ * cutoff is provided (no audit ever fired), returns null so the caller
+ * can render an "audit never run" state instead of a misleading zero.
+ *
+ * Used by `<AuditTriageTable>` to render: "Today's in-loop runs: {N} ran
+ * since." — operator knows the triage report is N regens behind reality
+ * and can fire a fresh audit if needed.
+ *
+ * Implementation note: filters via JSONB->>'audit_mode' != 'true'. Both
+ * `audit_mode: false` and missing-key (null) cases match — both are
+ * legitimate in-loop runs (auditMode defaults to false at runner level
+ * pre-Phase B persistence; current rows have explicit `audit_mode: false`).
+ */
+export async function getInLoopRunsSinceAudit(
+  campaignId: string,
+  auditCutoffISO: string | null,
+): Promise<number | null> {
+  if (!auditCutoffISO) return null;
+
+  const { data, error } = await supabase
+    .from("runs")
+    .select("id, metadata")
+    .eq("campaign_id", campaignId)
+    .eq("mode", "stills")
+    .gt("created_at", auditCutoffISO);
+
+  if (error) {
+    // Non-fatal — banner will fall back to "—" rather than blocking the panel.
+    console.warn("[api] getInLoopRunsSinceAudit failed:", error.message);
+    return null;
+  }
+  if (!data) return 0;
+  // Filter out audit-mode runs in JS (JSONB head-count via PostgREST is
+  // version-dependent; this is the reliable path).
+  const inLoopOnly = (data as Array<{ id: string; metadata: Record<string, unknown> | null }>).filter(
+    (row) => {
+      const auditMode = row.metadata && (row.metadata as { audit_mode?: unknown }).audit_mode;
+      return auditMode !== true;
+    },
+  );
+  return inLoopOnly.length;
+}
+
 // Update run status
 export async function updateRunStatus(
   runId: string,
