@@ -52,6 +52,7 @@ import {
   getShotSummaries,
   getRecentRunsByCampaign,
   getRunDetail,
+  getMotionPhaseGateState,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
@@ -70,6 +71,10 @@ app.use("/api/productions", createProductionsRouter());
 // Helper to extract params safely
 function getParam(req: Request, name: string): string {
   return req.params[name] as string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // ============ Client Routes ============
@@ -106,7 +111,7 @@ app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
 app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const { mode, campaignId, auditMode, shotIds } = req.body as RunCreatePayload;
+    const { mode, campaignId, deliverableIds, inputs, auditMode, shotIds } = req.body as RunCreatePayload;
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
@@ -170,10 +175,51 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       }
     }
 
+    let normalizedDeliverableIds: string[] | undefined;
+    if (deliverableIds !== undefined) {
+      if (!Array.isArray(deliverableIds) || deliverableIds.length === 0) {
+        res.status(400).json({ error: "deliverableIds must be a non-empty array of strings when provided" });
+        return;
+      }
+      if (!campaignId) {
+        res.status(400).json({ error: "deliverableIds requires campaignId" });
+        return;
+      }
+      const invalid = deliverableIds.find((id) => typeof id !== "string" || id.trim().length === 0);
+      if (invalid !== undefined) {
+        res.status(400).json({ error: `deliverableIds entries must be non-empty strings; got ${JSON.stringify(invalid)}` });
+        return;
+      }
+      const seen = new Set<string>();
+      normalizedDeliverableIds = [];
+      for (const id of deliverableIds) {
+        const trimmed = id.trim();
+        if (!seen.has(trimmed)) {
+          seen.add(trimmed);
+          normalizedDeliverableIds.push(trimmed);
+        }
+      }
+    }
+
+    if (inputs !== undefined && !isRecord(inputs)) {
+      res.status(400).json({ error: "inputs must be an object when provided" });
+      return;
+    }
+
     const client = await getClient(clientId);
     if (!client) {
       res.status(404).json({ error: "Client not found" });
       return;
+    }
+
+    if (campaignId && normalizedDeliverableIds && normalizedDeliverableIds.length > 0) {
+      const campaignDeliverables = await getDeliverablesByCampaign(campaignId);
+      const allowedDeliverableIds = new Set(campaignDeliverables.map((deliverable) => deliverable.id));
+      const outOfScope = normalizedDeliverableIds.find((id) => !allowedDeliverableIds.has(id));
+      if (outOfScope) {
+        res.status(400).json({ error: `deliverableId ${outOfScope} does not belong to campaign ${campaignId}` });
+        return;
+      }
     }
 
     const now = new Date().toISOString();
@@ -195,6 +241,19 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       // os-api restart mid-run, same as audit_mode.
       if (normalizedShotIds && normalizedShotIds.length > 0) {
         runMetadata.shot_ids = normalizedShotIds;
+      }
+    }
+    if (normalizedDeliverableIds && normalizedDeliverableIds.length > 0) {
+      runMetadata.deliverable_ids = normalizedDeliverableIds;
+    }
+    if (isRecord(inputs)) {
+      runMetadata.inputs = inputs;
+      const parentRunId = typeof inputs.parentRunId === "string" && inputs.parentRunId.trim().length > 0
+        ? inputs.parentRunId.trim()
+        : undefined;
+      if (parentRunId) runMetadata.parentRunId = parentRunId;
+      if (isRecord(inputs.motionPhaseGate)) {
+        runMetadata.motion_phase_gate = inputs.motionPhaseGate;
       }
     }
 
@@ -808,6 +867,18 @@ app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Resp
     res.json(runs);
   } catch (err) {
     console.error("GET /api/campaigns/:campaignId/recent-runs error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/motion-phase-gate - Stills → Veo handoff state
+app.get("/api/campaigns/:campaignId/motion-phase-gate", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const state = await getMotionPhaseGateState(campaignId);
+    res.json(state);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/motion-phase-gate error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

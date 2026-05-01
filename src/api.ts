@@ -83,6 +83,41 @@ export interface RunDetail {
   relatedStillsRun?: RecentCampaignRun | null;
 }
 
+export type MotionGateShotState =
+  | "locked"
+  | "operator-override"
+  | "operator-accepted"
+  | "canonical"
+  | "pending";
+
+export interface MotionGateShotOfNote {
+  shotNumber: number;
+  deliverableId?: string;
+  state: MotionGateShotState;
+  summary: string;
+  source: "operator_override" | "asset_escalation" | "canonical_reference" | "manifest" | "run_history";
+  runId?: string;
+  criticScore?: number;
+  criticVerdict?: string;
+  decidedIter?: number;
+  decisionBy?: string;
+  decisionAt?: string;
+}
+
+export interface MotionPhaseGateState {
+  campaignId: string;
+  productionSlug?: string;
+  lockedDeliverableIds: string[];
+  lockedCount: number;
+  operatorConfirmedCount: number;
+  lockedWithoutExplicitApprovalCount: number;
+  openHitlCount: number;
+  blocked: boolean;
+  latestStillsRunId?: string;
+  shotsOfNote: MotionGateShotOfNote[];
+  generatedAt: string;
+}
+
 export interface Client {
   id: string;
   name: string;
@@ -1321,6 +1356,47 @@ export async function getCampaignRecentRuns(campaignId: string, limit = 10): Pro
   );
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as RecentCampaignRun[];
+}
+
+export async function getMotionPhaseGateState(campaignId: string): Promise<MotionPhaseGateState> {
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/motion-phase-gate`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as MotionPhaseGateState;
+}
+
+export async function createMotionPhaseRun(
+  clientId: string,
+  campaignId: string,
+  gateState: MotionPhaseGateState,
+): Promise<Run> {
+  const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "video",
+      campaignId,
+      deliverableIds: gateState.lockedDeliverableIds,
+      inputs: {
+        source: "motion_phase_gate",
+        parentRunId: gateState.latestStillsRunId,
+        motionPhaseGate: {
+          lockedStillsCount: gateState.lockedCount,
+          operatorConfirmedCount: gateState.operatorConfirmedCount,
+          lockedWithoutExplicitApprovalCount: gateState.lockedWithoutExplicitApprovalCount,
+          openHitlCount: gateState.openHitlCount,
+          shotsOfNote: gateState.shotsOfNote.map((shot) => ({
+            shotNumber: shot.shotNumber,
+            state: shot.state,
+            source: shot.source,
+            runId: shot.runId,
+          })),
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Run;
 }
 
 export async function getRunDetail(runId: string): Promise<RunDetail> {

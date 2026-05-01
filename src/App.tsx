@@ -26,6 +26,7 @@ import DeliverableTimeline from "./components/DeliverableTimeline";
 import ShotDetailDrawer from "./components/ShotDetailDrawer";
 import RecentRunsPanel from "./components/RecentRunsPanel";
 import RunDetailDrawer from "./components/RunDetailDrawer";
+import MotionPhaseGate from "./components/MotionPhaseGate";
 import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
@@ -1188,6 +1189,14 @@ export default function App() {
                             onRunClick={setSelectedRunDetailId}
                           />
                         )}
+                        {isFeaturedClient && currentRun?.campaignId && (
+                          <MotionPhaseGate
+                            clientId={activeClient}
+                            campaignId={currentRun.campaignId}
+                            onReviewGateClick={() => setActivePillar("review")}
+                            onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
+                          />
+                        )}
 	                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
 	                        {[
 	                          { id: "deliverables" as const, label: "Deliverables" },
@@ -1211,7 +1220,7 @@ export default function App() {
                         ))}
                       </div>
 	                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
-	                        <ReshootPanel />
+	                        <ReshootPanel showRenderControls={false} />
 	                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
                           <div className="space-y-3">
                             <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
@@ -1228,6 +1237,7 @@ export default function App() {
 	                                onShotSelect={setSelectedAnchorShot}
 	                                activeShotNumber={selectedAnchorShot}
 	                                openDrawerOnSelect={false}
+                                  showRenderControls={false}
 	                              />
                               </div>
                               <div className="order-1 min-w-0 lg:order-2">

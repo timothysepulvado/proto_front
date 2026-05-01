@@ -1,4 +1,6 @@
 import { supabase } from "./supabase.js";
+import { existsSync, readFileSync } from "fs";
+import path from "path";
 import type {
   Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert,
   BrandBaseline, PromptTemplate, PromptScore, RunStatus, RunStage,
@@ -7,6 +9,7 @@ import type {
   AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
   OrchestrationDecisionRecord, PromptHistoryEntry,
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
+  MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
@@ -347,6 +350,448 @@ export async function getRunDetail(runId: string): Promise<RunDetail | null> {
     totalOrchestrationCost: sumOrchestrationDecisionCost(decisions),
     relatedStillsRun,
   };
+}
+
+// ── Gap 6: Stills → Veo motion-phase gate helpers ─────────────────────────
+
+const MOTION_GATE_LOCKED_STATUSES = new Set<DeliverableStatus>(["approved", "reviewing"]);
+const MOTION_GATE_STILLS_BLOCKING_RUN_MODES = new Set<Run["mode"]>(["stills"]);
+
+interface MotionGateDeliverableInput {
+  id: string;
+  status: DeliverableStatus;
+  description?: string;
+}
+
+interface MotionGateRunInput {
+  runId: string;
+  mode: Run["mode"];
+  status: Run["status"];
+  createdAt: string;
+  hitlRequired?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+interface MotionGateEscalationInput {
+  id: string;
+  deliverableId?: string;
+  runId?: string;
+  status: EscalationStatus;
+  resolutionPath?: EscalationAction;
+  resolutionNotes?: string;
+  failureClass?: string;
+  resolvedAt?: string;
+  updatedAt?: string;
+}
+
+interface MotionGateApprovedDecisionInput {
+  deliverableId: string;
+  notes?: string;
+  runId?: string;
+  createdAt?: string;
+}
+
+interface MotionGateManifestShot {
+  id?: unknown;
+  shot_number?: unknown;
+  shotNumber?: unknown;
+  visual?: unknown;
+  still_prompt?: unknown;
+  veo_prompt?: unknown;
+  characters_needed?: unknown;
+}
+
+interface MotionGateManifest {
+  characters?: Record<string, unknown>;
+  shots?: MotionGateManifestShot[];
+}
+
+export interface MotionPhaseGateAggregationInput {
+  campaignId: string;
+  productionSlug?: string;
+  deliverables: MotionGateDeliverableInput[];
+  runs: MotionGateRunInput[];
+  escalations: MotionGateEscalationInput[];
+  approvedDecisions?: MotionGateApprovedDecisionInput[];
+  manifest?: MotionGateManifest | null;
+  now?: Date;
+}
+
+export function deriveDeliverableShotNumber(
+  deliverable: Pick<CampaignDeliverable, "description"> | MotionGateDeliverableInput,
+  index = 0,
+): number {
+  const description = deliverable.description ?? "";
+  const match = /shot\s+(\d{1,3})/i.exec(description);
+  return match ? Number.parseInt(match[1] as string, 10) : index + 1;
+}
+
+function readInteger(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function extractShotNumberFromStillPath(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const match = /shot[_-]?(\d{1,3})/i.exec(value);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1] as string, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function textPreview(value: string | undefined, fallback: string, max = 180): string {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return fallback;
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function productionSlugFromRunsOrCampaign(campaign: Campaign | null, runs: Run[]): string | undefined {
+  for (const run of runs) {
+    const slug = readString(run.metadata?.production_slug);
+    if (slug) return slug;
+  }
+  const name = campaign?.name?.toLowerCase() ?? "";
+  if (name.includes("drift mv")) return "drift-mv";
+  return undefined;
+}
+
+function loadMotionGateManifest(productionSlug?: string): MotionGateManifest | null {
+  if (!productionSlug) return null;
+  const tempGenRoot = process.env.TEMP_GEN_DIR
+    ?? process.env.TEMP_GEN_PATH
+    ?? path.join(process.env.HOME ?? "", "Temp-gen");
+  const manifestPath = path.join(tempGenRoot, "productions", productionSlug, "manifest.json");
+  if (!existsSync(manifestPath)) return null;
+  try {
+    return JSON.parse(readFileSync(manifestPath, "utf8")) as MotionGateManifest;
+  } catch {
+    return null;
+  }
+}
+
+function notePriority(state: MotionGateShotState): number {
+  switch (state) {
+    case "pending": return 5;
+    case "operator-override": return 4;
+    case "operator-accepted": return 3;
+    case "canonical": return 2;
+    case "locked": return 1;
+  }
+}
+
+function upsertMotionNote(
+  notes: Map<number, MotionGateShotOfNote>,
+  note: MotionGateShotOfNote,
+): void {
+  const existing = notes.get(note.shotNumber);
+  if (!existing || notePriority(note.state) > notePriority(existing.state)) {
+    notes.set(note.shotNumber, note);
+    return;
+  }
+  if (existing && notePriority(note.state) === notePriority(existing.state)) {
+    notes.set(note.shotNumber, {
+      ...existing,
+      summary: existing.summary.includes(note.summary) ? existing.summary : `${existing.summary} ${note.summary}`,
+    });
+  }
+}
+
+export function aggregateMotionPhaseGateState(input: MotionPhaseGateAggregationInput): MotionPhaseGateState {
+  const now = input.now ?? new Date();
+  const deliverableEntries = input.deliverables.map((deliverable, index) => ({
+    deliverable,
+    shotNumber: deriveDeliverableShotNumber(deliverable, index),
+  }));
+  const deliverableById = new Map(deliverableEntries.map((entry) => [entry.deliverable.id, entry]));
+  const deliverableByShot = new Map<number, (typeof deliverableEntries)[number]>();
+  for (const entry of deliverableEntries) {
+    if (!deliverableByShot.has(entry.shotNumber)) deliverableByShot.set(entry.shotNumber, entry);
+  }
+
+  const lockedEntries = deliverableEntries.filter((entry) => MOTION_GATE_LOCKED_STATUSES.has(entry.deliverable.status));
+  const lockedShotNumbers = new Set(lockedEntries.map((entry) => entry.shotNumber));
+  const lockedDeliverableIds = lockedEntries.map((entry) => entry.deliverable.id);
+
+  const runsById = new Map(input.runs.map((run) => [run.runId, run]));
+  const stillsRunIds = new Set(
+    input.runs
+      .filter((run) => MOTION_GATE_STILLS_BLOCKING_RUN_MODES.has(run.mode))
+      .map((run) => run.runId),
+  );
+  const latestStillsRun = input.runs
+    .filter((run) => run.mode === "stills")
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+  const operatorConfirmedShots = new Set<number>();
+  const openHitlDeliverables = new Set<string>();
+  const notes = new Map<number, MotionGateShotOfNote>();
+
+  for (const run of input.runs) {
+    const rawOverrides = isRecord(run.metadata?.operator_override) ? run.metadata.operator_override : null;
+    if (!rawOverrides) continue;
+    for (const [key, rawValue] of Object.entries(rawOverrides)) {
+      const match = /^shot_(\d{1,3})$/i.exec(key);
+      if (!match || !isRecord(rawValue)) continue;
+      const shotNumber = Number.parseInt(match[1] as string, 10);
+      if (!lockedShotNumbers.has(shotNumber)) continue;
+      operatorConfirmedShots.add(shotNumber);
+      const entry = deliverableByShot.get(shotNumber);
+      upsertMotionNote(notes, {
+        shotNumber,
+        deliverableId: entry?.deliverable.id,
+        state: "operator-override",
+        source: "operator_override",
+        runId: run.runId,
+        criticScore: readNumber(rawValue.critic_score),
+        criticVerdict: readString(rawValue.critic_verdict),
+        decidedIter: readInteger(rawValue.decided_iter),
+        decisionBy: readString(rawValue.decision_by),
+        decisionAt: readString(rawValue.decision_at),
+        summary: textPreview(
+          readString(rawValue.rationale),
+          `Operator override recorded on run ${run.runId.slice(0, 8)}.`,
+        ),
+      });
+    }
+  }
+
+  for (const escalation of input.escalations) {
+    if (!escalation.deliverableId) continue;
+    const entry = deliverableById.get(escalation.deliverableId);
+    if (!entry) continue;
+    const run = escalation.runId ? runsById.get(escalation.runId) : undefined;
+    const isStillsStageSignal = !escalation.runId || stillsRunIds.has(escalation.runId);
+
+    if (escalation.status === "hitl_required" && isStillsStageSignal) {
+      openHitlDeliverables.add(escalation.deliverableId);
+      upsertMotionNote(notes, {
+        shotNumber: entry.shotNumber,
+        deliverableId: entry.deliverable.id,
+        state: "pending",
+        source: "asset_escalation",
+        runId: escalation.runId,
+        summary: `Pending stills HITL${escalation.failureClass ? `: ${escalation.failureClass.replace(/_/g, " ")}` : ""}.`,
+      });
+    }
+
+    if (
+      escalation.status === "accepted"
+      && escalation.resolutionPath === "accept"
+      && isStillsStageSignal
+      && lockedShotNumbers.has(entry.shotNumber)
+    ) {
+      operatorConfirmedShots.add(entry.shotNumber);
+      upsertMotionNote(notes, {
+        shotNumber: entry.shotNumber,
+        deliverableId: entry.deliverable.id,
+        state: "operator-accepted",
+        source: "asset_escalation",
+        runId: escalation.runId ?? run?.runId,
+        decisionAt: escalation.resolvedAt,
+        summary: textPreview(
+          escalation.resolutionNotes,
+          `Operator accepted still via ${escalation.runId ? `run ${escalation.runId.slice(0, 8)}` : "escalation history"}.`,
+        ),
+      });
+    }
+  }
+
+  for (const run of input.runs) {
+    if (!run.hitlRequired) continue;
+    if (!MOTION_GATE_STILLS_BLOCKING_RUN_MODES.has(run.mode)) continue;
+    const shotIds = extractRunShotIds(run.metadata);
+    if (shotIds?.length) {
+      for (const shotNumber of shotIds) {
+        const entry = deliverableByShot.get(shotNumber);
+        if (entry) openHitlDeliverables.add(entry.deliverable.id);
+      }
+    } else {
+      for (const entry of lockedEntries) openHitlDeliverables.add(entry.deliverable.id);
+    }
+  }
+
+  for (const decision of input.approvedDecisions ?? []) {
+    const entry = deliverableById.get(decision.deliverableId);
+    if (!entry || !lockedShotNumbers.has(entry.shotNumber)) continue;
+    operatorConfirmedShots.add(entry.shotNumber);
+    upsertMotionNote(notes, {
+      shotNumber: entry.shotNumber,
+      deliverableId: entry.deliverable.id,
+      state: "operator-accepted",
+      source: "asset_escalation",
+      runId: decision.runId,
+      decisionAt: decision.createdAt,
+      summary: textPreview(decision.notes, "Explicit HITL approval recorded."),
+    });
+  }
+
+  const manifest = input.manifest;
+  if (manifest?.characters && isRecord(manifest.characters)) {
+    for (const [characterName, rawCharacter] of Object.entries(manifest.characters)) {
+      if (!isRecord(rawCharacter)) continue;
+      const shotNumber = extractShotNumberFromStillPath(rawCharacter.canonical_reference_still);
+      if (!shotNumber || !lockedShotNumbers.has(shotNumber)) continue;
+      const entry = deliverableByShot.get(shotNumber);
+      upsertMotionNote(notes, {
+        shotNumber,
+        deliverableId: entry?.deliverable.id,
+        state: "canonical",
+        source: "canonical_reference",
+        decisionAt: readString(rawCharacter.canonical_reference_locked_at),
+        decisionBy: readString(rawCharacter.canonical_reference_locked_by),
+        summary: textPreview(
+          readString(rawCharacter.canonical_reference_rationale),
+          `${characterName.replace(/_/g, " ")} canonical reference locked for motion anchoring.`,
+        ),
+      });
+    }
+  }
+
+  for (const shot of manifest?.shots ?? []) {
+    const shotNumber = readInteger(shot.id) ?? readInteger(shot.shot_number) ?? readInteger(shot.shotNumber);
+    if (!shotNumber || !lockedShotNumbers.has(shotNumber)) continue;
+    const text = [
+      readString(shot.visual),
+      readString(shot.still_prompt),
+      readString(shot.veo_prompt),
+      ...readStringArray(shot.characters_needed),
+    ].filter(Boolean).join(" ").toLowerCase();
+    const entry = deliverableByShot.get(shotNumber);
+
+    if (/\bsplit[-\s]screen\b|\bsplit[-\s]level\b/.test(text)) {
+      upsertMotionNote(notes, {
+        shotNumber,
+        deliverableId: entry?.deliverable.id,
+        state: "locked",
+        source: "manifest",
+        summary: "Split-screen/split-level composition is accepted; preserve the human-machine mirror during Veo motion.",
+      });
+    }
+
+    if (
+      /\brampaging\b/.test(text)
+      || /\bglowing\s+(digital\s+)?sphere\b/.test(text)
+      || /\bmagical?\s+orb\b/.test(text)
+    ) {
+      upsertMotionNote(notes, {
+        shotNumber,
+        deliverableId: entry?.deliverable.id,
+        state: "pending",
+        source: "manifest",
+        summary: "Alt-angle/direction check pending: manifest beat still references a rampaging mech or glowing sphere that can collide with the current documentary-dry mantra.",
+      });
+    }
+  }
+
+  const lockedCount = lockedEntries.length;
+  const operatorConfirmedCount = lockedEntries.filter((entry) => operatorConfirmedShots.has(entry.shotNumber)).length;
+  const openHitlCount = openHitlDeliverables.size;
+
+  return {
+    campaignId: input.campaignId,
+    productionSlug: input.productionSlug,
+    lockedDeliverableIds,
+    lockedCount,
+    operatorConfirmedCount,
+    lockedWithoutExplicitApprovalCount: Math.max(0, lockedCount - operatorConfirmedCount),
+    openHitlCount,
+    blocked: openHitlCount > 0,
+    latestStillsRunId: latestStillsRun?.runId,
+    shotsOfNote: [...notes.values()].sort((a, b) => a.shotNumber - b.shotNumber),
+    generatedAt: now.toISOString(),
+  };
+}
+
+export async function getMotionPhaseGateState(campaignId: string): Promise<MotionPhaseGateState> {
+  const campaign = await getCampaign(campaignId);
+  if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+
+  const [deliverables, runs] = await Promise.all([
+    getDeliverablesByCampaign(campaignId),
+    (async () => {
+      const { data, error } = await supabase
+        .from("runs")
+        .select("*")
+        .eq("campaign_id", campaignId)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (error) throw new Error(`Failed to get campaign runs for motion gate: ${error.message}`);
+      return (data as DbRun[]).map((row) => mapDbRunToRun(row));
+    })(),
+  ]);
+
+  const deliverableIds = deliverables.map((deliverable) => deliverable.id);
+  const runIds = runs.map((run) => run.runId);
+
+  let escalations: AssetEscalation[] = [];
+  if (deliverableIds.length > 0) {
+    const { data, error } = await supabase
+      .from("asset_escalations")
+      .select("*")
+      .in("deliverable_id", deliverableIds)
+      .order("updated_at", { ascending: false })
+      .limit(500);
+    if (error) throw new Error(`Failed to get campaign escalations for motion gate: ${error.message}`);
+    escalations = (data as DbAssetEscalation[]).map(mapAssetEscalation);
+  }
+
+  const approvedDecisions: MotionGateApprovedDecisionInput[] = [];
+  if (deliverableIds.length > 0) {
+    const { data: artifacts, error: artifactError } = await supabase
+      .from("artifacts")
+      .select("id, deliverable_id")
+      .in("deliverable_id", deliverableIds);
+    if (artifactError) throw new Error(`Failed to get campaign artifacts for motion gate: ${artifactError.message}`);
+    const artifactRows = (artifacts ?? []) as Array<{ id: string; deliverable_id: string | null }>;
+    const artifactToDeliverable = new Map(
+      artifactRows
+        .filter((row): row is { id: string; deliverable_id: string } => Boolean(row.deliverable_id))
+        .map((row) => [row.id, row.deliverable_id]),
+    );
+    const artifactIds = [...artifactToDeliverable.keys()];
+    if (artifactIds.length > 0) {
+      const { data: decisions, error: decisionError } = await supabase
+        .from("hitl_decisions")
+        .select("*")
+        .in("artifact_id", artifactIds)
+        .order("created_at", { ascending: false })
+        .limit(500);
+      if (decisionError) throw new Error(`Failed to get HITL decisions for motion gate: ${decisionError.message}`);
+      for (const decision of (decisions as DbHitlDecision[] ?? [])) {
+        if (decision.decision !== "approved" && decision.decision !== "approve") continue;
+        const deliverableId = decision.artifact_id ? artifactToDeliverable.get(decision.artifact_id) : undefined;
+        if (!deliverableId) continue;
+        approvedDecisions.push({
+          deliverableId,
+          notes: decision.notes ?? undefined,
+          runId: runIds.includes(decision.run_id) ? decision.run_id : undefined,
+          createdAt: decision.created_at,
+        });
+      }
+    }
+  }
+
+  const productionSlug = productionSlugFromRunsOrCampaign(campaign, runs);
+  const manifest = loadMotionGateManifest(productionSlug);
+
+  return aggregateMotionPhaseGateState({
+    campaignId,
+    productionSlug,
+    deliverables,
+    runs,
+    escalations,
+    approvedDecisions,
+    manifest,
+  });
 }
 
 // ============ Log Operations ============

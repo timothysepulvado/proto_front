@@ -18,6 +18,7 @@ interface ReshootPanelProps {
   onShotSelect?: (shotNumber: number) => void;
   activeShotNumber?: number | null;
   openDrawerOnSelect?: boolean;
+  showRenderControls?: boolean;
 }
 
 function formatBytes(bytes: number | undefined): string {
@@ -103,6 +104,7 @@ export default function ReshootPanel({
   onShotSelect,
   activeShotNumber = null,
   openDrawerOnSelect = true,
+  showRenderControls = true,
 }: ReshootPanelProps) {
   const [shots, setShots] = useState<ProductionShotState[]>([]);
   const [renderArtifact, setRenderArtifact] = useState<ProductionRenderArtifact | null>(null);
@@ -269,23 +271,25 @@ export default function ReshootPanel({
               <span>{backupCount} backups</span>
             </div>
           </div>
-          <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
-            {renderProgress && (
-              <span className={`max-w-xs truncate rounded-full border px-3 py-1.5 text-[8px] font-mono uppercase tracking-wider ${renderInFlight ? "border-cyan-500/25 bg-cyan-500/10 text-cyan-200" : "border-white/10 bg-white/[0.03] text-white/40"}`}>
-                {renderProgress}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={handleRender}
-              disabled={renderDisabled}
-              title={renderDisabled && !renderInFlight ? "Promote a pending take first to enable re-render" : "Re-render final cut"}
-              className="flex items-center justify-center rounded-2xl bg-[#ED4C14] px-4 py-3 text-[10px] font-black uppercase tracking-[0.22em] text-white shadow-[0_0_24px_rgba(237,76,20,0.18)] transition-all hover:bg-orange-400 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-orange-300/50"
-            >
-              {renderInFlight ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCw size={14} className="mr-2" />}
-              Re-render Final Cut
-            </button>
-          </div>
+          {showRenderControls && (
+            <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+              {renderProgress && (
+                <span className={`max-w-xs truncate rounded-full border px-3 py-1.5 text-[8px] font-mono uppercase tracking-wider ${renderInFlight ? "border-cyan-500/25 bg-cyan-500/10 text-cyan-200" : "border-white/10 bg-white/[0.03] text-white/40"}`}>
+                  {renderProgress}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleRender}
+                disabled={renderDisabled}
+                title={renderDisabled && !renderInFlight ? "Promote a pending take first to enable re-render" : "Re-render final cut"}
+                className="flex items-center justify-center rounded-2xl bg-[#ED4C14] px-4 py-3 text-[10px] font-black uppercase tracking-[0.22em] text-white shadow-[0_0_24px_rgba(237,76,20,0.18)] transition-all hover:bg-orange-400 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-orange-300/50"
+              >
+                {renderInFlight ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCw size={14} className="mr-2" />}
+                Re-render Final Cut
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

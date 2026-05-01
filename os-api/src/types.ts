@@ -825,6 +825,42 @@ export interface RunDetail {
   relatedStillsRun?: RecentCampaignRun | null;
 }
 
+// ─── Gap 6: Stills → Veo motion-phase gate ───────────────────────────────
+export type MotionGateShotState =
+  | "locked"
+  | "operator-override"
+  | "operator-accepted"
+  | "canonical"
+  | "pending";
+
+export interface MotionGateShotOfNote {
+  shotNumber: number;
+  deliverableId?: string;
+  state: MotionGateShotState;
+  summary: string;
+  source: "operator_override" | "asset_escalation" | "canonical_reference" | "manifest" | "run_history";
+  runId?: string;
+  criticScore?: number;
+  criticVerdict?: string;
+  decidedIter?: number;
+  decisionBy?: string;
+  decisionAt?: string;
+}
+
+export interface MotionPhaseGateState {
+  campaignId: string;
+  productionSlug?: string;
+  lockedDeliverableIds: string[];
+  lockedCount: number;
+  operatorConfirmedCount: number;
+  lockedWithoutExplicitApprovalCount: number;
+  openHitlCount: number;
+  blocked: boolean;
+  latestStillsRunId?: string;
+  shotsOfNote: MotionGateShotOfNote[];
+  generatedAt: string;
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [
