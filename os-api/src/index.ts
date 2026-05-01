@@ -50,6 +50,8 @@ import {
   getOrchestrationDecisions,
   getOrchestrationDecisionsByRun,
   getShotSummaries,
+  getRecentRunsByCampaign,
+  getRunDetail,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
@@ -235,6 +237,22 @@ app.get("/api/runs/:runId", async (req: Request, res: Response) => {
     res.json(run);
   } catch (err) {
     console.error("GET /api/runs/:runId error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/detail - Run drawer payload for HUD operators
+app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const detail = await getRunDetail(runId);
+    if (!detail) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    res.json(detail);
+  } catch (err) {
+    console.error("GET /api/runs/:runId/detail error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -779,6 +797,20 @@ app.post("/api/clients/:clientId/campaigns", async (req: Request, res: Response)
 });
 
 // ============ Deliverable Routes ============
+
+// GET /api/campaigns/:campaignId/recent-runs - Last N campaign runs for HUD workspace
+app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 10;
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
+    const runs = await getRecentRunsByCampaign(campaignId, limit);
+    res.json(runs);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/recent-runs error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // GET /api/campaigns/:campaignId/deliverables - List deliverables
 app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {

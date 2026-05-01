@@ -797,6 +797,34 @@ export interface RunEscalationReport {
   };
 }
 
+// ─── Gap 4: Campaign recent runs + run detail drawer ─────────────────────
+export interface RecentCampaignRun {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  mode: RunMode;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationSeconds: number | null;
+  hitlRequired: boolean;
+  hitlNotes?: string;
+  shotIds: number[] | null;
+  auditMode: boolean | null;
+  parentRunId?: string;
+}
+
+export interface RunDetail {
+  run: Run;
+  logs: RunLog[];
+  artifacts: Artifact[];
+  orchestrationDecisionCount: number;
+  totalOrchestrationCost: number;
+  relatedStillsRun?: RecentCampaignRun | null;
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [

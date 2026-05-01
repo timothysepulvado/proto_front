@@ -24,6 +24,8 @@ import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
 import DeliverableTimeline from "./components/DeliverableTimeline";
 import ShotDetailDrawer from "./components/ShotDetailDrawer";
+import RecentRunsPanel from "./components/RecentRunsPanel";
+import RunDetailDrawer from "./components/RunDetailDrawer";
 import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
@@ -345,6 +347,7 @@ export default function App() {
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
   const [selectedShot, setSelectedShot] = useState<SelectedShot>({ n: null, id: null });
+  const [selectedRunDetailId, setSelectedRunDetailId] = useState<string | null>(null);
   const [selectedAnchorShot, setSelectedAnchorShot] = useState<number | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -590,6 +593,7 @@ export default function App() {
     setSelectedCampaign(null);
     setPendingReviewRuns([]);
     setSelectedShot({ n: null, id: null });
+    setSelectedRunDetailId(null);
     setShowReviewPanel(false);
     setFinalHitlShotNumber(null);
     setIsRunning(false);
@@ -610,6 +614,7 @@ export default function App() {
     setSelectedCampaign(campaign);
     setCurrentRun(run);
     setSelectedShot({ n: null, id: null });
+    setSelectedRunDetailId(null);
     setSelectedAnchorShot(null);
     setShowReviewPanel(false);
     setFinalHitlShotNumber(null);
@@ -1080,6 +1085,7 @@ export default function App() {
                       onClick={() => {
                         setSelectedCampaign(null);
                         setSelectedShot({ n: null, id: null });
+                        setSelectedRunDetailId(null);
                         setSelectedAnchorShot(null);
                         setShowRunMenu(false);
                       }}
@@ -1173,9 +1179,16 @@ export default function App() {
                         </p>
                       ) : null}
                     </div>
-                  ) : activePillar === "creative" && activeClient ? (
-                    <>
-                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
+	                  ) : activePillar === "creative" && activeClient ? (
+	                    <>
+                        {currentRun?.campaignId && (
+                          <RecentRunsPanel
+                            clientId={activeClient}
+                            campaignId={currentRun.campaignId}
+                            onRunClick={setSelectedRunDetailId}
+                          />
+                        )}
+	                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
 	                        {[
 	                          { id: "deliverables" as const, label: "Deliverables" },
 	                          ...(isFeaturedClient ? [
@@ -1515,6 +1528,12 @@ export default function App() {
         initialTab={selectedShot.initialTab}
         auditShot={selectedShot.auditShot}
         onClose={() => setSelectedShot({ n: null, id: null })}
+      />
+
+      <RunDetailDrawer
+        runId={selectedRunDetailId}
+        onClose={() => setSelectedRunDetailId(null)}
+        onRunSelect={setSelectedRunDetailId}
       />
 
       {showReviewPanel && currentRun && currentClient && (

@@ -6,7 +6,7 @@ import type {
   KnownLimitation, KnownLimitationSeverity,
   AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
   OrchestrationDecisionRecord, PromptHistoryEntry,
-  BeatName, ShotSummary,
+  BeatName, ShotSummary, RecentCampaignRun, RunDetail,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
@@ -222,6 +222,131 @@ export async function getRunsByClient(clientId: string): Promise<Run[]> {
   }
 
   return (data as DbRun[]).map(mapDbRunToRun);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+export function extractRunShotIds(metadata: Record<string, unknown> | undefined): number[] | null {
+  const raw = metadata?.shot_ids;
+  if (!Array.isArray(raw)) return null;
+  const shotIds = raw
+    .map((item) => {
+      if (typeof item === "number" && Number.isInteger(item)) return item;
+      if (typeof item === "string") {
+        const parsed = Number.parseInt(item, 10);
+        return Number.isInteger(parsed) ? parsed : null;
+      }
+      return null;
+    })
+    .filter((item): item is number => item !== null && item > 0);
+  return shotIds.length > 0 ? [...new Set(shotIds)] : null;
+}
+
+export function getRunDurationSeconds(run: Pick<Run, "createdAt" | "startedAt" | "completedAt" | "status">, now = new Date()): number | null {
+  const startedAt = run.startedAt ?? run.createdAt;
+  const startMs = new Date(startedAt).getTime();
+  if (!Number.isFinite(startMs)) return null;
+
+  const endSource = run.completedAt ?? (run.status === "running" || run.status === "pending" ? now.toISOString() : undefined);
+  if (!endSource) return null;
+  const endMs = new Date(endSource).getTime();
+  if (!Number.isFinite(endMs) || endMs < startMs) return null;
+  return Math.round((endMs - startMs) / 1000);
+}
+
+export function summarizeRecentCampaignRun(run: Run, now = new Date()): RecentCampaignRun {
+  const metadata = run.metadata ?? {};
+  const parentRunId = readString(metadata.parentRunId) ?? readString(metadata.parent_run_id);
+  return {
+    runId: run.runId,
+    clientId: run.clientId,
+    campaignId: run.campaignId,
+    mode: run.mode,
+    status: run.status,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    durationSeconds: getRunDurationSeconds(run, now),
+    hitlRequired: run.hitlRequired === true,
+    hitlNotes: run.hitlNotes,
+    shotIds: extractRunShotIds(metadata),
+    auditMode: typeof metadata.audit_mode === "boolean" ? metadata.audit_mode : null,
+    parentRunId,
+  };
+}
+
+export function sumOrchestrationDecisionCost(
+  decisions: Array<Pick<OrchestrationDecisionRecord, "cost" | "inputContext" | "decision">>,
+): number {
+  return decisions.reduce((sum, item) => {
+    const direct = readNumber(item.cost);
+    if (direct !== undefined) return sum + direct;
+    const inputMeta = isRecord(item.inputContext.metadata) ? item.inputContext.metadata : null;
+    const decisionMeta = isRecord(item.decision.metadata) ? item.decision.metadata : null;
+    return sum + (readNumber(inputMeta?.cost) ?? readNumber(decisionMeta?.cost) ?? 0);
+  }, 0);
+}
+
+export async function getRecentRunsByCampaign(campaignId: string, limit = 10): Promise<RecentCampaignRun[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: false })
+    .limit(safeLimit);
+
+  if (error) {
+    throw new Error(`Failed to get recent campaign runs: ${error.message}`);
+  }
+
+  return (data as DbRun[]).map((row) => summarizeRecentCampaignRun(mapDbRunToRun(row)));
+}
+
+export async function getRunDetail(runId: string): Promise<RunDetail | null> {
+  const run = await getRun(runId);
+  if (!run) return null;
+
+  const [logs, artifacts, decisions] = await Promise.all([
+    getLogsByRun(runId),
+    getArtifactsByRun(runId),
+    getOrchestrationDecisionsByRun(runId),
+  ]);
+
+  let relatedStillsRun: RecentCampaignRun | null = null;
+  const metadata = run.metadata ?? {};
+  const parentRunId = readString(metadata.parentRunId) ?? readString(metadata.parent_run_id);
+  if (run.mode === "video" && parentRunId) {
+    const parentRun = await getRun(parentRunId);
+    if (parentRun?.mode === "stills") {
+      relatedStillsRun = summarizeRecentCampaignRun(parentRun);
+    }
+  }
+
+  return {
+    run,
+    logs,
+    artifacts,
+    orchestrationDecisionCount: decisions.length,
+    totalOrchestrationCost: sumOrchestrationDecisionCost(decisions),
+    relatedStillsRun,
+  };
 }
 
 // ============ Log Operations ============

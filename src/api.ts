@@ -56,6 +56,33 @@ export interface Artifact {
   createdAt: string;
 }
 
+export interface RecentCampaignRun {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  mode: RunMode;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationSeconds: number | null;
+  hitlRequired: boolean;
+  hitlNotes?: string;
+  shotIds: number[] | null;
+  auditMode: boolean | null;
+  parentRunId?: string;
+}
+
+export interface RunDetail {
+  run: Run;
+  logs: RunLog[];
+  artifacts: Artifact[];
+  orchestrationDecisionCount: number;
+  totalOrchestrationCost: number;
+  relatedStillsRun?: RecentCampaignRun | null;
+}
+
 export interface Client {
   id: string;
   name: string;
@@ -1285,6 +1312,50 @@ export async function createStillsAuditRun(clientId: string, campaignId: string)
 
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as Run;
+}
+
+export async function getCampaignRecentRuns(campaignId: string, limit = 10): Promise<RecentCampaignRun[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const resp = await fetch(
+    `${OS_API_URL}/api/campaigns/${campaignId}/recent-runs?limit=${encodeURIComponent(String(safeLimit))}`,
+  );
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RecentCampaignRun[];
+}
+
+export async function getRunDetail(runId: string): Promise<RunDetail> {
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/detail`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RunDetail;
+}
+
+export function subscribeToRunsByClient(
+  clientId: string,
+  onChange: (run: Run | null) => void,
+): () => void {
+  const channel = supabase
+    .channel(`runs:${clientId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "runs",
+        filter: `client_id=eq.${clientId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onChange(mapDbRunToRun(payload.new as DbRun));
+          return;
+        }
+        onChange(null);
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
 }
 
 export interface PlatformVariant {
