@@ -1,10 +1,10 @@
 # Runbook — `mode: "stills"` (Production Operator Guide)
 
-> **Status:** LIVE for Phase B (audit-mode validated end-to-end; in-loop runner code-complete pending Phase C templates). Phase E HUD CTA + Phase F observability metrics still pending — flagged inline below.
+> **Status:** LIVE end-to-end. Phase A endpoint, Phase B audit + in-loop runners, Phase B+ #1-#8 (X-Trace-Id passthrough + /health timeout 5→30s + shotIds targeted-regen + Rule 7 prompt budget + auto-seed + loop closure + localPath read + HITL bubble) all SHIPPED. Direction-fix CLOSED 2026-04-30 (5/5 drifted shots locked; operator-override pattern productized). HUD operator-side UX pass 8/8 SHIPPED 2026-05-01 on `feat/step-11-phase-4` (`d4c7ddb` Review Gate escalation surface, `5d56a52` audit-triage staleness banner, `8037366` operator override pill, `51bec11` Recent Runs panel, `23aa631` canonical-ref badges, `e98f111` motion-phase gate, `62e663f` direction-drift indicators, `3a13380` regen iterations browser). **Operators should drive from the HUD now; curl flows below are fallback.** Phase F observability + Phase G runbook expansion + Phase H multi-campaign RLS still queued.
 > **Owner:** Brandy
-> **Last revised:** 2026-04-29 PM (audit smoke #1 PASS 15/15 vs manual baseline)
-> **Implemented by:** commits `ef18a76` (initial) + `4c713b2` (`runs.metadata` refinement) on `feat/step-11-phase-4`
-> **Live-validated by:** audit run `389ae296-390c-4333-b289-831d6c0252f5` against the 30-shot Drift MV campaign (closeout: `.claude/handoffs/brandy/2026-04-29-PM-phase-b-audit-smoke-results.md`)
+> **Last revised:** 2026-05-01 (HUD UX pass 8/8 SHIPPED — operator-side surfaces are LIVE)
+> **Implemented by:** Phase B `ef18a76` + `4c713b2` + Phase B+ commits on `feat/step-11-phase-4`; HUD UX commits `d4c7ddb` → `3a13380` on `feat/step-11-phase-4`
+> **Live-validated by:** audit run `389ae296-390c-4333-b289-831d6c0252f5` (Phase B audit smoke #1 — 15/15 baseline match) + drift-mv closing run `01ead7d8-...` (5 shots: 2 SHIP / 1 ACCEPT / 2 HITL → operator override, 2026-04-30) + 28 Playwright screenshots (HUD UX pass 2026-04-30 → 2026-05-01)
 
 ## Audit smoke #1 result (2026-04-29 PM)
 
@@ -31,9 +31,11 @@ Productized from the manual orchestration that shipped the Drift MV inaugural ca
 
 ## Quick start — operator workflows
 
-### Phase B: fire from curl (Phase E HUD CTA pending — Karl)
+### Phase B: fire from HUD (preferred) or curl (fallback)
 
-Until the HUD "Run Audit" button lands (Phase E), operators fire stills runs via curl against the os-api endpoint.
+**Preferred (HUD, 2026-05-01+):** Operators fire stills runs from the Drift MV campaign workspace via the existing run-controls. Audit triage table reads `runs.metadata.audit_report` and renders inline in `<AuditTriageTable>`. The Gap 2 staleness banner (`5d56a52`) surfaces "N in-loop runs since this audit · triage may be stale — fire a fresh audit to refresh" when in-loop runs land after the latest audit. Recent runs are visible in `<RecentRunsPanel>` (Gap 4 `51bec11`) and click-through to `<RunDetailDrawer>` for logs + orchestration cost + artifacts.
+
+**Fallback (curl):** When the HUD is down or you're scripting, hit the os-api endpoint directly. Same payload contract as the HUD path.
 
 **One-time per environment** — enable the feature flag:
 
@@ -123,7 +125,7 @@ The `audit_report` blob shape (persisted to `runs.metadata.audit_report` at audi
 - `L2_approach_change` → composition redesign; medium cost (2-3 iters ≈ $0.30-0.50)
 - `L3_redesign` → fundamental redesign; expect HITL involvement
 
-⏸ **Phase E pending:** HUD will render this triage table inline + click-through to `ShotDetailDrawer.Critic` for full per-criterion verdict.
+✅ **HUD LIVE (2026-04-30 → 2026-05-01):** `<AuditTriageTable>` renders the triage table inline with click-through to `<ShotDetailDrawer>` (5 tabs: Narrative / Critic / Orchestrator / Timeline / Iterations). Gap 2 staleness banner (`5d56a52`) flags when in-loop runs invalidate the triage. Gap 1 `<ReviewGateEscalationSurface>` (`d4c7ddb`) surfaces open `asset_escalations` per shot with Accept flow that auto-clears `runs.hitl_required`. Gap 7 DIRECTION DRIFT pill (`62e663f`) on shot cards reads direction-class failure_classes / manifest_caveat fallback and pins Timeline tab to the verdict on click.
 
 ### In-loop run (after audit identifies shots that need pivot)
 
@@ -145,11 +147,11 @@ In-loop mode iterates `campaign_deliverables` in non-terminal status (`generatin
 3. Else delegate to `escalation_loop.ts::handleQAFailure` — runs degenerate-loop guard (`_countConsecutiveSamePromptRegens` + `_maybePromoteLevel` L1×3 → L2×2 → L3×2 → HITL), records `orchestration_decisions` row, applies $1.00/shot cumulative cost cap (`STILLS_PER_SHOT_COST_CAP`)
 4. On `outcome === "regenerate"` → POST Temp-gen `/generate/image` with the orchestrator's new still prompt + manifest anchors as references
 
-⏸ **Phase B+ refinement pending:** the regen → artifact-row closure step (auto-create successor `artifacts` row so the next iter picks it up) is left for Phase E HUD wiring or a Phase B+ pass. Today the operator drives the rest manually.
+✅ **Phase B+ #6 SHIPPED 2026-04-30 (`2183d33`):** the runner now closes the regen → artifact-row → re-grade loop fully in-process. After Temp-gen writes a regen still, `createArtifactWithUpload` registers it tied to (current run, current deliverable, iter+1) with `metadata.parentArtifactId` provenance; next iter's `getArtifactsByRun` picks it up and the critic re-grades the new image. Phase B+ #7 (`4e9876f`) added `metadata.localPath` read priority so the local-file grader resolves the disk copy instead of the public Storage URL. Phase B+ #3 auto-seed (`29949ad`) registers a synthetic seed artifact when no artifact exists for a (current run, deliverable) pair but a prior-run artifact OR an on-disk locked still exists — escalation can attach. The full chain is now operator-visible via Gap 8 Iterations tab (`3a13380`) in `<ShotDetailDrawer>` with parent breadcrumbs + side-by-side Compare modal.
 
 ### Ad-hoc single-shot pivot
 
-⏸ **Phase E pending:** the `ShotDetailDrawer` "Trigger Pivot" button. Until then, seed a deliverable row with description `"Shot N: ..."` and fire `auditMode: false` against the campaign — only the unresolved deliverables process.
+⏸ **Per-shot "Trigger Pivot" CTA still pending.** The HUD UX pass (2026-04-30 → 2026-05-01) shipped adjacent affordances — Gap 4 RecentRunsPanel for run-level visibility, Gap 6 MotionPhaseGate for stills→Veo handoff, Gap 8 Iterations tab for per-shot history — but a one-click "re-fire `auditMode:false` scoped to this shot" affordance from `<ShotDetailDrawer>` is still queued. **Today's path:** use the targeted-regen via Phase B+ #5 `shotIds: [N]` body field on a `mode:stills auditMode:false` POST — the runner iterates exactly the listed manifest shot IDs (bypasses `status NOT IN (approved, rejected)` filter). Operator-priority order is preserved.
 
 ---
 

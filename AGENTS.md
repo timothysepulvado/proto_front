@@ -16,39 +16,60 @@ feed into it — they're called by the runner pipeline, not standalone services.
 ```
 proto_front/
 ├── src/                    ← React 19 HUD (Vite + Tailwind v4)
-│   ├── App.tsx             ← 5 pillar tabs, run controls
-│   ├── api.ts              ← Supabase client, types, queries, realtime
+│   ├── App.tsx             ← 5 pillar tabs, run controls, RunDetailDrawer mount
+│   ├── api.ts              ← Supabase client, types, queries, realtime + Gap 1-8 helpers
 │   ├── lib/supabase.ts     ← Supabase config
 │   └── components/
-│       ├── ReviewPanel.tsx          ← HITL review UI
-│       ├── DeliverableTracker.tsx   ← Campaign deliverable lifecycle + shot L-badge/cost/click-to-drawer
-│       ├── ShotDetailDrawer.tsx     ← Per-shot drawer — Narrative/Critic/Orchestrator/Timeline tabs (Chunk 2)
-│       ├── WatcherSignalsPanel.tsx  ← Live SSE watcher — cost + loop alerts + cancel (Chunk 2)
-│       ├── DriftAlertPanel.tsx      ← Drift alerts + acknowledgment
-│       ├── BaselinePanel.tsx        ← Brand baseline snapshots
-│       └── PromptEvolutionPanel.tsx ← Prompt performance + evolution
+│       ├── ReviewPanel.tsx                  ← HITL review UI
+│       ├── ReviewGateEscalationSurface.tsx  ← Gap 1 — open/in-progress asset_escalations + Accept flow + Realtime
+│       ├── DeliverableTracker.tsx           ← Campaign deliverable lifecycle + shot L-badge/cost/click-to-drawer + Gap 3 OPERATOR OVERRIDE pill + Gap 7 DIRECTION DRIFT pill
+│       ├── AuditTriageTable.tsx             ← Audit triage (KEEP/L1/L2/L3/ERR/COST) + Gap 2 staleness banner
+│       ├── ShotDetailDrawer.tsx             ← Per-shot drawer — Narrative/Critic/Orchestrator/Timeline + Gap 8 Iterations (5 tabs); Gap 3 override marker; Gap 7 Timeline-pinned-verdict
+│       ├── RecentRunsPanel.tsx              ← Gap 4 — collapsible last-10-runs panel + filter toggle + Realtime by client_id
+│       ├── RunDetailDrawer.tsx              ← Gap 4 — run drawer (logs + orch decisions + cost + artifacts)
+│       ├── AnchorStillPanel.tsx             ← Stills + Anchors view + Gap 5 CANONICAL REF badges + per-shot canonical-ref footnotes
+│       ├── ReshootPanel.tsx                 ← Reshoots/stills views + Gap 5 canonical-ref surfaces; Gap 6 hides legacy "Re-render Final Cut"
+│       ├── MotionPhaseGate.tsx              ← Gap 6 — locked-stills aggregation + HITL block predicate + confirmation modal + mode:video CTA
+│       ├── WatcherSignalsPanel.tsx          ← Live SSE watcher — cost + loop alerts + cancel
+│       ├── DriftAlertPanel.tsx              ← Drift alerts + acknowledgment
+│       ├── BaselinePanel.tsx                ← Brand baseline snapshots
+│       ├── FinalHITLPanel.tsx               ← Full-edit HITL surface (Phase 2b)
+│       ├── DeliverableTimeline.tsx          ← Horizontal-scrub deliverables timeline (Phase 2b)
+│       └── PromptEvolutionPanel.tsx         ← Prompt performance + evolution
 │
 ├── os-api/src/             ← Express API (orchestration layer)
-│   ├── index.ts            ← Routes: runs, HITL, campaigns, deliverables, drift, prompts
+│   ├── index.ts            ← Routes: runs, HITL, campaigns, deliverables, drift, prompts, productions, +
+│   │                         Gap 1 PATCH /api/escalations/:id/resolve;
+│   │                         Gap 4 GET /api/campaigns/:id/recent-runs + GET /api/runs/:id/detail;
+│   │                         Gap 5 GET /api/productions/:slug/canonical-reference/:name;
+│   │                         Gap 6 GET /api/campaigns/:id/motion-phase-gate;
+│   │                         Gap 7 GET /api/campaigns/:id/direction-drift;
+│   │                         Gap 8 GET /api/deliverables/:id/iterations + GET /api/artifacts/:id/file
 │   ├── runner.ts           ← Pipeline executor — calls brand-engine :8100 + Temp-gen :8200
-│   ├── db.ts               ← Supabase query layer, typed mappers
-│   ├── types.ts            ← Shared types (Run, Artifact, Campaign, DriftAlert, etc.)
+│   ├── stills_runner.ts    ← `mode:stills` audit-mode + in-loop critic-in-loop pipeline (Phase B + B+ #1-#8)
+│   ├── orchestrator.ts     ← Opus 4.7 orchestration; HARD RULES 1-7 (Rule 7 = 2000-char prompt budget)
+│   ├── escalation_loop.ts  ← L1/L2/L3 escalation w/ stills-specific $1.00/shot cap
+│   ├── productions.ts      ← Production manifest endpoints + Gap 5 canonical_reference normalization in mapManifestShotToResponse
+│   ├── db.ts               ← Supabase query layer, typed mappers + Gap 4-8 typed aggregators (recent-runs, motion-gate state, direction-drift indicators, artifact iterations)
+│   ├── types.ts            ← Shared types (Run, Artifact, Campaign, DriftAlert, MotionPhaseGate, DirectionDriftIndicator, ArtifactIterationRow, etc.)
 │   ├── storage.ts          ← Supabase Storage upload (dual-write to Cloudinary)
-│   └── cloudinary.ts       ← Optional CDN — 10 platform presets
+│   ├── cloudinary.ts       ← Optional CDN — 10 platform presets
+│   └── tests/              ← Per-gap typed test suites: _gap4-recent-runs, _gap5-canonical-reference, _gap6-motion-phase-gate, _gap7-direction-drift, _gap8-artifact-iterations + _10d-shot-summaries (16/16) + phase-b-stills-runner (14/14)
 │
 ├── worker/                 ← Python worker (headless run execution)
-│   ├── worker.py           ← Polls Supabase for runs
+│   ├── worker.py           ← Polls Supabase for runs (filtered: not in OS_API_OWNED_MODES)
 │   ├── config.py           ← Worker config
 │   └── executors/          ← Stage executors (ingest, grading, prompt_evolver)
 │
 ├── brand-engine/           ← Python SDK (consolidated from Brand_linter + BDE)
 │   ├── brand_engine/core/  ← 7 modules: embeddings, retrieval, drift, fusion, trainer
-│   ├── api/server.py       ← FastAPI sidecar on :8100
+│   ├── api/server.py       ← FastAPI sidecar on :8100 (X-Trace-Id passthrough on /grade_image_v2)
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 8 migrations (001-008) — 007 adds known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum
+├── supabase/migrations/    ← 12 migrations (001-012). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection
+├── output/playwright/      ← Visual QA captures — 28 post-direction-fix-pass-gap{1..8}-{1440,768,375}.png + variants (compare/enabled/blocked/collapsed)
 ├── hud.json                ← Client data + UI config (source of truth)
-└── docs/                   ← Integration audit, tech requirements
+└── docs/                   ← Integration audit, tech requirements, runbooks/stills-mode.md
 ```
 
 ### Connected Repos (called by runner, not standalone)
