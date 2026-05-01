@@ -605,6 +605,21 @@ async function executeDeliverableGeneration(
           if (escResult.outcome === "hitl_required") {
             await emitLog(run.runId, stageId, "warn",
               `Deliverable ${shortId} escalation requires HITL review — orchestrator could not auto-resolve`);
+            // Phase B+ #8 (2026-04-30) parity fix: bubble hitl_required to
+            // the runs row so the HUD's Review Gate surfaces the flag.
+            // Mirrors stills_runner.ts. Idempotent.
+            if (!run.hitlRequired) {
+              try {
+                const updated = await updateRun(run.runId, {
+                  hitlRequired: true,
+                  hitlNotes: `[video deliverable ${shortId}] hitl_required at video QA escalation; orchestrator could not auto-resolve.`,
+                });
+                if (updated) Object.assign(run, updated);
+              } catch (e) {
+                await emitLog(run.runId, stageId, "warn",
+                  `Failed to bubble hitl_required to runs row (${e instanceof Error ? e.message : String(e)}); escalation row remains canonical.`);
+              }
+            }
           } else if (escResult.outcome === "failed") {
             await emitLog(run.runId, stageId, "error",
               `Deliverable ${shortId} escalation loop failed — check logs`);

@@ -937,6 +937,29 @@ async function runInLoopMode(
           "warn",
           `[in_loop] shot ${shot.id} iter ${iter}: ${result.outcome}. Stopping shot.`,
         );
+        // Phase B+ #8 (2026-04-30): bubble hitl_required up to the runs row so
+        // the HUD's Review Gate (which reads runs.hitl_required) surfaces the
+        // flag for operator review. Without this, today's 3 HITL escalations
+        // (asset_escalations rows) were invisible at the campaign-monitoring
+        // surface — Review Gate showed "all clear" while shots were stuck.
+        // Idempotent: setting an already-true flag is a no-op.
+        if (result.outcome === "hitl_required" && !run.hitlRequired) {
+          try {
+            const updated = await updateRun(run.runId, {
+              hitlRequired: true,
+              hitlNotes: `[stills in_loop] shot ${shot.id} ${result.outcome} at iter ${iter}; deliverable ${deliverable.id}; escalation ${result.escalation?.id ?? "?"}.`,
+            });
+            if (updated) run = updated;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await emitLog(
+              run.runId,
+              stageId,
+              "warn",
+              `[in_loop] shot ${shot.id}: failed to bubble hitl_required to runs row (${msg}); continuing — escalation row is the canonical signal.`,
+            );
+          }
+        }
         break;
       }
       if (result.outcome === "accepted") {
