@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Layers, RefreshCw } from "lucide-react";
+import { ChevronRight, Layers, RefreshCw, ShieldCheck } from "lucide-react";
 import * as api from "../api";
 import { supabase } from "../lib/supabase";
-import type { CampaignDeliverable, DeliverableStatus } from "../api";
+import type { CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision } from "../api";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -30,7 +30,11 @@ type ShotSummary = {
 interface DeliverableTrackerProps {
   campaignId: string;
   runId?: string;
-  onShotClick?: (shotNumber: number | null, deliverableId: string) => void;
+  onShotClick?: (
+    shotNumber: number | null,
+    deliverableId: string,
+    options?: { initialTab?: "narrative" | "critic" | "orchestrator" | "timeline"; runId?: string },
+  ) => void;
 }
 
 const statusStyles: Record<DeliverableStatus, { text: string; border: string; pulse?: boolean }> = {
@@ -60,6 +64,32 @@ const getShotSummariesCompat = (api as unknown as {
 
 function formatMoney(value: number) {
   return `$${value.toFixed(2)}`;
+}
+
+function formatOverrideScore(value: number | undefined) {
+  return value == null ? "—" : value.toFixed(2);
+}
+
+function formatOperatorName(value: string | undefined) {
+  if (!value) return "Operator";
+  return value.toLowerCase().startsWith("tim") ? "Tim" : value;
+}
+
+function formatOverrideDate(value: string) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function buildOverrideSummary(override: OperatorOverrideDecision) {
+  const actor = formatOperatorName(override.decisionBy);
+  const version = override.runOrdinalForShot ? `v${override.runOrdinalForShot} ` : "";
+  const iter = override.decidedIter != null ? `iter${override.decidedIter}` : "selected iter";
+  const critic = override.criticVerdict
+    ? `over critic ${override.criticVerdict}${override.criticScore != null ? ` ${formatOverrideScore(override.criticScore)}` : ""}`
+    : "over critic";
+  return `${actor} accepted ${version}${iter} ${critic} (run ${override.runId.slice(0, 8)})`;
 }
 
 function formatBeatLabel(beatName: string | null) {
@@ -136,20 +166,27 @@ function upsertDeliverable(list: CampaignDeliverable[], deliverable: CampaignDel
 function ShotCard({
   deliverable,
   summary,
+  operatorOverride,
   onShotClick,
 }: {
   deliverable: CampaignDeliverable;
   summary: ShotSummary;
-  onShotClick?: (shotNumber: number | null, deliverableId: string) => void;
+  operatorOverride?: OperatorOverrideDecision;
+  onShotClick?: DeliverableTrackerProps["onShotClick"];
 }) {
   const statusStyle = statusStyles[deliverable.status];
   const costOverCap = summary.cumulativeCost > 4;
   const interactive = Boolean(onShotClick);
+  const overrideSummary = operatorOverride ? buildOverrideSummary(operatorOverride) : null;
 
   return (
     <button
       type="button"
-      onClick={() => onShotClick?.(summary.shotNumber, deliverable.id)}
+      onClick={() => onShotClick?.(
+        summary.shotNumber,
+        deliverable.id,
+        operatorOverride ? { initialTab: "timeline", runId: operatorOverride.runId } : undefined,
+      )}
       className={`group w-full rounded-xl border bg-white/[0.02] p-3 text-left transition-all ${statusStyle.border} ${
         interactive ? "hover:border-cyan-400/40 hover:bg-white/[0.04]" : "cursor-default"
       }`}
@@ -220,6 +257,16 @@ function ShotCard({
               {summary.escalationLevel}
             </span>
           )}
+          {operatorOverride && overrideSummary && (
+            <span
+              aria-label={`Operator override: ${overrideSummary}`}
+              className="inline-flex items-center gap-1 rounded-lg border border-[#ED4C14]/45 bg-[#ED4C14]/15 px-2 py-1 text-[8px] font-mono uppercase tracking-wider text-orange-200 shadow-[0_0_16px_rgba(237,76,20,0.16)]"
+              title={overrideSummary}
+            >
+              <ShieldCheck size={9} />
+              Operator Override
+            </span>
+          )}
           <span
             className={`rounded-lg border px-2 py-1 text-[8px] font-mono ${
               costOverCap
@@ -232,6 +279,37 @@ function ShotCard({
           {interactive && <ChevronRight size={12} className="text-white/20" />}
         </div>
       </div>
+      {operatorOverride && overrideSummary && (
+        <div className="mt-0 max-h-0 overflow-hidden transition-all duration-300 group-hover:mt-3 group-hover:max-h-56 group-focus-within:mt-3 group-focus-within:max-h-56">
+          <div className="rounded-xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 p-3">
+            <div className="flex flex-wrap items-center gap-2 text-[8px] font-mono uppercase tracking-widest text-orange-200">
+              <span className="inline-flex items-center gap-1">
+                <ShieldCheck size={10} />
+                OPERATOR OVERRIDE
+              </span>
+              <span className="text-white/45">{overrideSummary}</span>
+            </div>
+            {operatorOverride.rationale && (
+              <p className="mt-2 text-[10px] leading-5 text-white/65">
+                {operatorOverride.rationale}
+              </p>
+            )}
+            <div className="mt-2 grid grid-cols-2 gap-2 text-[8px] font-mono uppercase tracking-wider text-white/50 sm:grid-cols-4">
+              <span>critic_score <strong className="text-orange-100">{formatOverrideScore(operatorOverride.criticScore)}</strong></span>
+              <span>decided_iter <strong className="text-orange-100">{operatorOverride.decidedIter ?? "—"}</strong></span>
+              <span>decision_at <strong className="text-orange-100">{formatOverrideDate(operatorOverride.decisionAt)}</strong></span>
+              <span>decision_by <strong className="text-orange-100">{operatorOverride.decisionBy ?? "—"}</strong></span>
+            </div>
+            <span className="sr-only">
+              Operator override rationale: {operatorOverride.rationale ?? "No rationale recorded"}.
+              Critic score {formatOverrideScore(operatorOverride.criticScore)}.
+              Decided iteration {operatorOverride.decidedIter ?? "unknown"}.
+              Decision date {operatorOverride.decisionAt}.
+              Decision by {operatorOverride.decisionBy ?? "unknown"}.
+            </span>
+          </div>
+        </div>
+      )}
     </button>
   );
 }
@@ -239,6 +317,7 @@ function ShotCard({
 export default function DeliverableTracker({ campaignId, runId, onShotClick }: DeliverableTrackerProps) {
   const [deliverables, setDeliverables] = useState<CampaignDeliverable[]>([]);
   const [shotSummaries, setShotSummaries] = useState<ShotSummary[]>([]);
+  const [operatorOverrides, setOperatorOverrides] = useState<OperatorOverrideDecision[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -257,20 +336,33 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
     [campaignId, runId],
   );
 
+  const refreshOperatorOverrides = useCallback(async () => {
+    try {
+      setOperatorOverrides(await api.getOperatorOverridesForCampaign(campaignId));
+    } catch {
+      setError("Couldn't refresh operator overrides. Retry.");
+    }
+  }, [campaignId]);
+
   useEffect(() => {
     let cancelled = false;
     deliverablesRef.current = [];
     setDeliverables([]);
     setShotSummaries([]);
+    setOperatorOverrides([]);
 
     async function load() {
       try {
         setIsLoading(true);
         setError(null);
-        const data = await api.getCampaignDeliverables(campaignId);
+        const [data, overrides] = await Promise.all([
+          api.getCampaignDeliverables(campaignId),
+          api.getOperatorOverridesForCampaign(campaignId),
+        ]);
         if (cancelled) return;
         deliverablesRef.current = data;
         setDeliverables(data);
+        setOperatorOverrides(overrides);
         const summaries = await loadShotSummaries(campaignId, data, runId);
         if (!cancelled) setShotSummaries(summaries);
       } catch {
@@ -309,33 +401,58 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
           .subscribe()
       : null;
 
+    const runsChannel = supabase
+      .channel(`operator_overrides:${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "runs",
+          filter: `campaign_id=eq.${campaignId}`,
+        },
+        () => {
+          void refreshOperatorOverrides();
+        },
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
       unsubscribeDeliverables();
       if (decisionsChannel) {
         void supabase.removeChannel(decisionsChannel);
       }
+      void supabase.removeChannel(runsChannel);
     };
-  }, [campaignId, refreshShotSummaries, reloadNonce, runId]);
+  }, [campaignId, refreshOperatorOverrides, refreshShotSummaries, reloadNonce, runId]);
 
   const mergedDeliverables = useMemo(() => {
     const summaryMap = new Map(shotSummaries.map((summary) => [summary.deliverableId, summary]));
     const fallbackMap = new Map(buildStubShotSummaries(deliverables).map((summary) => [summary.deliverableId, summary]));
+    const latestOverrideByShot = new Map<number, OperatorOverrideDecision>();
+    for (const override of operatorOverrides) {
+      if (!latestOverrideByShot.has(override.shotNumber)) {
+        latestOverrideByShot.set(override.shotNumber, override);
+      }
+    }
     return deliverables.map((deliverable) => {
       const summary = summaryMap.get(deliverable.id);
       const fallback = fallbackMap.get(deliverable.id) ?? buildStubShotSummaries([deliverable])[0];
+      const resolvedShotNumber = summary?.shotNumber ?? fallback.shotNumber;
       return {
         deliverable,
         summary: summary
           ? {
               ...summary,
-              shotNumber: summary.shotNumber ?? fallback.shotNumber,
+              shotNumber: resolvedShotNumber,
               beatName: summary.beatName ?? fallback.beatName,
             }
           : fallback,
+        operatorOverride: resolvedShotNumber ? latestOverrideByShot.get(resolvedShotNumber) : undefined,
       };
     });
-  }, [deliverables, shotSummaries]);
+  }, [deliverables, operatorOverrides, shotSummaries]);
 
   const counts = useMemo(
     () =>
@@ -412,11 +529,12 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
       </div>
 
       <div className="space-y-2">
-        {mergedDeliverables.map(({ deliverable, summary }) => (
+        {mergedDeliverables.map(({ deliverable, summary, operatorOverride }) => (
           <ShotCard
             key={deliverable.id}
             deliverable={deliverable}
             summary={summary}
+            operatorOverride={operatorOverride}
             onShotClick={onShotClick}
           />
         ))}

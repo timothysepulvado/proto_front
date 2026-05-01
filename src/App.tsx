@@ -1266,7 +1266,12 @@ export default function App() {
                                 key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
                                 campaignId={currentRun.campaignId}
                                 runId={currentRun.runId}
-                                onShotClick={(n, id) => setSelectedShot({ n, id })}
+                                onShotClick={(n, id, options) => setSelectedShot({
+                                  n,
+                                  id,
+                                  runId: options?.runId,
+                                  initialTab: options?.initialTab,
+                                })}
                               />
                             </>
                           )}
@@ -1505,6 +1510,7 @@ export default function App() {
         key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}`}
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
+        campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
         runId={selectedShot.runId ?? currentRun?.runId}
         initialTab={selectedShot.initialTab}
         auditShot={selectedShot.auditShot}

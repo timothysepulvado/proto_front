@@ -7,11 +7,12 @@ import {
   Film,
   Layers3,
   MessageSquareText,
+  ShieldCheck,
   Workflow,
   X,
 } from "lucide-react";
 import * as api from "../api";
-import type { Artifact, CampaignDeliverable, DeliverableStatus, ProductionShotState, RunLog } from "../api";
+import type { Artifact, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, RunLog } from "../api";
 import type { AuditReportShot } from "../lib/auditReport";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
@@ -103,7 +104,7 @@ type RunEscalationReport = {
 type TimelineEvent = {
   id: string;
   createdAt: string;
-  kind: "log" | "grade" | "decision" | "artifact";
+  kind: "log" | "grade" | "decision" | "artifact" | "override";
   summary: string;
   detail?: string;
 };
@@ -111,6 +112,7 @@ type TimelineEvent = {
 interface ShotDetailDrawerProps {
   shotNumber: number | null;
   deliverableId: string | null;
+  campaignId?: string | null;
   runId?: string;
   initialTab?: DrawerTab;
   auditShot?: AuditReportShot | null;
@@ -167,6 +169,25 @@ function readStringArray(value: unknown): string[] {
 
 function formatMoney(value: number | null | undefined) {
   return `$${(value ?? 0).toFixed(2)}`;
+}
+
+function formatOverrideScore(value: number | undefined) {
+  return value == null ? "—" : value.toFixed(2);
+}
+
+function formatOperatorName(value: string | undefined) {
+  if (!value) return "Operator";
+  return value.toLowerCase().startsWith("tim") ? "Tim" : value;
+}
+
+function buildOverrideSummary(override: OperatorOverrideDecision) {
+  const actor = formatOperatorName(override.decisionBy);
+  const version = override.runOrdinalForShot ? `v${override.runOrdinalForShot} ` : "";
+  const iter = override.decidedIter != null ? `iter${override.decidedIter}` : "selected iter";
+  const critic = override.criticVerdict
+    ? `over critic ${override.criticVerdict}${override.criticScore != null ? ` ${formatOverrideScore(override.criticScore)}` : ""}`
+    : "over critic";
+  return `${actor} accepted ${version}${iter} ${critic} (run ${override.runId.slice(0, 8)})`;
 }
 
 function formatBeat(beatName: string | null) {
@@ -284,6 +305,48 @@ function extractWebSearchCount(record: OrchestrationDecisionRecord): number | nu
   return readNumber(decision, "web_search_count") ?? readNumber(decision, "webSearchCount");
 }
 
+function latestIso(values: string[]) {
+  const timestamps = values
+    .map((value) => ({ value, time: new Date(value).getTime() }))
+    .filter((item) => Number.isFinite(item.time));
+  if (timestamps.length === 0) return null;
+  timestamps.sort((left, right) => right.time - left.time);
+  return timestamps[0].value;
+}
+
+function overrideTimelineTimestamp(
+  override: OperatorOverrideDecision,
+  logs: RunLog[],
+  artifacts: Artifact[],
+  decisions: OrchestrationDecisionRecord[],
+) {
+  const decidedIter = override.decidedIter;
+  const iterNeedle = decidedIter != null ? `iter ${decidedIter}` : null;
+  const compactIterNeedle = decidedIter != null ? `iter${decidedIter}` : null;
+
+  const iterLogTimes = iterNeedle
+    ? logs
+        .filter((log) => {
+          const message = log.message.toLowerCase();
+          return message.includes(iterNeedle) || (compactIterNeedle ? message.includes(compactIterNeedle) : false);
+        })
+        .map((log) => log.timestamp)
+    : [];
+  const iterArtifactTimes = compactIterNeedle
+    ? artifacts
+        .filter((artifact) => {
+          const haystack = `${artifact.name} ${artifact.path} ${artifact.storagePath ?? ""}`.toLowerCase();
+          return haystack.includes(compactIterNeedle);
+        })
+        .map((artifact) => artifact.createdAt)
+    : [];
+  const decisionTimes = decisions.map((decision) => decision.createdAt);
+
+  return latestIso([...iterLogTimes, ...iterArtifactTimes])
+    ?? latestIso([...logs.map((log) => log.timestamp), ...artifacts.map((artifact) => artifact.createdAt), ...decisionTimes])
+    ?? override.runCreatedAt;
+}
+
 function formatCharacters(characters: unknown[]) {
   const slugs = characters
     .map((entry) => {
@@ -299,6 +362,7 @@ function buildTimelineEvents(
   logs: RunLog[],
   artifacts: Artifact[],
   decisions: OrchestrationDecisionRecord[],
+  operatorOverrides: OperatorOverrideDecision[],
   deliverableId: string,
   shotNumber: number | null,
 ): TimelineEvent[] {
@@ -353,10 +417,27 @@ function buildTimelineEvents(
     summary: `${artifact.type === "video" ? "Veo render" : "Artifact created"} ${artifact.name}`,
   }));
 
-  return [...logEvents, ...decisionEvents, ...artifactEvents].sort((left, right) => {
+  const overrideEvents = operatorOverrides
+    .filter((override) => shotNumber === null || override.shotNumber === shotNumber)
+    .map((override) => ({
+      id: `override-${override.runId}-${override.shotKey}`,
+      createdAt: overrideTimelineTimestamp(override, logs, artifacts, decisions),
+      kind: "override" as const,
+      summary: `Operator override — ${buildOverrideSummary(override)}`,
+      detail: [
+        override.rationale,
+        `critic_score=${formatOverrideScore(override.criticScore)}`,
+        `decided_iter=${override.decidedIter ?? "—"}`,
+        `decision_at=${override.decisionAt}`,
+        `decision_by=${override.decisionBy ?? "—"}`,
+        override.lockedTo ? `locked_to=${override.lockedTo}` : null,
+      ].filter(Boolean).join(" · "),
+    }));
+
+  return [...logEvents, ...decisionEvents, ...artifactEvents, ...overrideEvents].sort((left, right) => {
     const timeDelta = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
     if (timeDelta !== 0) return timeDelta;
-    const rank = { log: 0, grade: 1, decision: 2, artifact: 3 };
+    const rank = { log: 0, grade: 1, decision: 2, artifact: 3, override: 4 };
     return rank[left.kind] - rank[right.kind];
   });
 }
@@ -400,19 +481,21 @@ function buildAuditCriticPayload(auditShot: AuditReportShot | null | undefined):
 }
 
 function TimelineIcon({ kind }: { kind: TimelineEvent["kind"] }) {
+  if (kind === "override") return <ShieldCheck size={12} className="text-orange-300" />;
   if (kind === "artifact") return <Film size={12} className="text-cyan-300" />;
   if (kind === "grade") return <CheckCircle2 size={12} className="text-emerald-300" />;
   if (kind === "decision") return <Workflow size={12} className="text-amber-300" />;
   return <Archive size={12} className="text-white/45" />;
 }
 
-export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, initialTab, auditShot, onClose }: ShotDetailDrawerProps) {
+export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, auditShot, onClose }: ShotDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>("narrative");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
   const [trail, setTrail] = useState<DeliverableTrail | null>(null);
   const [fallbackDeliverable, setFallbackDeliverable] = useState<CampaignDeliverable | null>(null);
   const [productionShots, setProductionShots] = useState<ProductionShotState[]>([]);
+  const [operatorOverrides, setOperatorOverrides] = useState<OperatorOverrideDecision[]>([]);
   const [expandedDecisionId, setExpandedDecisionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -428,6 +511,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
     setTrail(null);
     setFallbackDeliverable(null);
     setProductionShots([]);
+    setOperatorOverrides([]);
     setLoadError(null);
     if (!deliverableId) {
       setIsLoading(false);
@@ -504,6 +588,10 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
           api.getDeliverable(currentDeliverableId).catch(() => null),
           api.getProductionShots("drift-mv").then((response) => response.shots).catch(() => []),
         ]);
+        const overrideCampaignId = campaignId ?? deliverableDetail?.campaignId;
+        const overrides = overrideCampaignId
+          ? await api.getOperatorOverridesForCampaign(overrideCampaignId)
+          : [];
 
         const sortedArtifacts = [...runArtifacts].sort(
           (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
@@ -518,6 +606,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
         setTrail(runTrail);
         setFallbackDeliverable(deliverableDetail);
         setProductionShots(productionCatalog);
+        setOperatorOverrides(overrides);
       } catch {
         if (!cancelled) {
           setLoadError("Couldn't load shot details. Retry.");
@@ -533,7 +622,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
     return () => {
       cancelled = true;
     };
-  }, [deliverableId, reloadNonce, runId]);
+  }, [campaignId, deliverableId, reloadNonce, runId]);
 
   const latestArtifact = artifacts[0] ?? null;
   const narrative = useMemo(() => extractNarrativeContext(latestArtifact), [latestArtifact]);
@@ -557,9 +646,13 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
   const resolvedBeat = narrative?.beat_name ?? productionShot?.beat ?? null;
   const deliverable = trail?.deliverable ?? fallbackDeliverable ?? null;
   const deliverableStatus = isDeliverableStatus(deliverable?.status) ? deliverable.status : undefined;
+  const latestOperatorOverride = useMemo(
+    () => operatorOverrides.find((override) => override.shotNumber === resolvedShotNumber) ?? null,
+    [operatorOverrides, resolvedShotNumber],
+  );
   const timeline = useMemo(
-    () => (deliverableId ? buildTimelineEvents(logs, artifacts, decisionsNewestFirst, deliverableId, resolvedShotNumber) : []),
-    [artifacts, decisionsNewestFirst, deliverableId, logs, resolvedShotNumber],
+    () => (deliverableId ? buildTimelineEvents(logs, artifacts, decisionsNewestFirst, operatorOverrides, deliverableId, resolvedShotNumber) : []),
+    [artifacts, decisionsNewestFirst, deliverableId, logs, operatorOverrides, resolvedShotNumber],
   );
 
   if (!deliverableId) {
@@ -593,6 +686,15 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, runId, ini
                 <span className={`rounded-full border px-2 py-0.5 text-[8px] font-mono uppercase tracking-wider ${deliverableStatus ? statusStyles[deliverableStatus] : "border-white/10 text-white/45"}`}>
                   {deliverableStatus ?? "pending"}
                 </span>
+                {latestOperatorOverride && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full border border-[#ED4C14]/40 bg-[#ED4C14]/15 px-2 py-0.5 text-[8px] font-mono uppercase tracking-wider text-orange-200"
+                    title={buildOverrideSummary(latestOperatorOverride)}
+                  >
+                    <ShieldCheck size={10} />
+                    Operator Override
+                  </span>
+                )}
               </div>
               <p className="mt-1 text-[8px] font-mono uppercase tracking-widest text-white/35">
                 {deliverable?.description ?? `Deliverable ${deliverableId.slice(0, 8)}`} · {deliverableId.slice(0, 8)}

@@ -344,6 +344,155 @@ export async function getInLoopRunsSinceAudit(
   return inLoopOnly.length;
 }
 
+// ============ Operator Override Audit Trail (Gap 3) ============
+
+export interface OperatorOverrideDecision {
+  runId: string;
+  campaignId: string;
+  runCreatedAt: string;
+  shotKey: string;
+  shotNumber: number;
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+  runOrdinalForShot?: number;
+}
+
+interface DbRunOperatorOverride {
+  id: string;
+  campaign_id: string | null;
+  mode: RunMode;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+}
+
+const OPERATOR_OVERRIDE_SHOT_KEY = /^shot_(\d+)$/i;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readOptionalString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readOptionalNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function extractShotIds(metadata: Record<string, unknown> | null): number[] {
+  const raw = metadata?.shot_ids;
+  if (!Array.isArray(raw)) return [];
+  const ids = raw
+    .map((item) => {
+      if (typeof item === "number" && Number.isInteger(item)) return item;
+      if (typeof item === "string") {
+        const parsed = Number.parseInt(item, 10);
+        return Number.isInteger(parsed) ? parsed : null;
+      }
+      return null;
+    })
+    .filter((item): item is number => item !== null && item > 0);
+  return [...new Set(ids)];
+}
+
+function isAuditModeRun(metadata: Record<string, unknown> | null): boolean {
+  return metadata?.audit_mode === true;
+}
+
+function eventTimestamp(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Reads `runs.metadata.operator_override` for every run in a campaign and
+ * normalizes the sparse JSONB shape into per-shot audit events.
+ *
+ * The helper intentionally derives a shot-specific in-loop run ordinal
+ * (`v5` for today's shot 20 override) from the same campaign run set so the
+ * HUD can explain operator choices in the language Tim used during review.
+ */
+export async function getOperatorOverridesForCampaign(campaignId: string): Promise<OperatorOverrideDecision[]> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("id,campaign_id,mode,created_at,metadata")
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: true })
+    .limit(250);
+
+  if (error) throw new Error(`Failed to get operator overrides: ${error.message}`);
+
+  const rows = (data as DbRunOperatorOverride[]) ?? [];
+  const shotCounts = new Map<number, number>();
+  const shotOrdinalByRun = new Map<string, number>();
+
+  for (const row of rows) {
+    const metadata = isPlainRecord(row.metadata) ? row.metadata : null;
+    if (row.mode !== "stills" || isAuditModeRun(metadata)) continue;
+
+    for (const shotId of extractShotIds(metadata)) {
+      const nextOrdinal = (shotCounts.get(shotId) ?? 0) + 1;
+      shotCounts.set(shotId, nextOrdinal);
+      shotOrdinalByRun.set(`${row.id}:shot_${shotId}`, nextOrdinal);
+    }
+  }
+
+  const overrides: OperatorOverrideDecision[] = [];
+  for (const row of rows) {
+    const metadata = isPlainRecord(row.metadata) ? row.metadata : null;
+    const operatorOverride = isPlainRecord(metadata?.operator_override)
+      ? metadata.operator_override
+      : null;
+    if (!operatorOverride) continue;
+
+    for (const [shotKey, rawDecision] of Object.entries(operatorOverride)) {
+      const shotMatch = OPERATOR_OVERRIDE_SHOT_KEY.exec(shotKey);
+      const decision = isPlainRecord(rawDecision) ? rawDecision : null;
+      if (!shotMatch || !decision) continue;
+
+      const shotNumber = Number.parseInt(shotMatch[1], 10);
+      if (!Number.isInteger(shotNumber)) continue;
+
+      const normalizedShotKey = `shot_${shotNumber}`;
+      overrides.push({
+        runId: row.id,
+        campaignId: row.campaign_id ?? campaignId,
+        runCreatedAt: row.created_at,
+        shotKey: normalizedShotKey,
+        shotNumber,
+        decisionAt: readOptionalString(decision, "decision_at") ?? row.created_at,
+        decisionBy: readOptionalString(decision, "decision_by"),
+        decidedArtifactPath: readOptionalString(decision, "decided_artifact_path"),
+        decidedIter: readOptionalNumber(decision, "decided_iter"),
+        criticVerdict: readOptionalString(decision, "critic_verdict"),
+        criticScore: readOptionalNumber(decision, "critic_score"),
+        rationale: readOptionalString(decision, "rationale"),
+        lockedTo: readOptionalString(decision, "locked_to"),
+        runOrdinalForShot: shotOrdinalByRun.get(`${row.id}:${normalizedShotKey}`),
+      });
+    }
+  }
+
+  return overrides.sort((left, right) => {
+    const runDelta = eventTimestamp(right.runCreatedAt) - eventTimestamp(left.runCreatedAt);
+    if (runDelta !== 0) return runDelta;
+    return eventTimestamp(right.decisionAt) - eventTimestamp(left.decisionAt);
+  });
+}
+
 // Update run status
 export async function updateRunStatus(
   runId: string,
