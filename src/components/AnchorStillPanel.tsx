@@ -9,6 +9,7 @@ import {
   Loader2,
   Maximize2,
   RefreshCw,
+  ShieldCheck,
   ShieldX,
   Upload,
   X,
@@ -16,6 +17,7 @@ import {
 import {
   approveProductionShotStill,
   getProductionAnchorUrl,
+  getProductionCanonicalReferenceUrl,
   getProductionManagedStillUrl,
   getProductionShotStills,
   getProductionShots,
@@ -26,6 +28,7 @@ import {
   subscribeToCampaignDeliverables,
   subscribeToProductionEvents,
   type ProductionEvent,
+  type ProductionCanonicalReference,
   type ProductionFileMeta,
   type ProductionShotState,
   type ProductionShotStillCatalogItem,
@@ -80,6 +83,100 @@ function labelizeAnchor(name: string): string {
     rapper_2: "Rapper 2",
   };
   return replacements[name] ?? name.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function formatCanonicalDate(value: string | undefined): string {
+  if (!value) return "Not logged";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function CanonicalReferenceBadge({
+  reference,
+  productionSlug,
+  revision,
+}: {
+  reference: ProductionCanonicalReference;
+  productionSlug: ProductionSlug;
+  revision: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const label = labelizeAnchor(reference.characterName);
+  const previewUrl = getProductionCanonicalReferenceUrl(productionSlug, reference.characterName, revision);
+
+  return (
+    <div
+      className="absolute left-2 top-2 z-20"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        aria-expanded={open}
+        aria-label={`Canonical reference for ${label}. Locked ${formatCanonicalDate(reference.lockedAt)} by ${reference.lockedBy ?? "unknown operator"}. ${reference.rationale ?? ""}`}
+        className="inline-flex items-center gap-1 rounded-full border border-emerald-300/45 bg-emerald-300/15 px-2 py-1 text-[7px] font-mono font-bold uppercase tracking-[0.16em] text-emerald-100 shadow-[0_0_22px_rgba(16,185,129,0.18)] backdrop-blur-md transition-all hover:border-emerald-200/70 hover:bg-emerald-300/25 focus:outline-none focus:ring-2 focus:ring-emerald-200/55"
+      >
+        <ShieldCheck size={9} />
+        CANONICAL REF
+      </button>
+
+      {open && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full mt-2 w-64 overflow-hidden rounded-2xl border border-emerald-300/25 bg-[#05070b]/95 shadow-[0_18px_70px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+        >
+          <div className="aspect-video bg-black/50">
+            {reference.exists ? (
+              <img
+                src={previewUrl}
+                alt={`${label} canonical reference still`}
+                className="h-full w-full object-cover"
+                loading="lazy"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-[8px] font-mono uppercase tracking-widest text-white/25">
+                Reference missing
+              </div>
+            )}
+          </div>
+          <div className="p-3">
+            <p className="text-[8px] font-mono uppercase tracking-[0.22em] text-emerald-100">
+              {label} reference lock
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-[7px] font-mono uppercase tracking-wider text-white/35">
+              <span>
+                locked_at <strong className="block text-white/70">{formatCanonicalDate(reference.lockedAt)}</strong>
+              </span>
+              <span>
+                locked_by <strong className="block text-white/70">{reference.lockedBy ?? "—"}</strong>
+              </span>
+            </div>
+            <p className="mt-2 text-[8px] leading-relaxed text-white/55">
+              {reference.rationale ?? "No rationale recorded."}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function FileMetaLine({ label, meta }: { label: string; meta?: ProductionFileMeta | null }) {
@@ -398,26 +495,43 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3">
               {still.anchors.map((anchor) => {
                 const url = getProductionAnchorUrl(productionSlug, anchor.name, revision);
+                const canonicalReference = anchor.canonicalReference;
                 return (
-                  <button
+                  <article
                     key={anchor.name}
-                    type="button"
-                    onClick={() => anchor.exists && setLightbox({ title: labelizeAnchor(anchor.name), url })}
-                    disabled={!anchor.exists}
-                    className="group overflow-hidden rounded-2xl border border-white/10 bg-black/35 text-left transition-all hover:border-cyan-400/35 hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
+                    className={`group relative overflow-visible rounded-2xl border border-white/10 bg-black/35 transition-all hover:border-cyan-400/35 hover:bg-white/[0.04] ${anchor.exists ? "" : "opacity-45"}`}
                   >
-                    <div className="aspect-square overflow-hidden bg-black/40">
-                      {anchor.exists ? (
-                        <img src={url} alt={`${labelizeAnchor(anchor.name)} anchor`} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" loading="lazy" />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-white/18"><ImageIcon size={18} /></div>
-                      )}
-                    </div>
-                    <div className="px-2 py-2">
-                      <p className="truncate text-[8px] font-mono uppercase tracking-wider text-white/60">{labelizeAnchor(anchor.name)}</p>
-                      <p className="mt-0.5 truncate text-[7px] font-mono uppercase tracking-wider text-white/25">{anchor.exists ? formatBytes(anchor.sizeBytes) : "Missing"}</p>
-                    </div>
-                  </button>
+                    {canonicalReference && (
+                      <CanonicalReferenceBadge
+                        reference={canonicalReference}
+                        productionSlug={productionSlug}
+                        revision={revision}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => anchor.exists && setLightbox({ title: labelizeAnchor(anchor.name), url })}
+                      disabled={!anchor.exists}
+                      className="w-full overflow-hidden rounded-2xl text-left disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
+                    >
+                      <div className="aspect-square overflow-hidden bg-black/40">
+                        {anchor.exists ? (
+                          <img src={url} alt={`${labelizeAnchor(anchor.name)} anchor`} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" loading="lazy" />
+                        ) : (
+                          <div className="flex h-full items-center justify-center text-white/18"><ImageIcon size={18} /></div>
+                        )}
+                      </div>
+                      <div className="px-2 py-2">
+                        <p className="truncate text-[8px] font-mono uppercase tracking-wider text-white/60">{labelizeAnchor(anchor.name)}</p>
+                        <p className="mt-0.5 truncate text-[7px] font-mono uppercase tracking-wider text-white/25">{anchor.exists ? formatBytes(anchor.sizeBytes) : "Missing"}</p>
+                        {canonicalReference && (
+                          <p className="mt-1 truncate text-[7px] font-mono uppercase tracking-wider text-emerald-200/55">
+                            ref {canonicalReference.stillPath}
+                          </p>
+                        )}
+                      </div>
+                    </button>
+                  </article>
                 );
               })}
             </div>
@@ -427,6 +541,18 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
             </p>
           )}
         </section>
+
+        {shot?.canonicalReferences?.length ? (
+          <section className="mt-5 rounded-2xl border border-emerald-400/15 bg-emerald-400/10 p-3">
+            <div className="flex items-center gap-2 text-[8px] font-mono uppercase tracking-[0.22em] text-emerald-100/70">
+              <ShieldCheck size={12} />
+              Canonical reference active
+            </div>
+            <p className="mt-2 text-[9px] leading-relaxed text-white/40">
+              This shot will use canonical {shot.canonicalReferences.map((reference) => labelizeAnchor(reference.characterName)).join(", ")} reference for forward-use anchoring.
+            </p>
+          </section>
+        ) : null}
 
         {shot?.pending && (
           <section className="mt-5 rounded-2xl border border-amber-500/20 bg-amber-500/[0.055] p-3">

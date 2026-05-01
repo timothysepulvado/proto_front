@@ -2045,6 +2045,7 @@ export interface ProductionShotState {
   durationS: number;
   visualIntent: string;
   charactersNeeded: string[];
+  canonicalReferences: ProductionCanonicalReference[];
   defaultPrompt: string;
   stillPrompt?: string;
   negativePrompt?: string;
@@ -2052,6 +2053,18 @@ export interface ProductionShotState {
   pending: ProductionFileMeta | null;
   stillPath: string | null;
   activeJob?: ProductionJob | null;
+}
+
+export interface ProductionCanonicalReference {
+  characterName: string;
+  stillPath: string;
+  thumb: string;
+  lockedAt?: string;
+  lockedBy?: string;
+  rationale?: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
 }
 
 export interface ProductionRenderArtifact extends ProductionFileMeta {
@@ -2082,6 +2095,7 @@ export interface ProductionAnchorCatalogItem {
   exists: boolean;
   sizeBytes?: number;
   mtime?: string;
+  canonicalReference?: ProductionCanonicalReference;
 }
 
 export interface ProductionShotStillCatalogItem {
@@ -2144,6 +2158,15 @@ export function getProductionAnchorUrl(
 ): string {
   const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
   return `${OS_API_URL}/api/productions/${productionSlug}/anchor/${encodeURIComponent(anchorName)}${suffix}`;
+}
+
+export function getProductionCanonicalReferenceUrl(
+  productionSlug: ProductionSlug,
+  characterName: string,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/canonical-reference/${encodeURIComponent(characterName)}${suffix}`;
 }
 
 export function getProductionShotThumbnailUrl(

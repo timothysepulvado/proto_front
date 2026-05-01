@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Clock3, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, Clock3, Film, Loader2, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import {
   getProductionShots,
   getProductionStillUrl,
   subscribeToProductionEvents,
   triggerProductionRender,
   type ProductionEvent,
+  type ProductionCanonicalReference,
   type ProductionRenderArtifact,
   type ProductionShotState,
   type ProductionSlug,
@@ -38,6 +39,25 @@ function formatDate(iso: string | undefined): string {
 
 function formatBeat(beat: string): string {
   return beat ? beat.replace(/_/g, " ") : "unmapped";
+}
+
+function labelizeCharacter(name: string): string {
+  const replacements: Record<string, string> = {
+    brandy: "Brandy",
+    mech_openai: "OpenAI mech",
+    mech_claude: "Claude mech",
+    mech_gemini: "Gemini mech",
+    mech_grok: "Grok mech",
+    rapper_1: "Rapper 1",
+    rapper_2: "Rapper 2",
+  };
+  return replacements[name] ?? name.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function canonicalReferenceFootnote(references: ProductionCanonicalReference[] | undefined) {
+  if (!references?.length) return null;
+  const names = references.map((reference) => labelizeCharacter(reference.characterName)).join(", ");
+  return `Will use canonical ${names} reference`;
 }
 
 function eventShotNumber(event: ProductionEvent): number | null {
@@ -294,6 +314,7 @@ export default function ReshootPanel({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             {shots.map((shot) => {
               const regenerating = activeRegens.has(shot.shotNumber);
+              const canonicalFootnote = canonicalReferenceFootnote(shot.canonicalReferences);
               return (
                 <article
                   key={shot.shotNumber}
@@ -338,6 +359,13 @@ export default function ReshootPanel({
                 <p className="mt-3 line-clamp-2 min-h-[2.25rem] text-[9px] leading-relaxed text-white/45">
                   {shot.visualIntent || "Visual intent not captured for this shot."}
                 </p>
+
+                  {canonicalFootnote && (
+                    <p className="mt-2 flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-[0.16em] text-emerald-200/55">
+                      <ShieldCheck size={10} />
+                      <span className="truncate">{canonicalFootnote}</span>
+                    </p>
+                  )}
 
                   <div className="mt-3 flex items-center justify-between gap-2 text-[8px] font-mono uppercase tracking-wider text-white/30">
                     <span>{shot.durationS}s · {shot.startS}s</span>

@@ -29,8 +29,17 @@ type ManifestShot = {
   negative_prompt?: string;
 };
 
+type ManifestCharacter = {
+  canonical_reference_still?: unknown;
+  canonical_reference_locked_at?: unknown;
+  canonical_reference_locked_by?: unknown;
+  canonical_reference_rationale?: unknown;
+  [key: string]: unknown;
+};
+
 type Manifest = {
   shots: ManifestShot[];
+  characters?: Record<string, ManifestCharacter> | unknown;
   [key: string]: unknown;
 };
 
@@ -51,6 +60,19 @@ type AnchorCatalogItem = {
   name: string;
   path: string;
   thumb: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
+  canonicalReference?: CanonicalReferenceDescriptor;
+};
+
+export type CanonicalReferenceDescriptor = {
+  characterName: string;
+  stillPath: string;
+  thumb: string;
+  lockedAt?: string;
+  lockedBy?: string;
+  rationale?: string;
   exists: boolean;
   sizeBytes?: number;
   mtime?: string;
@@ -204,12 +226,87 @@ function anchorUrl(productionSlug: string, name: string): string {
   return `/api/productions/${productionSlug}/anchor/${encodeURIComponent(name)}`;
 }
 
+function canonicalReferenceUrl(productionSlug: string, name: string): string {
+  return `/api/productions/${productionSlug}/canonical-reference/${encodeURIComponent(name)}`;
+}
+
 function validateAnchorName(raw: string): string {
   const name = raw.trim();
   if (!/^[a-z0-9_]{1,64}$/.test(name)) {
     throw validationError("Anchor name must be 1-64 chars using lowercase letters, numbers, and underscores");
   }
   return name;
+}
+
+function readManifestString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function getManifestCharacters(manifest: Pick<Manifest, "characters">): Record<string, ManifestCharacter> {
+  if (!isRecord(manifest.characters)) return {};
+  return Object.fromEntries(
+    Object.entries(manifest.characters)
+      .filter((entry): entry is [string, ManifestCharacter] => isRecord(entry[1])),
+  );
+}
+
+function canonicalReferencePath(productionSlug: string, stillPath: string): string {
+  const trimmed = stillPath.trim();
+  if (!/\.(png|jpe?g|webp)$/i.test(trimmed)) {
+    throw validationError("canonical_reference_still must resolve to an image file");
+  }
+  return safePath(productionRoot(productionSlug), trimmed);
+}
+
+export function getCanonicalReferencesForManifest(
+  productionSlug: string,
+  manifest: Pick<Manifest, "characters">,
+  options: { includeFileMeta?: boolean } = {},
+): Map<string, CanonicalReferenceDescriptor> {
+  const includeFileMeta = options.includeFileMeta !== false;
+  const references = new Map<string, CanonicalReferenceDescriptor>();
+
+  for (const [rawName, character] of Object.entries(getManifestCharacters(manifest))) {
+    const characterName = validateAnchorName(rawName);
+    const stillPath = readManifestString(character.canonical_reference_still);
+    if (!stillPath) continue;
+
+    const resolvedPath = canonicalReferencePath(productionSlug, stillPath);
+    const meta = includeFileMeta ? nullableFileMeta(resolvedPath) : null;
+    references.set(characterName, {
+      characterName,
+      stillPath,
+      thumb: canonicalReferenceUrl(productionSlug, characterName),
+      lockedAt: readManifestString(character.canonical_reference_locked_at),
+      lockedBy: readManifestString(character.canonical_reference_locked_by),
+      rationale: readManifestString(character.canonical_reference_rationale),
+      exists: includeFileMeta ? meta !== null : false,
+      sizeBytes: meta?.sizeBytes,
+      mtime: meta?.mtime,
+    });
+  }
+
+  return references;
+}
+
+export function getShotCanonicalReferences(
+  charactersNeeded: string[],
+  references: Map<string, CanonicalReferenceDescriptor>,
+): CanonicalReferenceDescriptor[] {
+  const seen = new Set<string>();
+  const shotReferences: CanonicalReferenceDescriptor[] = [];
+  for (const rawName of charactersNeeded) {
+    const name = rawName.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const reference = references.get(name);
+    if (reference) shotReferences.push(reference);
+  }
+  return shotReferences;
 }
 
 function parseShotAnchorsFromPython(raw: string): Map<number, string[]> {
@@ -265,7 +362,11 @@ async function loadAnchorMap(productionSlug: string, manifest: Manifest): Promis
   return { source: "manifest", anchorsByShot: fallback };
 }
 
-function anchorCatalogItem(productionSlug: string, name: string): AnchorCatalogItem {
+function anchorCatalogItem(
+  productionSlug: string,
+  name: string,
+  canonicalReferences?: Map<string, CanonicalReferenceDescriptor>,
+): AnchorCatalogItem {
   const path = anchorPath(productionSlug, name);
   const meta = nullableFileMeta(path);
   return {
@@ -275,12 +376,14 @@ function anchorCatalogItem(productionSlug: string, name: string): AnchorCatalogI
     exists: meta !== null,
     sizeBytes: meta?.sizeBytes,
     mtime: meta?.mtime,
+    canonicalReference: canonicalReferences?.get(name),
   };
 }
 
 async function buildShotStillCatalog(productionSlug: string): Promise<ShotStillCatalogItem[]> {
   const manifest = await loadManifest(productionSlug);
   const anchorMap = await loadAnchorMap(productionSlug, manifest);
+  const canonicalReferences = getCanonicalReferencesForManifest(productionSlug, manifest);
 
   return manifest.shots
     .slice()
@@ -298,7 +401,7 @@ async function buildShotStillCatalog(productionSlug: string): Promise<ShotStillC
         currentStill,
         backupStillPath: backupStill?.path,
         backupStill,
-        anchors: anchorNames.map((name) => anchorCatalogItem(productionSlug, name)),
+        anchors: anchorNames.map((name) => anchorCatalogItem(productionSlug, name, canonicalReferences)),
         anchorsSource: anchorMap.source,
       };
     });
@@ -709,11 +812,18 @@ function streamProcessLines(
   });
 }
 
-function mapManifestShotToResponse(productionSlug: string, shot: ManifestShot) {
+function mapManifestShotToResponse(
+  productionSlug: string,
+  shot: ManifestShot,
+  canonicalReferences: Map<string, CanonicalReferenceDescriptor>,
+) {
   const shotNumber = shot.id;
   const paths = shotPaths(productionSlug, shotNumber);
   const canonicalMeta = fileMeta(paths.canonical);
   const pending = nullableFileMeta(paths.pending);
+  const charactersNeeded = Array.isArray(shot.characters_needed)
+    ? shot.characters_needed.filter((item): item is string => typeof item === "string")
+    : [];
 
   return {
     shotNumber,
@@ -722,9 +832,8 @@ function mapManifestShotToResponse(productionSlug: string, shot: ManifestShot) {
     endS: shot.end_s ?? (shot.start_s ?? 0) + (shot.duration_s ?? 0),
     durationS: shot.duration_s ?? 0,
     visualIntent: shot.visual ?? "",
-    charactersNeeded: Array.isArray(shot.characters_needed)
-      ? shot.characters_needed.filter((item): item is string => typeof item === "string")
-      : [],
+    charactersNeeded,
+    canonicalReferences: getShotCanonicalReferences(charactersNeeded, canonicalReferences),
     defaultPrompt: shot.veo_prompt ?? "",
     stillPrompt: shot.still_prompt ?? "",
     negativePrompt: shot.negative_prompt ?? "",
@@ -740,8 +849,9 @@ function mapManifestShotToResponse(productionSlug: string, shot: ManifestShot) {
 
 async function buildShotCatalog(productionSlug: string) {
   const manifest = await loadManifest(productionSlug);
+  const canonicalReferences = getCanonicalReferencesForManifest(productionSlug, manifest);
   const renderArtifact = nullableFileMeta(shotPaths(productionSlug, SHOT_MIN).assembly);
-  const shots = manifest.shots.map((shot) => mapManifestShotToResponse(productionSlug, shot));
+  const shots = manifest.shots.map((shot) => mapManifestShotToResponse(productionSlug, shot, canonicalReferences));
 
   return { shots, renderArtifact };
 }
@@ -1043,6 +1153,12 @@ function streamFile(res: Response, path: string, contentType: string): void {
   createReadStream(path).pipe(res);
 }
 
+function imageContentType(path: string): string {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".webp") return "image/webp";
+  return extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : "image/png";
+}
+
 export function createProductionsRouter(): Router {
   const router = express.Router();
 
@@ -1063,6 +1179,22 @@ export function createProductionsRouter(): Router {
       res.json({ productionSlug, shots });
     } catch (err) {
       sendJsonError(res, err, "GET /api/productions/:productionSlug/shot-stills");
+    }
+  });
+
+  router.get("/:productionSlug/canonical-reference/:name", async (req: Request, res: Response) => {
+    try {
+      const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
+      const name = validateAnchorName(getParam(req, "name"));
+      const manifest = await loadManifest(productionSlug);
+      const reference = getCanonicalReferencesForManifest(productionSlug, manifest).get(name);
+      if (!reference) {
+        throw Object.assign(new Error("Canonical reference not found"), { name: "NotFoundError" });
+      }
+      const path = canonicalReferencePath(productionSlug, reference.stillPath);
+      streamFile(res, path, imageContentType(path));
+    } catch (err) {
+      sendJsonError(res, err, "GET /api/productions/:productionSlug/canonical-reference/:name");
     }
   });
 
@@ -1227,7 +1359,11 @@ export function createProductionsRouter(): Router {
       const cumulativeDurationDelta = nextTotalDuration - originalTotalDuration;
 
       await writeManifestAtomic(productionSlug, manifest);
-      const updatedShot = mapManifestShotToResponse(productionSlug, shot) as ProductionShotResponse;
+      const updatedShot = mapManifestShotToResponse(
+        productionSlug,
+        shot,
+        getCanonicalReferencesForManifest(productionSlug, manifest),
+      ) as ProductionShotResponse;
       emitProductionEvent(productionSlug, {
         type: "shot_manifest_updated",
         shotNumber,
