@@ -191,6 +191,140 @@ The brand-engine critic emits a `## CAMPAIGN DIRECTION` section in its system pr
 
 **Calibration ceiling (2026-04-30 re-audit):** Phase 6 found the calibration partial — some drifted shots fire Rule 6 cleanly (shot 7 → FAIL 3.167 + L2), others slip through (shot 4 → PASS 4.5). When the audit triage table shows a borderline-PASS on a shot that LOOKS drifted to you, fall back to manual override + log via `runs.metadata.operator_override`.
 
+**Critic variance on borderline shots (2026-04-30 closing run):** the same locked still can score 3.17 / 3.92 / 4.90 across three single-pass critic calls (shot 7 in runs `a4aa3aff` / `c225fb19` / `01ead7d8`). Single-pass grading is unreliable in the 3.5-4.5 score band. The video pipeline already mitigates via consensus (`grade_video_with_consensus`); the image pipeline doesn't yet — tracked as Phase B+ followup. Until consensus lands for stills, treat single FAIL verdicts in the borderline zone as advisory and apply operator override when visual review confirms the asset is mantra-clean.
+
+---
+
+## Phase B+ shipped patterns (2026-04-30)
+
+Eight Phase B+ improvements shipped today during the drift-mv direction-fix closure. Operators should know what changed:
+
+### `shotIds` targeted regen (Phase B+ #5)
+
+`POST /api/clients/<client>/runs` body now accepts an opt-in `shotIds: number[]` field for `mode:stills + auditMode:false`. When set, the in-loop runner iterates EXACTLY those manifest shot IDs and bypasses the default `status NOT IN (approved, rejected)` filter.
+
+**Use case:** re-grading a small set of stills that were operator-`approved` before a critic-rubric calibration shipped. Without `shotIds`, those approved deliverables are invisible to the in-loop runner.
+
+```bash
+# Regen exactly shots 7, 16, 18, 20, 22 — bypass status filter
+curl -sS -X POST http://localhost:3001/api/clients/client_drift-mv/runs \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"stills","auditMode":false,"campaignId":"<campaign-uuid>","shotIds":[7,16,18,20,22]}'
+```
+
+**Validation:** integer list in [1, 100], de-duped while preserving operator-priority order. Rejected when `mode != "stills"` OR `auditMode == true`. Persisted to `runs.metadata.shot_ids` so the runner reads it at exec time.
+
+### Rule 7 — prompt-length budget (orchestrator)
+
+Both Temp-gen image-gen and brand-engine `/grade_image_v2` enforce a 2000-character ceiling on the still_prompt. Over-budget produces `HTTP 500 "Prompt exceeds maximum length of 2000 characters."` from Temp-gen and `HTTP 422` from brand-engine pre-flight.
+
+**Doctrine:** `orchestrator_prompts.ts` SYSTEM_PROMPT_CORE Rule 7 instructs the orchestrator to keep `new_still_prompt` and `new_veo_prompt` ≤ 2000 chars, with 5 budget tactics (anti-pattern leads, adjective-stack cuts, hex+color compression, 3-layer scene structure, separate negative_prompt field) + level-escalation when the prompt won't fit.
+
+**Guardrail:** `orchestrator.ts::_enforcePromptBudget()` runs on every parsed decision; if the model emits >2000 chars on either field, truncate at the last sentence terminator before 1990 chars (whitespace fallback, then hard-cut last-resort). Logs `[orchestrator] truncated <field> from <N> → <M> chars` warn — operators should grep `~/agent-vault/streams/os-api.log` for this and treat any occurrence as a Rule 7 compliance signal warranting HITL review on that run.
+
+In a clean run, zero `truncated` warns appear.
+
+### Loop closure (Phase B+ #6)
+
+The in-loop runner closes regen → artifact → re-grade fully. After Temp-gen writes `shot_NN_iter{N+1}.png` to `~/Temp-gen/outputs/<run_id>/`, `createArtifactWithUpload` registers it as an artifact tied to (current run, current deliverable, iter+1) with `metadata.parentArtifactId` provenance. Next iter's `getArtifactsByRun` picks the new artifact as `candidate` and the critic re-grades the new image. Termination via ship OR cost cap OR degenerate-loop guard OR iter cap (default 8) OR artifact-registration failure.
+
+### `localPath` read for grader (Phase B+ #7)
+
+When `createArtifactWithUpload` succeeds, `artifact.path` is the public Supabase Storage URL (correct for HUD/API consumers) but the local disk copy lives at `metadata.localPath`. The brand-engine critic is a local HTTP service that reads from disk — it can't fetch URLs. Runner read order: `candidate.metadata.localPath` → `candidate.path` → fallback locked still. If you see `[in_loop] image not on disk at <URL>` warns, the read order is broken.
+
+### Auto-seed (Phase B+ #3)
+
+When no artifact exists for a (current run, deliverable) pair but a prior-run artifact OR an on-disk locked still exists, the runner registers a synthetic seed artifact with `metadata.seededFromArtifactId` + `metadata.seedReason`. Two seed paths:
+- **Carry-forward** (preferred): clones path + storage_path + size from the most recent prior artifact for that deliverable.
+- **Disk-only** (fallback): registers a minimal artifact pointing at `productions/<slug>/stills/shot_NN.png` with `seedReason: "no_prior_artifact_disk_only"`.
+
+Eliminates the legacy "Operator must seed an artifact first" error that blocked targeted-regen on operator-approved deliverables.
+
+### HITL bubble (Phase B+ #8)
+
+When `handleQAFailure` returns `outcome: "hitl_required"`, the runner sets `runs.hitl_required = true` + writes a `hitl_notes` summary. Same pattern in `runner.ts` for the video pipeline (line 605 area). The asset_escalations row is the canonical signal; the runs flag is the indexable bubble for HUD queries (Review Gate panel reads `runs.hitl_required`).
+
+### X-Trace-Id passthrough (Phase B+ #2)
+
+brand-engine `/grade_image_v2` route reads the `X-Trace-Id` request header and binds it to a per-request `contextvars.ContextVar` in `image_grader.py`. Emitted `critic_call` JSON metric lines carry the caller's trace ID instead of a fresh-per-call uuid. Lets you correlate os-api logs with brand-engine logs across the X-call boundary.
+
+### `/health` pre-check timeout 5s → 30s (Phase B+ #4)
+
+`stills_runner.ts` health-checks brand-engine before fanning out. Bumped from 5s → 30s to eliminate spurious aborts when brand-engine is busy serializing concurrent requests.
+
+---
+
+## Operator override workflow
+
+Two scenarios where operator overrides the critic verdict on a single shot:
+
+1. **Intent-vs-mantra conflict** (e.g., shot 4 — manifest beat asks for "rampaging mech + magical orb in palm" but the campaign mantra forbids effects/gloss/mech-as-hero). The critic correctly weights shot-level intent over campaign-level mantra. Operator authors an alternative angle proposal that fills the same narrative gap without the conflict.
+
+2. **Critic variance on borderline scores** (e.g., shot 7 graded 3.17/3.92/4.90 across three runs on the same image; shot 20 v5 iter3 graded FAIL 2.80 on visual review of a strong aftermath composition). Operator confirms the asset is mantra-clean via direct visual review and accepts.
+
+### Capture format (mandatory audit trail)
+
+Write to `runs.metadata.operator_override.shot_<id>`:
+
+```json
+{
+  "decision_at": "YYYY-MM-DD",
+  "decision_by": "<operator name or 'Tim direction'>",
+  "decided_artifact_path": "productions/<slug>/outputs/<run_id>/shot_NN_iterM.png",
+  "decided_iter": <int>,
+  "critic_verdict": "<PASS|WARN|FAIL>",
+  "critic_score": <float>,
+  "rationale": "<why the override is justified — visual evidence + which scenario applies>",
+  "locked_to": "productions/<slug>/stills/shot_NN.png"
+}
+```
+
+### File operations (when locking a regen output)
+
+```bash
+# Backup the original (only if first time being replaced this session)
+mkdir -p ~/Temp-gen/productions/<slug>/stills/_legacy_pre_iter_lock_<date>
+cp -p ~/Temp-gen/productions/<slug>/stills/shot_NN.png \
+      ~/Temp-gen/productions/<slug>/stills/_legacy_pre_iter_lock_<date>/
+
+# Lock the chosen iter
+cp -p ~/Temp-gen/outputs/<run_id>/shot_NN_iterM.png \
+      ~/Temp-gen/productions/<slug>/stills/shot_NN.png
+
+# Save alts the operator also liked but didn't lock as primary
+mkdir -p ~/Temp-gen/productions/<slug>/stills/alternates_<date>
+cp -p ~/Temp-gen/outputs/<run_id>/shot_NN_iterX.png \
+      ~/Temp-gen/productions/<slug>/stills/alternates_<date>/shot_NN_iterX_alt.png
+```
+
+### Resolve open escalations
+
+If the operator-override-locked still corresponds to a deliverable with open `asset_escalations.status = 'hitl_required'` rows, mark them resolved:
+
+```sql
+UPDATE asset_escalations
+SET status = 'accepted',
+    resolution_path = 'accept',
+    resolution_notes = 'Operator override <date> — visual review accepted. See runs.metadata.operator_override.shot_<id> on run <run_id>. Locked file: stills/shot_<NN>.png. Originals archived to _legacy_pre_iter_lock_<date>/.',
+    resolved_at = NOW()
+WHERE deliverable_id = '<deliverable-uuid>' AND status = 'hitl_required';
+
+UPDATE runs SET hitl_required = false, hitl_notes = COALESCE(hitl_notes, '') || ' [resolved <date>] Operator override accepted. See metadata.operator_override.'
+WHERE id = '<run-uuid>';
+```
+
+`resolution_path` constraint allows: `prompt_fix | approach_change | accept | redesign | replace`. Use `accept` for operator overrides.
+
+### Checkpoint after locking
+
+Always checkpoint after a batch of operator-override locks so ADR-005 lineage stays intact:
+
+```bash
+~/Temp-gen/productions/<slug>/checkpoint.sh post-direction-fix-locks-<date>
+```
+
+This bakes a manifest snapshot, tarball of all 30 stills, meta JSON, git tag in proto_front, and appends to `productions/<slug>/checkpoints.log`.
+
 To capture a new directional pivot:
 1. `~/Temp-gen/productions/<slug>/checkpoint.sh <name>` — snapshot the current state
 2. Edit `manifest.directional_history.abandoned_directions[]` — add the previous direction with `rejected_at`, `reason`, and `snapshot_ref` pointer to the fresh checkpoint
