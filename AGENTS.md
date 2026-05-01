@@ -184,7 +184,7 @@ Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 - Reviewing Karl and Jackie's output before merging
 - Roadmap updates: `~/agent-vault/domains/brandstudios/ROADMAP.md`
 
-### Karl (Codex / GPT-5.4) — implementation lead
+### Karl (Codex / GPT-5.5 xhigh) — implementation lead
 - **Frontend work** — React components, Tailwind styling, UI polish
 - **API routes** — Express endpoint implementation in os-api/
 - **Wiring tasks** — connecting existing backend to frontend (e.g., hook component to API)
@@ -192,11 +192,32 @@ Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 - **Fast iteration** — when the spec is clear and it's build-not-design
 - Karl runs in `~/proto_front` with full filesystem access
 
-**Delegation pattern:**
+**Karl's runtime — the canonical mechanism (locked-in 2026-04-30):**
+
+Karl runs as a **persistent codex TUI in tmux pane `brandy-proto_front:agents.2`**, launched via start-brandy.sh as `codex -p karl-max` (gpt-5.5 xhigh, YOLO mode, ~/proto_front cwd). Brandy dispatches by sending keys into that existing TUI session via `agent-comm`:
+
 ```bash
-agent-comm ask karl "In ~/proto_front, [specific task]. Files: [list]. 
+agent-comm send karl "In ~/proto_front, [specific task]. Files: [list]. 
 Follow the patterns in [existing file]. Today is [date]."
+
+# Status / read helpers
+agent-comm status karl                              # idle | busy | unknown
+agent-comm last karl                                # most recent screen capture
+tmux capture-pane -t brandy-proto_front:agents.2 -p # full pane snapshot
 ```
+
+**DO NOT raw-spawn `codex exec --ephemeral` from Brandy's Bash tool to dispatch Karl.** Burned 2 hours of session time on this 2026-04-30: the codex app-server daemon caches workdir state across invocations, and ephemeral sessions inherit that state instead of `-C` + inline `BRANDY_DOMAIN` env vars. Result: Karl repeatedly landed in whichever domain's repo had the most-recent codex app-server activity (e.g., teachce-portal), not `proto_front`. The TUI panel + agent-comm bypasses this entirely — same persistent session, same workdir, same auth state.
+
+**If Karl's panel is dead** (pane shows plain `zsh`, not the codex TUI prompt), restart it:
+
+```bash
+tmux send-keys -t brandy-proto_front:agents.2 "codex -p karl-max" Enter
+sleep 12  # codex bootstrap — 8-12s
+tmux capture-pane -t brandy-proto_front:agents.2 -p | tail -5
+# Verify you see "model: gpt-5.5 xhigh / directory: ~/proto_front / permissions: YOLO mode"
+```
+
+Then dispatch via agent-comm as usual.
 
 ### Jackie (Gemini / 3.1 Pro) — research + multimodal
 - **Large context analysis** — reading entire codebases, audit docs, spec documents
