@@ -118,6 +118,29 @@ export interface MotionPhaseGateState {
   generatedAt: string;
 }
 
+export type DirectionDriftVerdictSource =
+  | "run_logs"
+  | "audit_report"
+  | "orchestration_decision"
+  | "operator_override"
+  | "asset_escalation"
+  | "manifest_caveat";
+
+export interface DirectionDriftIndicator {
+  deliverableId: string;
+  shotNumber: number | null;
+  directionDrift: boolean;
+  latestVerdictRunId: string | null;
+  latestVerdictTimestamp: string | null;
+  matchedClasses: string[];
+  source: DirectionDriftVerdictSource | null;
+  verdict: "PASS" | "WARN" | "FAIL" | null;
+  score: number | null;
+  latestVerdictLogId?: number;
+  latestVerdictDecisionId?: string;
+  timelineEventId?: string;
+}
+
 export interface Client {
   id: string;
   name: string;
@@ -1362,6 +1385,14 @@ export async function getMotionPhaseGateState(campaignId: string): Promise<Motio
   const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/motion-phase-gate`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as MotionPhaseGateState;
+}
+
+export async function getDirectionDriftIndicators(
+  campaignId: string,
+): Promise<Record<string, DirectionDriftIndicator>> {
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/direction-drift`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Record<string, DirectionDriftIndicator>;
 }
 
 export async function createMotionPhaseRun(

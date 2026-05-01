@@ -861,6 +861,30 @@ export interface MotionPhaseGateState {
   generatedAt: string;
 }
 
+// ─── Gap 7: Per-shot direction-drift indicators ───────────────────────────
+export type DirectionDriftVerdictSource =
+  | "run_logs"
+  | "audit_report"
+  | "orchestration_decision"
+  | "operator_override"
+  | "asset_escalation"
+  | "manifest_caveat";
+
+export interface DirectionDriftIndicator {
+  deliverableId: string;
+  shotNumber: number | null;
+  directionDrift: boolean;
+  latestVerdictRunId: string | null;
+  latestVerdictTimestamp: string | null;
+  matchedClasses: string[];
+  source: DirectionDriftVerdictSource | null;
+  verdict: "PASS" | "WARN" | "FAIL" | null;
+  score: number | null;
+  latestVerdictLogId?: number;
+  latestVerdictDecisionId?: string;
+  timelineEventId?: string;
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [

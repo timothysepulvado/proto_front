@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Layers, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ChevronRight, Layers, RefreshCw, ShieldCheck } from "lucide-react";
 import * as api from "../api";
 import { supabase } from "../lib/supabase";
-import type { CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision } from "../api";
+import type { CampaignDeliverable, DeliverableStatus, DirectionDriftIndicator, OperatorOverrideDecision } from "../api";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -33,7 +33,7 @@ interface DeliverableTrackerProps {
   onShotClick?: (
     shotNumber: number | null,
     deliverableId: string,
-    options?: { initialTab?: "narrative" | "critic" | "orchestrator" | "timeline"; runId?: string },
+    options?: { initialTab?: "narrative" | "critic" | "orchestrator" | "timeline"; runId?: string; pinnedTimelineEventId?: string },
   ) => void;
 }
 
@@ -90,6 +90,16 @@ function buildOverrideSummary(override: OperatorOverrideDecision) {
     ? `over critic ${override.criticVerdict}${override.criticScore != null ? ` ${formatOverrideScore(override.criticScore)}` : ""}`
     : "over critic";
   return `${actor} accepted ${version}${iter} ${critic} (run ${override.runId.slice(0, 8)})`;
+}
+
+function formatDirectionClass(value: string) {
+  return value.replace(/_/g, " ");
+}
+
+function buildDirectionDriftLabel(indicator: DirectionDriftIndicator) {
+  const classes = indicator.matchedClasses.map(formatDirectionClass).join(", ");
+  const run = indicator.latestVerdictRunId ? `run ${indicator.latestVerdictRunId.slice(0, 8)}` : "latest verdict";
+  return `Direction drift flagged on ${run}${classes ? `: ${classes}` : ""}`;
 }
 
 function formatBeatLabel(beatName: string | null) {
@@ -167,32 +177,42 @@ function ShotCard({
   deliverable,
   summary,
   operatorOverride,
+  directionDrift,
   onShotClick,
 }: {
   deliverable: CampaignDeliverable;
   summary: ShotSummary;
   operatorOverride?: OperatorOverrideDecision;
+  directionDrift?: DirectionDriftIndicator;
   onShotClick?: DeliverableTrackerProps["onShotClick"];
 }) {
   const statusStyle = statusStyles[deliverable.status];
   const costOverCap = summary.cumulativeCost > 4;
   const interactive = Boolean(onShotClick);
   const overrideSummary = operatorOverride ? buildOverrideSummary(operatorOverride) : null;
+  const directionLabel = directionDrift?.directionDrift ? buildDirectionDriftLabel(directionDrift) : null;
+
+  const openDefaultDrawer = () => onShotClick?.(
+    summary.shotNumber,
+    deliverable.id,
+    operatorOverride ? { initialTab: "timeline", runId: operatorOverride.runId } : undefined,
+  );
 
   return (
-    <button
-      type="button"
-      onClick={() => onShotClick?.(
-        summary.shotNumber,
-        deliverable.id,
-        operatorOverride ? { initialTab: "timeline", runId: operatorOverride.runId } : undefined,
-      )}
+    <div
       className={`group w-full rounded-xl border bg-white/[0.02] p-3 text-left transition-all ${statusStyle.border} ${
         interactive ? "hover:border-cyan-400/40 hover:bg-white/[0.04]" : "cursor-default"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 gap-3">
+        <button
+          type="button"
+          disabled={!interactive}
+          onClick={openDefaultDrawer}
+          className={`flex min-w-0 flex-1 gap-3 rounded-lg text-left focus:outline-none focus:ring-2 focus:ring-cyan-400/45 focus:ring-offset-2 focus:ring-offset-[#0b0b0f] ${
+            interactive ? "" : "cursor-default"
+          }`}
+        >
           <div className="relative h-[90px] w-[160px] shrink-0 overflow-hidden rounded-xl border border-white/10 bg-white/[0.035]">
             {summary.shotNumber ? (
               <img
@@ -236,7 +256,7 @@ function ShotCard({
               {summary.orchestratorCallCount > 0 && <span>{summary.orchestratorCallCount} call{summary.orchestratorCallCount === 1 ? "" : "s"}</span>}
             </div>
           </div>
-        </div>
+        </button>
 
         <div className="flex shrink-0 items-center gap-1.5">
           {deliverable.retryCount > 0 && (
@@ -267,6 +287,25 @@ function ShotCard({
               Operator Override
             </span>
           )}
+          {directionLabel && directionDrift && (
+            <button
+              type="button"
+              aria-label={`${directionLabel}. Open shot ${summary.shotNumber ?? ""} timeline pinned to the verdict.`}
+              title={directionLabel}
+              onClick={(event) => {
+                event.stopPropagation();
+                onShotClick?.(summary.shotNumber, deliverable.id, {
+                  initialTab: "timeline",
+                  runId: directionDrift.latestVerdictRunId ?? undefined,
+                  pinnedTimelineEventId: directionDrift.timelineEventId,
+                });
+              }}
+              className="inline-flex items-center gap-1 rounded-lg border border-orange-400/40 bg-orange-500/15 px-2 py-1 text-[8px] font-mono uppercase tracking-wider text-orange-200 shadow-[0_0_16px_rgba(237,76,20,0.16)] transition-colors hover:border-orange-300/60 hover:bg-orange-500/25 focus:outline-none focus:ring-2 focus:ring-orange-300/45 focus:ring-offset-2 focus:ring-offset-[#0b0b0f]"
+            >
+              <AlertTriangle size={9} />
+              Direction Drift
+            </button>
+          )}
           <span
             className={`rounded-lg border px-2 py-1 text-[8px] font-mono ${
               costOverCap
@@ -279,6 +318,27 @@ function ShotCard({
           {interactive && <ChevronRight size={12} className="text-white/20" />}
         </div>
       </div>
+      {directionLabel && directionDrift && (
+        <div className="mt-0 max-h-0 overflow-hidden transition-all duration-300 group-hover:mt-3 group-hover:max-h-40 group-focus-within:mt-3 group-focus-within:max-h-40">
+          <div className="rounded-xl border border-orange-400/25 bg-orange-500/10 p-3">
+            <div className="flex flex-wrap items-center gap-2 text-[8px] font-mono uppercase tracking-widest text-orange-200">
+              <span className="inline-flex items-center gap-1">
+                <AlertTriangle size={10} />
+                Direction Drift
+              </span>
+              <span className="text-white/45">
+                {directionDrift.verdict ?? "verdict"} · {directionDrift.latestVerdictRunId?.slice(0, 8) ?? "no-run"}
+              </span>
+            </div>
+            <p className="mt-2 text-[10px] leading-5 text-white/65">
+              {directionDrift.matchedClasses.map(formatDirectionClass).join(", ")}
+            </p>
+            <span className="sr-only">
+              {directionLabel}. Latest verdict timestamp {directionDrift.latestVerdictTimestamp ?? "unknown"}.
+            </span>
+          </div>
+        </div>
+      )}
       {operatorOverride && overrideSummary && (
         <div className="mt-0 max-h-0 overflow-hidden transition-all duration-300 group-hover:mt-3 group-hover:max-h-56 group-focus-within:mt-3 group-focus-within:max-h-56">
           <div className="rounded-xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 p-3">
@@ -310,7 +370,7 @@ function ShotCard({
           </div>
         </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -318,6 +378,7 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
   const [deliverables, setDeliverables] = useState<CampaignDeliverable[]>([]);
   const [shotSummaries, setShotSummaries] = useState<ShotSummary[]>([]);
   const [operatorOverrides, setOperatorOverrides] = useState<OperatorOverrideDecision[]>([]);
+  const [directionDriftIndicators, setDirectionDriftIndicators] = useState<Record<string, DirectionDriftIndicator>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -344,25 +405,36 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
     }
   }, [campaignId]);
 
+  const refreshDirectionDriftIndicators = useCallback(async () => {
+    try {
+      setDirectionDriftIndicators(await api.getDirectionDriftIndicators(campaignId));
+    } catch {
+      setError("Couldn't refresh direction drift indicators. Retry.");
+    }
+  }, [campaignId]);
+
   useEffect(() => {
     let cancelled = false;
     deliverablesRef.current = [];
     setDeliverables([]);
     setShotSummaries([]);
     setOperatorOverrides([]);
+    setDirectionDriftIndicators({});
 
     async function load() {
       try {
         setIsLoading(true);
         setError(null);
-        const [data, overrides] = await Promise.all([
+        const [data, overrides, directionIndicators] = await Promise.all([
           api.getCampaignDeliverables(campaignId),
           api.getOperatorOverridesForCampaign(campaignId),
+          api.getDirectionDriftIndicators(campaignId),
         ]);
         if (cancelled) return;
         deliverablesRef.current = data;
         setDeliverables(data);
         setOperatorOverrides(overrides);
+        setDirectionDriftIndicators(directionIndicators);
         const summaries = await loadShotSummaries(campaignId, data, runId);
         if (!cancelled) setShotSummaries(summaries);
       } catch {
@@ -396,6 +468,7 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
             },
             () => {
               void refreshShotSummaries();
+              void refreshDirectionDriftIndicators();
             },
           )
           .subscribe()
@@ -413,6 +486,52 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
         },
         () => {
           void refreshOperatorOverrides();
+          void refreshDirectionDriftIndicators();
+        },
+      )
+      .subscribe();
+
+    const directionDriftRunLogsChannel = supabase
+      .channel(`direction_drift_run_logs:${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "run_logs",
+        },
+        () => {
+          void refreshDirectionDriftIndicators();
+        },
+      )
+      .subscribe();
+
+    const directionDriftDecisionsChannel = supabase
+      .channel(`direction_drift_orchestration_decisions:${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "orchestration_decisions",
+        },
+        () => {
+          void refreshDirectionDriftIndicators();
+        },
+      )
+      .subscribe();
+
+    const directionDriftEscalationsChannel = supabase
+      .channel(`direction_drift_asset_escalations:${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "asset_escalations",
+        },
+        () => {
+          void refreshDirectionDriftIndicators();
         },
       )
       .subscribe();
@@ -424,8 +543,11 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
         void supabase.removeChannel(decisionsChannel);
       }
       void supabase.removeChannel(runsChannel);
+      void supabase.removeChannel(directionDriftRunLogsChannel);
+      void supabase.removeChannel(directionDriftDecisionsChannel);
+      void supabase.removeChannel(directionDriftEscalationsChannel);
     };
-  }, [campaignId, refreshOperatorOverrides, refreshShotSummaries, reloadNonce, runId]);
+  }, [campaignId, refreshDirectionDriftIndicators, refreshOperatorOverrides, refreshShotSummaries, reloadNonce, runId]);
 
   const mergedDeliverables = useMemo(() => {
     const summaryMap = new Map(shotSummaries.map((summary) => [summary.deliverableId, summary]));
@@ -450,9 +572,10 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
             }
           : fallback,
         operatorOverride: resolvedShotNumber ? latestOverrideByShot.get(resolvedShotNumber) : undefined,
+        directionDrift: directionDriftIndicators[deliverable.id],
       };
     });
-  }, [deliverables, operatorOverrides, shotSummaries]);
+  }, [deliverables, directionDriftIndicators, operatorOverrides, shotSummaries]);
 
   const counts = useMemo(
     () =>
@@ -529,12 +652,13 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
       </div>
 
       <div className="space-y-2">
-        {mergedDeliverables.map(({ deliverable, summary, operatorOverride }) => (
+        {mergedDeliverables.map(({ deliverable, summary, operatorOverride, directionDrift }) => (
           <ShotCard
             key={deliverable.id}
             deliverable={deliverable}
             summary={summary}
             operatorOverride={operatorOverride}
+            directionDrift={directionDrift}
             onShotClick={onShotClick}
           />
         ))}

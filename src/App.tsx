@@ -68,6 +68,7 @@ type SelectedShot = {
   runId?: string;
   auditShot?: AuditReportShot | null;
   initialTab?: ShotDrawerTab;
+  pinnedTimelineEventId?: string;
 };
 
 type LogEntry = {
@@ -1294,6 +1295,7 @@ export default function App() {
                                   id,
                                   runId: options?.runId,
                                   initialTab: options?.initialTab,
+                                  pinnedTimelineEventId: options?.pinnedTimelineEventId,
                                 })}
                               />
                             </>
@@ -1530,12 +1532,13 @@ export default function App() {
       </div>
 
       <ShotDetailDrawer
-        key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}`}
+        key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}:${selectedShot.pinnedTimelineEventId ?? "no-pin"}`}
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
         campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
         runId={selectedShot.runId ?? currentRun?.runId}
         initialTab={selectedShot.initialTab}
+        pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}
         auditShot={selectedShot.auditShot}
         onClose={() => setSelectedShot({ n: null, id: null })}
       />

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   Clock3,
@@ -115,6 +116,7 @@ interface ShotDetailDrawerProps {
   campaignId?: string | null;
   runId?: string;
   initialTab?: DrawerTab;
+  pinnedTimelineEventId?: string;
   auditShot?: AuditReportShot | null;
   onClose: () => void;
 }
@@ -369,7 +371,18 @@ function buildTimelineEvents(
   const shortId = deliverableId.slice(0, 8).toLowerCase();
   const shotMatchers = shotNumber === null
     ? []
-    : [`shot ${shotNumber}`, `shot_${shotNumber}`, `shot#${shotNumber}`, `shot=${shotNumber}`, `shot_number=${shotNumber}`];
+    : [
+      `shot ${shotNumber}`,
+      `shot_${shotNumber}`,
+      `shot#${shotNumber}`,
+      `shot=${shotNumber}`,
+      `shot_number=${shotNumber}`,
+      `shot ${String(shotNumber).padStart(2, "0")}`,
+      `shot_${String(shotNumber).padStart(2, "0")}`,
+      `shot#${String(shotNumber).padStart(2, "0")}`,
+      `shot=${String(shotNumber).padStart(2, "0")}`,
+      `shot_number=${String(shotNumber).padStart(2, "0")}`,
+    ];
 
   const filteredLogs = logs.filter((log) => {
     const message = log.message.toLowerCase();
@@ -480,7 +493,8 @@ function buildAuditCriticPayload(auditShot: AuditReportShot | null | undefined):
   };
 }
 
-function TimelineIcon({ kind }: { kind: TimelineEvent["kind"] }) {
+function TimelineIcon({ kind, pinned = false }: { kind: TimelineEvent["kind"]; pinned?: boolean }) {
+  if (pinned) return <AlertTriangle size={12} className="text-orange-200" />;
   if (kind === "override") return <ShieldCheck size={12} className="text-orange-300" />;
   if (kind === "artifact") return <Film size={12} className="text-cyan-300" />;
   if (kind === "grade") return <CheckCircle2 size={12} className="text-emerald-300" />;
@@ -488,7 +502,7 @@ function TimelineIcon({ kind }: { kind: TimelineEvent["kind"] }) {
   return <Archive size={12} className="text-white/45" />;
 }
 
-export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, auditShot, onClose }: ShotDetailDrawerProps) {
+export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, pinnedTimelineEventId, auditShot, onClose }: ShotDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>("narrative");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
@@ -502,6 +516,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
   const [reloadNonce, setReloadNonce] = useState(0);
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const pinnedTimelineRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setActiveTab(initialTab ?? "narrative");
@@ -516,7 +531,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     if (!deliverableId) {
       setIsLoading(false);
     }
-  }, [deliverableId, initialTab, runId]);
+  }, [deliverableId, initialTab, pinnedTimelineEventId, runId]);
 
   useEffect(() => {
     if (!deliverableId) return;
@@ -654,6 +669,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     () => (deliverableId ? buildTimelineEvents(logs, artifacts, decisionsNewestFirst, operatorOverrides, deliverableId, resolvedShotNumber) : []),
     [artifacts, decisionsNewestFirst, deliverableId, logs, operatorOverrides, resolvedShotNumber],
   );
+
+  useEffect(() => {
+    if (activeTab !== "timeline" || !pinnedTimelineEventId) return;
+    const frame = window.requestAnimationFrame(() => {
+      pinnedTimelineRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, pinnedTimelineEventId, timeline.length]);
 
   if (!deliverableId) {
     return null;
@@ -986,22 +1009,25 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           ) : (
             timeline.length > 0 ? (
               <div className="space-y-3">
-                {timeline.map((event) => (
-                  <div key={event.id} className="relative pl-6">
-                    <div className="absolute left-[5px] top-6 h-[calc(100%-8px)] w-px bg-cyan-400/15" />
-                    <div className="absolute left-0 top-1.5 flex h-3 w-3 items-center justify-center rounded-full bg-[#0b0b0f]">
-                      <TimelineIcon kind={event.kind} />
-                    </div>
-                    <div className="rounded-xl bg-white/[0.02] px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-3 text-[8px] font-mono uppercase tracking-widest text-white/40">
-                        <span>{new Date(event.createdAt).toLocaleTimeString("en-US", { hour12: false })}</span>
-                        <span>{event.kind}</span>
+                {timeline.map((event) => {
+                  const pinned = event.id === pinnedTimelineEventId;
+                  return (
+                    <div key={event.id} ref={pinned ? pinnedTimelineRef : undefined} className="relative pl-6">
+                      <div className={`absolute left-[5px] top-6 h-[calc(100%-8px)] w-px ${pinned ? "bg-orange-300/30" : "bg-cyan-400/15"}`} />
+                      <div className={`absolute left-0 top-1.5 flex h-3 w-3 items-center justify-center rounded-full ${pinned ? "bg-orange-500/25 ring-2 ring-orange-300/35" : "bg-[#0b0b0f]"}`}>
+                        <TimelineIcon kind={event.kind} pinned={pinned} />
                       </div>
-                      <p className="mt-1 text-[12px] leading-5 text-white/75">{event.summary}</p>
-                      {event.detail && <p className="mt-2 text-[11px] leading-5 text-white/45">{truncate(event.detail, 180)}</p>}
+                      <div className={`rounded-xl px-3 py-2.5 ${pinned ? "border border-orange-400/35 bg-orange-500/12 shadow-[0_0_22px_rgba(237,76,20,0.18)]" : "bg-white/[0.02]"}`}>
+                        <div className="flex items-center justify-between gap-3 text-[8px] font-mono uppercase tracking-widest text-white/40">
+                          <span>{new Date(event.createdAt).toLocaleTimeString("en-US", { hour12: false })}</span>
+                          <span>{pinned ? "Pinned verdict" : event.kind}</span>
+                        </div>
+                        <p className="mt-1 text-[12px] leading-5 text-white/75">{event.summary}</p>
+                        {event.detail && <p className="mt-2 text-[11px] leading-5 text-white/45">{truncate(event.detail, 180)}</p>}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">

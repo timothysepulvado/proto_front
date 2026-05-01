@@ -53,6 +53,7 @@ import {
   getRecentRunsByCampaign,
   getRunDetail,
   getMotionPhaseGateState,
+  getDirectionDriftIndicatorsByCampaign,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
@@ -879,6 +880,18 @@ app.get("/api/campaigns/:campaignId/motion-phase-gate", async (req: Request, res
     res.json(state);
   } catch (err) {
     console.error("GET /api/campaigns/:campaignId/motion-phase-gate error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/direction-drift - Per-shot direction drift badges
+app.get("/api/campaigns/:campaignId/direction-drift", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const indicatorMap = await getDirectionDriftIndicatorsByCampaign(campaignId);
+    res.json(Object.fromEntries(indicatorMap.entries()));
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/direction-drift error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
