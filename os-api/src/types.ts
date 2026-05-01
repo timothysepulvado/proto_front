@@ -885,6 +885,57 @@ export interface DirectionDriftIndicator {
   timelineEventId?: string;
 }
 
+// ─── Gap 8: Per-shot regen iteration browser ──────────────────────────────
+export type ArtifactIterationVerdictLabel = "PASS" | "WARN" | "FAIL" | "SHIP";
+
+export interface ArtifactIterationVerdict {
+  verdict: ArtifactIterationVerdictLabel | null;
+  score: number | null;
+  recommendation: string | null;
+  failureClasses: string[];
+  logId?: number;
+  decisionId?: string;
+  timestamp?: string;
+  message?: string;
+}
+
+export interface ArtifactIterationOperatorOverride {
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+}
+
+export interface ArtifactIterationRow {
+  artifact: Artifact;
+  deliverableId: string;
+  shotNumber: number | null;
+  runId: string;
+  runCreatedAt: string | null;
+  runOrdinalForShot: number | null;
+  iter: number | null;
+  label: string;
+  displayUrl: string;
+  localPath: string | null;
+  isSeed: boolean;
+  isCarryForward: boolean;
+  parentArtifactId: string | null;
+  parentLabel: string | null;
+  verdict: ArtifactIterationVerdict | null;
+  operatorOverride: ArtifactIterationOperatorOverride | null;
+}
+
+export interface ArtifactIterationsResponse {
+  deliverableId: string;
+  shotNumber: number | null;
+  rows: ArtifactIterationRow[];
+  generatedAt: string;
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   AlertTriangle,
@@ -13,12 +13,12 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../api";
-import type { Artifact, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, RunLog } from "../api";
+import type { Artifact, ArtifactIterationRow, ArtifactIterationsResponse, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, RunLog } from "../api";
 import type { AuditReportShot } from "../lib/auditReport";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
-type DrawerTab = "narrative" | "critic" | "orchestrator" | "timeline";
+type DrawerTab = "narrative" | "critic" | "orchestrator" | "timeline" | "iterations";
 type Verdict = "PASS" | "WARN" | "FAIL";
 
 type NeighborShot = {
@@ -119,6 +119,7 @@ interface ShotDetailDrawerProps {
   pinnedTimelineEventId?: string;
   auditShot?: AuditReportShot | null;
   onClose: () => void;
+  onRunSelect?: (runId: string) => void;
 }
 
 const tabs: Array<{ id: DrawerTab; label: string; icon: typeof Layers3 }> = [
@@ -126,6 +127,7 @@ const tabs: Array<{ id: DrawerTab; label: string; icon: typeof Layers3 }> = [
   { id: "critic", label: "Critic", icon: MessageSquareText },
   { id: "orchestrator", label: "Orchestrator", icon: Workflow },
   { id: "timeline", label: "Timeline", icon: Clock3 },
+  { id: "iterations", label: "Iterations", icon: Film },
 ];
 
 const statusStyles: Partial<Record<DeliverableStatus, string>> = {
@@ -139,6 +141,13 @@ const statusStyles: Partial<Record<DeliverableStatus, string>> = {
 
 const verdictStyles: Record<Verdict, string> = {
   PASS: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+  WARN: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+  FAIL: "border-red-500/30 bg-red-500/10 text-red-300",
+};
+
+const iterationVerdictStyles: Record<string, string> = {
+  PASS: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+  SHIP: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
   WARN: "border-amber-500/30 bg-amber-500/10 text-amber-300",
   FAIL: "border-red-500/30 bg-red-500/10 text-red-300",
 };
@@ -502,7 +511,186 @@ function TimelineIcon({ kind, pinned = false }: { kind: TimelineEvent["kind"]; p
   return <Archive size={12} className="text-white/45" />;
 }
 
-export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, pinnedTimelineEventId, auditShot, onClose }: ShotDetailDrawerProps) {
+function formatTimestamp(value: string | null | undefined) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function artifactImageUrl(row: ArtifactIterationRow) {
+  return api.resolveArtifactDisplayUrl(row.displayUrl || row.artifact.path);
+}
+
+function iterationVerdictLabel(row: ArtifactIterationRow) {
+  const verdict = row.verdict?.verdict ?? "—";
+  const score = row.verdict?.score;
+  return score == null ? verdict : `${verdict} ${score.toFixed(2)}`;
+}
+
+function IterationThumb({ row, className = "h-full w-full" }: { row: ArtifactIterationRow; className?: string }) {
+  return (
+    <div className={`overflow-hidden rounded-xl border border-white/10 bg-white/[0.035] ${className}`}>
+      {row.displayUrl ? (
+        <img
+          src={artifactImageUrl(row)}
+          alt={`${row.label} thumbnail`}
+          className="h-full w-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-[8px] font-mono uppercase tracking-widest text-white/30">
+          No preview
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IterationMetaList({ row }: { row: ArtifactIterationRow }) {
+  return (
+    <dl className="grid grid-cols-2 gap-2 text-[8px] font-mono uppercase tracking-[0.16em] text-white/42">
+      <div className="rounded-xl border border-white/10 bg-white/[0.025] p-2">
+        <dt>Run</dt>
+        <dd className="mt-1 break-all text-white/75">{row.runId.slice(0, 8)}</dd>
+      </div>
+      <div className="rounded-xl border border-white/10 bg-white/[0.025] p-2">
+        <dt>Iter</dt>
+        <dd className="mt-1 text-white/75">{row.iter ?? "seed"}</dd>
+      </div>
+      <div className="rounded-xl border border-white/10 bg-white/[0.025] p-2">
+        <dt>Verdict</dt>
+        <dd className="mt-1 text-white/75">{iterationVerdictLabel(row)}</dd>
+      </div>
+      <div className="rounded-xl border border-white/10 bg-white/[0.025] p-2">
+        <dt>Parent</dt>
+        <dd className="mt-1 truncate text-white/75">{row.parentLabel ?? "—"}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function IterationCompareModal({
+  rows,
+  onClose,
+}: {
+  rows: [ArtifactIterationRow, ArtifactIterationRow];
+  onClose: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        ),
+      ).filter((element) => !element.getAttribute("aria-hidden"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previous?.focus();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[820] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm" role="presentation">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="iteration-compare-title"
+        aria-describedby="iteration-compare-desc"
+        className="max-h-[92vh] w-full max-w-6xl overflow-hidden rounded-[2rem] border border-cyan-300/20 bg-[#070a0f] shadow-[0_0_80px_rgba(0,0,0,0.62)]"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-white/10 p-5">
+          <div>
+            <p className="text-[8px] font-mono uppercase tracking-[0.32em] text-cyan-200/65">Side-by-side diff</p>
+            <h3 id="iteration-compare-title" className="mt-1 text-xl font-black uppercase tracking-tight text-white">
+              Compare regen iterations
+            </h3>
+            <p id="iteration-compare-desc" className="mt-2 text-[10px] leading-relaxed text-white/45">
+              Visual comparison is read-only. Use Esc to close, Tab to move between actions.
+            </p>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close iteration comparison"
+            className="rounded-full border border-white/10 bg-white/[0.03] p-2 text-white/45 transition-all hover:border-white/25 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/45"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="grid max-h-[calc(92vh-116px)] grid-cols-1 gap-4 overflow-y-auto p-5 lg:grid-cols-2">
+          {rows.map((row, index) => (
+            <section key={row.artifact.id} className="rounded-2xl border border-white/10 bg-white/[0.025] p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[8px] font-mono uppercase tracking-[0.24em] text-white/35">
+                    {index === 0 ? "A" : "B"} · {formatTimestamp(row.artifact.createdAt)}
+                  </p>
+                  <h4 className="mt-1 text-sm font-semibold text-white">{row.label}</h4>
+                </div>
+                {row.verdict?.verdict && (
+                  <span
+                    aria-label={`Critic verdict ${iterationVerdictLabel(row)}`}
+                    className={`rounded-full border px-2 py-1 text-[8px] font-mono uppercase tracking-[0.18em] ${iterationVerdictStyles[row.verdict.verdict] ?? "border-white/10 text-white/45"}`}
+                  >
+                    {iterationVerdictLabel(row)}
+                  </span>
+                )}
+              </div>
+              <IterationThumb row={row} className="aspect-video w-full" />
+              <div className="mt-3">
+                <IterationMetaList row={row} />
+              </div>
+              {row.verdict?.failureClasses && row.verdict.failureClasses.length > 0 && (
+                <p className="mt-3 text-[9px] leading-relaxed text-red-100/70">
+                  {row.verdict.failureClasses.map((item) => item.replace(/_/g, " ")).join(", ")}
+                </p>
+              )}
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, pinnedTimelineEventId, auditShot, onClose, onRunSelect }: ShotDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>("narrative");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
@@ -510,6 +698,9 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
   const [fallbackDeliverable, setFallbackDeliverable] = useState<CampaignDeliverable | null>(null);
   const [productionShots, setProductionShots] = useState<ProductionShotState[]>([]);
   const [operatorOverrides, setOperatorOverrides] = useState<OperatorOverrideDecision[]>([]);
+  const [iterationResponse, setIterationResponse] = useState<ArtifactIterationsResponse | null>(null);
+  const [selectedIterationIds, setSelectedIterationIds] = useState<string[]>([]);
+  const [compareRows, setCompareRows] = useState<[ArtifactIterationRow, ArtifactIterationRow] | null>(null);
   const [expandedDecisionId, setExpandedDecisionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -517,6 +708,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const pinnedTimelineRef = useRef<HTMLDivElement>(null);
+  const compareOpenRef = useRef(false);
 
   useEffect(() => {
     setActiveTab(initialTab ?? "narrative");
@@ -527,11 +719,18 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     setFallbackDeliverable(null);
     setProductionShots([]);
     setOperatorOverrides([]);
+    setIterationResponse(null);
+    setSelectedIterationIds([]);
+    setCompareRows(null);
     setLoadError(null);
     if (!deliverableId) {
       setIsLoading(false);
     }
   }, [deliverableId, initialTab, pinnedTimelineEventId, runId]);
+
+  useEffect(() => {
+    compareOpenRef.current = compareRows !== null;
+  }, [compareRows]);
 
   useEffect(() => {
     if (!deliverableId) return;
@@ -541,6 +740,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (compareOpenRef.current) return;
         event.preventDefault();
         onClose();
         return;
@@ -594,7 +794,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
       setIsLoading(true);
       setLoadError(null);
       try {
-        const [runArtifacts, runLogs, runTrail, deliverableDetail, productionCatalog] = await Promise.all([
+        const [runArtifacts, runLogs, runTrail, deliverableDetail, productionCatalog, iterations] = await Promise.all([
           runId
             ? api.getArtifacts(runId).then((items) => items.filter((item) => item.deliverableId === currentDeliverableId))
             : Promise.resolve<Artifact[]>([]),
@@ -602,6 +802,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           runId ? fetchTrail(runId, currentDeliverableId) : Promise.resolve<DeliverableTrail | null>(null),
           api.getDeliverable(currentDeliverableId).catch(() => null),
           api.getProductionShots("drift-mv").then((response) => response.shots).catch(() => []),
+          api.getArtifactIterationsForDeliverable(currentDeliverableId),
         ]);
         const overrideCampaignId = campaignId ?? deliverableDetail?.campaignId;
         const overrides = overrideCampaignId
@@ -614,14 +815,26 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
         const latestArtifact = sortedArtifacts[0] ?? (getLatestArtifactForDeliverableCompat
           ? await getLatestArtifactForDeliverableCompat(currentDeliverableId)
           : null);
+        const iterationArtifacts = iterations.rows
+          .map((row) => row.artifact)
+          .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
         if (cancelled) return;
-        setArtifacts(latestArtifact && sortedArtifacts.length === 0 ? [latestArtifact] : sortedArtifacts);
+        setArtifacts(
+          sortedArtifacts.length > 0
+            ? sortedArtifacts
+            : iterationArtifacts.length > 0
+              ? iterationArtifacts
+              : latestArtifact
+                ? [latestArtifact]
+                : [],
+        );
         setLogs(runLogs);
         setTrail(runTrail);
         setFallbackDeliverable(deliverableDetail);
         setProductionShots(productionCatalog);
         setOperatorOverrides(overrides);
+        setIterationResponse(iterations);
       } catch {
         if (!cancelled) {
           setLoadError("Couldn't load shot details. Retry.");
@@ -639,7 +852,37 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     };
   }, [campaignId, deliverableId, reloadNonce, runId]);
 
+  useEffect(() => {
+    if (!deliverableId) return undefined;
+    return api.subscribeToArtifactsByDeliverable(deliverableId, () => {
+      setReloadNonce((value) => value + 1);
+    });
+  }, [deliverableId]);
+
   const latestArtifact = artifacts[0] ?? null;
+  const iterationRows = iterationResponse?.rows ?? [];
+  const selectedIterationRows = useMemo(
+    () => selectedIterationIds
+      .map((id) => iterationRows.find((row) => row.artifact.id === id))
+      .filter((row): row is ArtifactIterationRow => row !== undefined),
+    [iterationRows, selectedIterationIds],
+  );
+  const visibleIterationRows = useMemo(
+    () => iterationRows.filter((row) => !row.isCarryForward),
+    [iterationRows],
+  );
+  const hasRegenIterations = visibleIterationRows.some((row) => row.iter !== null);
+  const toggleIterationSelection = useCallback((artifactId: string) => {
+    setSelectedIterationIds((previous) => {
+      if (previous.includes(artifactId)) return previous.filter((id) => id !== artifactId);
+      return [...previous.slice(-1), artifactId];
+    });
+  }, []);
+  const focusIterationRow = useCallback((artifactId: string) => {
+    const target = document.getElementById(`iteration-row-${artifactId}`);
+    target?.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.setTimeout(() => target?.focus(), 180);
+  }, []);
   const narrative = useMemo(() => extractNarrativeContext(latestArtifact), [latestArtifact]);
   const decisionsNewestFirst = useMemo(
     () => [...(trail?.decisionHistory ?? [])].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
@@ -734,7 +977,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
             </button>
           </div>
 
-          <div role="tablist" aria-label="Shot detail tabs" className="mt-4 flex items-center gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1">
+          <div role="tablist" aria-label="Shot detail tabs" className="mt-4 flex items-center gap-1 overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-1">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
@@ -745,7 +988,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                   role="tab"
                   aria-selected={active}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-2 text-[8px] font-mono uppercase tracking-[0.25em] transition-all ${
+                  className={`flex min-w-[104px] flex-none items-center justify-center gap-1 rounded-lg px-2 py-2 text-[8px] font-mono uppercase tracking-[0.18em] transition-all sm:flex-1 sm:tracking-[0.25em] ${
                     active
                       ? "border border-cyan-500/30 bg-cyan-500/12 text-cyan-200"
                       : "border border-transparent text-white/35 hover:text-white/70"
@@ -1006,6 +1249,179 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                 No orchestrator decisions for this shot — reused as-is.
               </div>
             )
+          ) : activeTab === "iterations" ? (
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/[0.055] p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-[8px] font-mono uppercase tracking-[0.32em] text-cyan-200/70">Regen iterations</p>
+                    <p className="mt-2 text-[11px] leading-5 text-white/55">
+                      Ordered oldest → newest so the parent chain reads like a storyboard of recovery attempts.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[8px] font-mono uppercase tracking-[0.18em] text-white/45">
+                      {visibleIterationRows.length} visible
+                    </span>
+                    <button
+                      type="button"
+                      disabled={selectedIterationRows.length !== 2}
+                      onClick={() => {
+                        if (selectedIterationRows.length === 2) {
+                          setCompareRows([selectedIterationRows[0], selectedIterationRows[1]]);
+                        }
+                      }}
+                      aria-label={
+                        selectedIterationRows.length === 2
+                          ? `Compare ${selectedIterationRows[0].label} and ${selectedIterationRows[1].label}`
+                          : `Select two iterations to compare. ${selectedIterationRows.length} selected.`
+                      }
+                      className="inline-flex items-center justify-center rounded-xl border border-cyan-300/30 bg-cyan-300/10 px-3 py-2 text-[8px] font-mono uppercase tracking-[0.2em] text-cyan-100 transition-all hover:border-cyan-200/50 hover:bg-cyan-300/15 focus:outline-none focus:ring-2 focus:ring-cyan-300/45 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.03] disabled:text-white/30"
+                    >
+                      Compare
+                    </button>
+                  </div>
+                </div>
+                <p className="sr-only" aria-live="polite">
+                  {selectedIterationRows.length === 0
+                    ? "No iterations staged for compare."
+                    : `${selectedIterationRows.map((row) => row.label).join(" and ")} staged for compare.`}
+                </p>
+              </div>
+
+              {visibleIterationRows.length === 0 ? (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">
+                  No artifacts recorded for this shot yet.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {visibleIterationRows.map((row) => {
+                    const selected = selectedIterationIds.includes(row.artifact.id);
+                    const verdict = row.verdict?.verdict ?? null;
+                    const parentActionLabel = row.parentLabel ? `Go to parent ${row.parentLabel}` : undefined;
+                    return (
+                      <article
+                        key={row.artifact.id}
+                        id={`iteration-row-${row.artifact.id}`}
+                        tabIndex={-1}
+                        className={`rounded-2xl border p-3 transition-all ${
+                          selected
+                            ? "border-cyan-300/50 bg-cyan-300/10 shadow-[0_0_22px_rgba(34,211,238,0.12)]"
+                            : "border-white/10 bg-white/[0.02]"
+                        }`}
+                      >
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-[112px_minmax(0,1fr)]">
+                          <button
+                            type="button"
+                            onClick={() => toggleIterationSelection(row.artifact.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === " ") {
+                                event.preventDefault();
+                                toggleIterationSelection(row.artifact.id);
+                              }
+                            }}
+                            aria-pressed={selected}
+                            aria-label={`${selected ? "Unstage" : "Stage"} ${row.label} for side-by-side comparison`}
+                            className="group relative aspect-video overflow-hidden rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-300/45"
+                          >
+                            <IterationThumb row={row} />
+                            <span className={`absolute left-2 top-2 rounded-full border px-2 py-1 text-[7px] font-mono uppercase tracking-[0.18em] ${
+                              selected
+                                ? "border-cyan-200/55 bg-cyan-300/25 text-cyan-50"
+                                : "border-white/15 bg-black/45 text-white/55 group-hover:border-cyan-200/45 group-hover:text-cyan-100"
+                            }`}>
+                              {selected ? "staged" : "stage"}
+                            </span>
+                          </button>
+
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-[12px] font-semibold uppercase tracking-[0.12em] text-white">{row.label}</h4>
+                              {verdict && (
+                                <span
+                                  aria-label={`Critic verdict ${iterationVerdictLabel(row)}`}
+                                  className={`rounded-full border px-2 py-1 text-[8px] font-mono uppercase tracking-[0.18em] ${iterationVerdictStyles[verdict] ?? "border-white/10 text-white/45"}`}
+                                >
+                                  {iterationVerdictLabel(row)}
+                                </span>
+                              )}
+                              {row.operatorOverride && (
+                                <span
+                                  aria-label={`Operator override ${row.operatorOverride.criticVerdict ?? "critic verdict"} ${row.operatorOverride.criticScore?.toFixed(2) ?? ""}`}
+                                  title={row.operatorOverride.rationale}
+                                  className="inline-flex items-center gap-1 rounded-full border border-[#ED4C14]/40 bg-[#ED4C14]/15 px-2 py-1 text-[8px] font-mono uppercase tracking-[0.16em] text-orange-200"
+                                >
+                                  <ShieldCheck size={9} />
+                                  Operator Override
+                                </span>
+                              )}
+                              {row.isSeed && (
+                                <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-1 text-[8px] font-mono uppercase tracking-[0.18em] text-white/35">
+                                  seed
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-[8px] font-mono uppercase tracking-[0.16em] text-white/35">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onRunSelect) {
+                                    onRunSelect(row.runId);
+                                    onClose();
+                                  }
+                                }}
+                                aria-label={`Open run ${row.runId.slice(0, 8)} details`}
+                                className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-cyan-100/75 transition-all hover:border-cyan-200/45 hover:text-cyan-50 focus:outline-none focus:ring-2 focus:ring-cyan-300/45"
+                              >
+                                run {row.runId.slice(0, 8)}
+                              </button>
+                              <span>{formatTimestamp(row.artifact.createdAt)}</span>
+                              <span>artifact {row.artifact.id.slice(0, 8)}</span>
+                              {row.iter !== null && <span>iter {row.iter}</span>}
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-1 gap-2 text-[8px] font-mono uppercase tracking-[0.14em] text-white/36 sm:grid-cols-2">
+                              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2">
+                                <p>Parent chain</p>
+                                {row.parentArtifactId ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => focusIterationRow(row.parentArtifactId as string)}
+                                    aria-label={parentActionLabel}
+                                    className="mt-1 text-left text-cyan-100/75 underline decoration-cyan-200/30 underline-offset-4 transition-all hover:text-cyan-50 focus:outline-none focus:ring-2 focus:ring-cyan-300/45"
+                                  >
+                                    ← {row.parentLabel ?? row.parentArtifactId.slice(0, 8)}
+                                  </button>
+                                ) : (
+                                  <p className="mt-1 text-white/55">root</p>
+                                )}
+                              </div>
+                              <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2">
+                                <p>Source</p>
+                                <p className="mt-1 truncate text-white/55">{row.localPath ?? row.artifact.path}</p>
+                              </div>
+                            </div>
+
+                            {row.verdict?.failureClasses && row.verdict.failureClasses.length > 0 && (
+                              <p className="mt-3 text-[9px] leading-relaxed text-red-100/65">
+                                {row.verdict.failureClasses.map((item) => item.replace(/_/g, " ")).join(", ")}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!hasRegenIterations && visibleIterationRows.length > 0 && (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 text-[11px] leading-5 text-white/55">
+                  No regen iterations recorded for this shot yet — showing the original artifact only.
+                </div>
+              )}
+            </div>
           ) : (
             timeline.length > 0 ? (
               <div className="space-y-3">
@@ -1041,6 +1457,13 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           {latestArtifact ? `Latest artifact ${latestArtifact.name}` : "No artifact loaded"}
         </div>
       </div>
+
+      {compareRows && (
+        <IterationCompareModal
+          rows={compareRows}
+          onClose={() => setCompareRows(null)}
+        />
+      )}
     </div>
   );
 }

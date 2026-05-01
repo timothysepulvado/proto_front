@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 import dotenv from "dotenv";
+import { createReadStream, existsSync } from "fs";
+import path from "path";
 import type { Request, Response } from "express";
 import type { Run, RunCreatePayload, ReviewPayload } from "./types.js";
 import { STAGE_DEFINITIONS } from "./types.js";
@@ -54,6 +56,7 @@ import {
   getRunDetail,
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
+  getArtifactsForDeliverableWithVerdicts,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
@@ -76,6 +79,19 @@ function getParam(req: Request, name: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function artifactLocalPathFromMetadata(value: unknown): string | null {
+  const metadata = isRecord(value) ? value : null;
+  const localPath = metadata && typeof metadata.localPath === "string" ? metadata.localPath : null;
+  return localPath && localPath.trim().length > 0 ? localPath : null;
+}
+
+function imageContentType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  return "image/png";
 }
 
 // ============ Client Routes ============
@@ -579,6 +595,55 @@ app.get("/api/runs/:runId/artifacts", async (req: Request, res: Response) => {
     res.json(artifacts);
   } catch (err) {
     console.error("GET /api/runs/:runId/artifacts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/deliverables/:deliverableId/iterations - Regen artifacts + critic verdicts
+app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res: Response) => {
+  try {
+    const deliverableId = getParam(req, "deliverableId");
+    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId);
+    res.json(iterations);
+  } catch (err) {
+    console.error("GET /api/deliverables/:deliverableId/iterations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) => {
+  try {
+    const artifactId = getParam(req, "artifactId");
+    const artifact = await getArtifactById(artifactId);
+    if (!artifact) {
+      res.status(404).json({ error: "Artifact not found" });
+      return;
+    }
+
+    const tempGenRoot = path.resolve(process.env.TEMP_GEN_PATH ?? "/Users/timothysepulvado/Temp-gen");
+    const localPath = artifactLocalPathFromMetadata(artifact.metadata)
+      ?? (artifact.path.startsWith("/") ? artifact.path : null);
+    if (!localPath) {
+      res.status(404).json({ error: "No local artifact file path available" });
+      return;
+    }
+
+    const resolved = path.resolve(localPath);
+    if (!resolved.startsWith(`${tempGenRoot}${path.sep}`) && resolved !== tempGenRoot) {
+      res.status(403).json({ error: "Artifact file is outside the configured Temp-gen root" });
+      return;
+    }
+    if (!existsSync(resolved)) {
+      res.status(404).json({ error: "Artifact file not found on disk" });
+      return;
+    }
+
+    res.setHeader("Content-Type", imageContentType(resolved));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    createReadStream(resolved).pipe(res);
+  } catch (err) {
+    console.error("GET /api/artifacts/:artifactId/file error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

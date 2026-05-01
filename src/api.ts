@@ -83,6 +83,56 @@ export interface RunDetail {
   relatedStillsRun?: RecentCampaignRun | null;
 }
 
+export type ArtifactIterationVerdictLabel = "PASS" | "WARN" | "FAIL" | "SHIP";
+
+export interface ArtifactIterationVerdict {
+  verdict: ArtifactIterationVerdictLabel | null;
+  score: number | null;
+  recommendation: string | null;
+  failureClasses: string[];
+  logId?: number;
+  decisionId?: string;
+  timestamp?: string;
+  message?: string;
+}
+
+export interface ArtifactIterationOperatorOverride {
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+}
+
+export interface ArtifactIterationRow {
+  artifact: Artifact;
+  deliverableId: string;
+  shotNumber: number | null;
+  runId: string;
+  runCreatedAt: string | null;
+  runOrdinalForShot: number | null;
+  iter: number | null;
+  label: string;
+  displayUrl: string;
+  localPath: string | null;
+  isSeed: boolean;
+  isCarryForward: boolean;
+  parentArtifactId: string | null;
+  parentLabel: string | null;
+  verdict: ArtifactIterationVerdict | null;
+  operatorOverride: ArtifactIterationOperatorOverride | null;
+}
+
+export interface ArtifactIterationsResponse {
+  deliverableId: string;
+  shotNumber: number | null;
+  rows: ArtifactIterationRow[];
+  generatedAt: string;
+}
+
 export type MotionGateShotState =
   | "locked"
   | "operator-override"
@@ -1395,6 +1445,18 @@ export async function getDirectionDriftIndicators(
   return (await resp.json()) as Record<string, DirectionDriftIndicator>;
 }
 
+export async function getArtifactIterationsForDeliverable(
+  deliverableId: string,
+): Promise<ArtifactIterationsResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ArtifactIterationsResponse;
+}
+
+export function resolveArtifactDisplayUrl(displayUrl: string): string {
+  return displayUrl.startsWith("/api/") ? `${OS_API_URL}${displayUrl}` : displayUrl;
+}
+
 export async function createMotionPhaseRun(
   clientId: string,
   campaignId: string,
@@ -2120,6 +2182,33 @@ export function subscribeToArtifacts(
         schema: "public",
         table: "artifacts",
         filter: `run_id=eq.${runId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onInsert(mapDbArtifactToArtifact(payload.new as DbArtifact));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+export function subscribeToArtifactsByDeliverable(
+  deliverableId: string,
+  onInsert: (artifact: Artifact) => void,
+): () => void {
+  const channel = supabase
+    .channel(`artifacts:deliverable:${deliverableId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "artifacts",
+        filter: `deliverable_id=eq.${deliverableId}`,
       },
       (payload) => {
         if (payload.new) {

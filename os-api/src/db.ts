@@ -11,6 +11,8 @@ import type {
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
   MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
   DirectionDriftIndicator, DirectionDriftVerdictSource,
+  ArtifactIterationRow, ArtifactIterationsResponse, ArtifactIterationOperatorOverride,
+  ArtifactIterationVerdict,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 
@@ -1396,6 +1398,348 @@ export async function getArtifactById(artifactId: string): Promise<Artifact | nu
 
   if (!data) return null;
   return mapDbArtifactToArtifact(data as DbArtifact);
+}
+
+// ── Gap 8: Per-shot regen iteration browser helpers ───────────────────────
+
+export interface ArtifactIterationAggregationInput {
+  deliverableId: string;
+  shotNumber: number | null;
+  artifacts: Artifact[];
+  logs: RunLog[];
+  decisions: OrchestrationDecisionRecord[];
+  runs: Run[];
+  operatorOverrides?: Map<string, ArtifactIterationOperatorOverride>;
+  now?: Date;
+}
+
+const ITER_FILENAME_RE = /(?:^|[_-])iter[_-]?(\d+)(?=\D|$)/i;
+const IN_LOOP_VERDICT_RE = /\[in_loop\]\s+shot\s+(\d{1,3})\s+iter\s+(\d+):\s+(PASS|WARN|FAIL)\s+score=([0-9.]+)\s+→\s+([A-Za-z0-9_]+)/i;
+const IN_LOOP_SHIP_ITER_RE = /\[in_loop\]\s+shot\s+(\d{1,3})\s*:\s+SHIP at iter\s+(\d+)/i;
+
+export function parseArtifactIteration(value: Pick<Artifact, "name" | "path" | "storagePath" | "metadata">): number | null {
+  const metadata = isRecord(value.metadata) ? value.metadata : null;
+  const metadataIter = readInteger(metadata?.iter)
+    ?? readInteger(metadata?.iteration)
+    ?? readInteger(metadata?.orchestrationIteration);
+  if (metadataIter && metadataIter > 0) return metadataIter;
+
+  const haystack = [value.name, value.path, value.storagePath].filter(Boolean).join(" ");
+  const match = ITER_FILENAME_RE.exec(haystack);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1] as string, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function artifactLocalPath(artifact: Artifact): string | null {
+  const metadata = isRecord(artifact.metadata) ? artifact.metadata : null;
+  const localPath = readString(metadata?.localPath);
+  if (localPath) return localPath;
+  return artifact.path.startsWith("/") ? artifact.path : null;
+}
+
+export function artifactDisplayUrl(artifact: Artifact): string {
+  if (/^https?:\/\//i.test(artifact.path)) return artifact.path;
+  return `/api/artifacts/${artifact.id}/file`;
+}
+
+function isCarryForwardArtifact(artifact: Artifact): boolean {
+  const metadata = isRecord(artifact.metadata) ? artifact.metadata : null;
+  return Boolean(readString(metadata?.seedReason) && readString(metadata?.seededFromArtifactId));
+}
+
+function parentArtifactId(artifact: Artifact): string | null {
+  const metadata = isRecord(artifact.metadata) ? artifact.metadata : null;
+  const seededFrom = readString(metadata?.seededFromArtifactId)
+    ?? readString(metadata?.seeded_from_artifact_id)
+    ?? null;
+  const directParent = readString(metadata?.parentArtifactId)
+    ?? readString(metadata?.parent_artifact_id)
+    ?? null;
+  return isCarryForwardArtifact(artifact)
+    ? seededFrom ?? directParent
+    : directParent ?? seededFrom;
+}
+
+function runOrdinalByShot(runs: Run[], shotNumber: number | null): Map<string, number> {
+  const output = new Map<string, number>();
+  if (!shotNumber) return output;
+  let ordinal = 0;
+  const stillsRuns = [...runs]
+    .filter((run) => run.mode === "stills" && run.metadata?.audit_mode !== true)
+    .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+  for (const run of stillsRuns) {
+    const shotIds = extractRunShotIds(run.metadata);
+    if (shotIds && !shotIds.includes(shotNumber)) continue;
+    ordinal += 1;
+    output.set(run.runId, ordinal);
+  }
+  return output;
+}
+
+function buildArtifactIterationLabel(runOrdinal: number | null, iter: number | null, artifact: Artifact): string {
+  const metadata = isRecord(artifact.metadata) ? artifact.metadata : null;
+  const seedReason = readString(metadata?.seedReason);
+  const version = runOrdinal ? `v${runOrdinal}` : artifact.runId.slice(0, 8);
+  if (iter !== null) return `${version} iter${iter}`;
+  if (seedReason) return `${version} locked seed`;
+  return `${version} original`;
+}
+
+function readQaVerdictRecord(decision: OrchestrationDecisionRecord): Record<string, unknown> | null {
+  const input = isRecord(decision.inputContext) ? decision.inputContext : {};
+  const qa = input.qaVerdict ?? input.qa_verdict;
+  return isRecord(qa) ? qa : null;
+}
+
+function verdictFromDecision(decision: OrchestrationDecisionRecord): ArtifactIterationVerdict | null {
+  const qa = readQaVerdictRecord(decision);
+  if (!qa) return null;
+  const verdict = readString(qa.verdict);
+  if (verdict !== "PASS" && verdict !== "WARN" && verdict !== "FAIL") return null;
+  return {
+    verdict,
+    score: readNumber(qa.aggregate_score) ?? readNumber(qa.aggregateScore) ?? null,
+    recommendation: readString(qa.recommendation) ?? null,
+    failureClasses: readStringArray(qa.detected_failure_classes)
+      .concat(readStringArray(qa.detectedFailureClasses))
+      .concat(readStringArray(qa.failure_classes))
+      .concat(readStringArray(qa.failureClasses)),
+    decisionId: decision.id,
+    timestamp: decision.createdAt,
+  };
+}
+
+function verdictFromLog(log: RunLog): ArtifactIterationVerdict | null {
+  const match = IN_LOOP_VERDICT_RE.exec(log.message);
+  if (match) {
+    return {
+      verdict: match[3] as ArtifactIterationVerdict["verdict"],
+      score: Number.parseFloat(match[4] as string),
+      recommendation: match[5] as string,
+      failureClasses: [],
+      logId: log.id,
+      timestamp: log.timestamp,
+      message: log.message,
+    };
+  }
+  const shipMatch = IN_LOOP_SHIP_ITER_RE.exec(log.message);
+  if (shipMatch) {
+    return {
+      verdict: "SHIP",
+      score: null,
+      recommendation: "ship",
+      failureClasses: [],
+      logId: log.id,
+      timestamp: log.timestamp,
+      message: log.message,
+    };
+  }
+  return null;
+}
+
+function logIteration(log: RunLog): { shotNumber: number; iter: number } | null {
+  const match = IN_LOOP_VERDICT_RE.exec(log.message) ?? IN_LOOP_SHIP_ITER_RE.exec(log.message);
+  if (!match) return null;
+  return {
+    shotNumber: Number.parseInt(match[1] as string, 10),
+    iter: Number.parseInt(match[2] as string, 10),
+  };
+}
+
+export function aggregateArtifactIterationRows(
+  input: ArtifactIterationAggregationInput,
+): ArtifactIterationsResponse {
+  const sortedArtifacts = [...input.artifacts].sort((left, right) => {
+    const timeDelta = eventTime(left.createdAt) - eventTime(right.createdAt);
+    if (timeDelta !== 0) return timeDelta;
+    return left.id.localeCompare(right.id);
+  });
+  const runById = new Map(input.runs.map((run) => [run.runId, run]));
+  const runOrdinal = runOrdinalByShot(input.runs, input.shotNumber);
+  const decisionByArtifactId = new Map<string, OrchestrationDecisionRecord>();
+
+  [...input.decisions]
+    .sort((left, right) => eventTime(right.createdAt) - eventTime(left.createdAt))
+    .forEach((decision) => {
+      const artifactId = readString(decision.inputContext.artifactId) ?? readString(decision.inputContext.artifact_id);
+      if (artifactId && !decisionByArtifactId.has(artifactId)) {
+        decisionByArtifactId.set(artifactId, decision);
+      }
+    });
+
+  const latestLogVerdictByRunIter = new Map<string, ArtifactIterationVerdict>();
+  for (const log of input.logs) {
+    const parsed = logIteration(log);
+    if (!parsed) continue;
+    if (input.shotNumber !== null && parsed.shotNumber !== input.shotNumber) continue;
+    const verdict = verdictFromLog(log);
+    if (!verdict) continue;
+    const key = `${log.runId}:${parsed.iter}`;
+    const existing = latestLogVerdictByRunIter.get(key);
+    if (!existing || eventTime(verdict.timestamp) >= eventTime(existing.timestamp)) {
+      latestLogVerdictByRunIter.set(key, verdict);
+    }
+  }
+
+  const rows: ArtifactIterationRow[] = sortedArtifacts.map((artifact) => {
+    const iter = parseArtifactIteration(artifact);
+    const ordinal = runOrdinal.get(artifact.runId) ?? null;
+    const artifactDecision = decisionByArtifactId.get(artifact.id);
+    const decisionVerdict = artifactDecision ? verdictFromDecision(artifactDecision) : null;
+    const effectiveIter = iter ?? artifactDecision?.iteration ?? null;
+    const verdict = decisionVerdict
+      ?? (effectiveIter !== null ? latestLogVerdictByRunIter.get(`${artifact.runId}:${effectiveIter}`) ?? null : null);
+    const parentId = parentArtifactId(artifact);
+    return {
+      artifact,
+      deliverableId: input.deliverableId,
+      shotNumber: input.shotNumber,
+      runId: artifact.runId,
+      runCreatedAt: runById.get(artifact.runId)?.createdAt ?? null,
+      runOrdinalForShot: ordinal,
+      iter,
+      label: buildArtifactIterationLabel(ordinal, iter, artifact),
+      displayUrl: artifactDisplayUrl(artifact),
+      localPath: artifactLocalPath(artifact),
+      isSeed: Boolean(readString(isRecord(artifact.metadata) ? artifact.metadata.seedReason : undefined)),
+      isCarryForward: isCarryForwardArtifact(artifact),
+      parentArtifactId: parentId,
+      parentLabel: null,
+      verdict,
+      operatorOverride: (iter !== null ? input.operatorOverrides?.get(`${artifact.runId}:iter${iter}`) : null) ?? null,
+    };
+  });
+
+  const rowByArtifactId = new Map(rows.map((row) => [row.artifact.id, row]));
+  const resolveVisibleParent = (row: ArtifactIterationRow): ArtifactIterationRow | null => {
+    let nextId = row.parentArtifactId;
+    const seen = new Set<string>();
+    while (nextId && !seen.has(nextId)) {
+      seen.add(nextId);
+      const parent = rowByArtifactId.get(nextId);
+      if (!parent) return null;
+      if (!parent.isCarryForward) return parent;
+      nextId = parent.parentArtifactId;
+    }
+    return null;
+  };
+  return {
+    deliverableId: input.deliverableId,
+    shotNumber: input.shotNumber,
+    rows: rows.map((row) => {
+      const visibleParent = resolveVisibleParent(row);
+      return {
+        ...row,
+        parentArtifactId: visibleParent?.artifact.id ?? row.parentArtifactId,
+        parentLabel: visibleParent?.label ?? (row.parentArtifactId ? row.parentArtifactId.slice(0, 8) : null),
+      };
+    }),
+    generatedAt: (input.now ?? new Date()).toISOString(),
+  };
+}
+
+function readOperatorOverride(
+  value: unknown,
+): ArtifactIterationOperatorOverride | null {
+  if (!isRecord(value)) return null;
+  const decisionAt = readString(value.decision_at) ?? readString(value.decisionAt);
+  if (!decisionAt) return null;
+  return {
+    decisionAt,
+    decisionBy: readString(value.decision_by) ?? readString(value.decisionBy),
+    decidedArtifactPath: readString(value.decided_artifact_path) ?? readString(value.decidedArtifactPath),
+    decidedIter: readInteger(value.decided_iter) ?? readInteger(value.decidedIter),
+    criticVerdict: readString(value.critic_verdict) ?? readString(value.criticVerdict),
+    criticScore: readNumber(value.critic_score) ?? readNumber(value.criticScore),
+    rationale: readString(value.rationale),
+    lockedTo: readString(value.locked_to) ?? readString(value.lockedTo),
+  };
+}
+
+export async function getArtifactsForDeliverableWithVerdicts(
+  deliverableId: string,
+): Promise<ArtifactIterationsResponse> {
+  const deliverable = await getDeliverable(deliverableId);
+  if (!deliverable) throw new Error(`Deliverable ${deliverableId} not found`);
+  const shotNumber = deriveDeliverableShotNumber(deliverable, 0);
+
+  const { data: artifactData, error: artifactError } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("deliverable_id", deliverableId)
+    .eq("type", "image")
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (artifactError) throw new Error(`Failed to get deliverable artifacts: ${artifactError.message}`);
+  const artifacts = (artifactData as DbArtifact[] | null ?? []).map(mapDbArtifactToArtifact);
+
+  const runIds = [...new Set(artifacts.map((artifact) => artifact.runId))];
+  const [runRows, logRows, escalationRows] = await Promise.all([
+    (async () => {
+      const { data, error } = await supabase
+        .from("runs")
+        .select("*")
+        .eq("campaign_id", deliverable.campaignId)
+        .eq("mode", "stills")
+        .order("created_at", { ascending: true })
+        .limit(250);
+      if (error) throw new Error(`Failed to get stills runs for iteration browser: ${error.message}`);
+      return (data as DbRun[] | null ?? []).map(mapDbRunToRun);
+    })(),
+    (async () => {
+      if (runIds.length === 0) return [] as RunLog[];
+      const { data, error } = await supabase
+        .from("run_logs")
+        .select("*")
+        .in("run_id", runIds)
+        .order("timestamp", { ascending: true })
+        .limit(5000);
+      if (error) throw new Error(`Failed to get run logs for iteration browser: ${error.message}`);
+      return (data as DbRunLog[] | null ?? []).map(mapDbLogToRunLog);
+    })(),
+    (async () => {
+      const { data, error } = await supabase
+        .from("asset_escalations")
+        .select("*")
+        .eq("deliverable_id", deliverableId)
+        .order("created_at", { ascending: true })
+        .limit(1000);
+      if (error) throw new Error(`Failed to get escalations for iteration browser: ${error.message}`);
+      return (data as DbAssetEscalation[] | null ?? []).map(mapAssetEscalation);
+    })(),
+  ]);
+
+  let decisions: OrchestrationDecisionRecord[] = [];
+  const escalationIds = escalationRows.map((escalation) => escalation.id);
+  if (escalationIds.length > 0) {
+    const { data, error } = await supabase
+      .from("orchestration_decisions")
+      .select("*")
+      .in("escalation_id", escalationIds)
+      .order("created_at", { ascending: true })
+      .limit(1000);
+    if (error) throw new Error(`Failed to get orchestration decisions for iteration browser: ${error.message}`);
+    decisions = (data as DbOrchestrationDecision[] | null ?? []).map(mapOrchestrationDecision);
+  }
+
+  const overrides = new Map<string, ArtifactIterationOperatorOverride>();
+  for (const run of runRows) {
+    const overrideRoot = isRecord(run.metadata?.operator_override) ? run.metadata.operator_override : null;
+    const override = readOperatorOverride(overrideRoot?.[`shot_${shotNumber}`]);
+    if (!override || override.decidedIter == null) continue;
+    overrides.set(`${run.runId}:iter${override.decidedIter}`, override);
+  }
+
+  return aggregateArtifactIterationRows({
+    deliverableId,
+    shotNumber,
+    artifacts,
+    logs: logRows,
+    decisions,
+    runs: runRows,
+    operatorOverrides: overrides,
+  });
 }
 
 // ============ Client Operations ============

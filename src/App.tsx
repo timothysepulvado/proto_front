@@ -1541,6 +1541,7 @@ export default function App() {
         pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}
         auditShot={selectedShot.auditShot}
         onClose={() => setSelectedShot({ n: null, id: null })}
+        onRunSelect={setSelectedRunDetailId}
       />
 
       <RunDetailDrawer
