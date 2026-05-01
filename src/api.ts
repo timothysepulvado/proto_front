@@ -1451,6 +1451,8 @@ export function subscribeToCampaignDeliverables(
   };
 }
 
+// ============ Review Gate Escalation Surface (Gap 1) ============
+
 // ============ Shot Summaries (Chunk 2 — HUD observability) ============
 
 export type EscalationLevel = "L1" | "L2" | "L3";
@@ -1461,6 +1463,184 @@ export type EscalationStatus =
   | "redesigned"
   | "replaced"
   | "hitl_required";
+export type EscalationAction =
+  | "prompt_fix"
+  | "approach_change"
+  | "accept"
+  | "redesign"
+  | "replace"
+  | "post_vfx";
+
+export interface AssetEscalation {
+  id: string;
+  artifactId: string;
+  deliverableId?: string;
+  runId?: string;
+  currentLevel: EscalationLevel;
+  status: EscalationStatus;
+  iterationCount: number;
+  failureClass?: string;
+  knownLimitationId?: string;
+  resolutionPath?: EscalationAction;
+  resolutionNotes?: string;
+  finalArtifactId?: string;
+  resolvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DbAssetEscalation {
+  id: string;
+  artifact_id: string;
+  deliverable_id: string | null;
+  run_id: string | null;
+  current_level: EscalationLevel;
+  status: EscalationStatus;
+  iteration_count: number;
+  failure_class: string | null;
+  known_limitation_id: string | null;
+  resolution_path: string | null;
+  resolution_notes: string | null;
+  final_artifact_id: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapDbAssetEscalation(db: DbAssetEscalation): AssetEscalation {
+  return {
+    id: db.id,
+    artifactId: db.artifact_id,
+    deliverableId: db.deliverable_id ?? undefined,
+    runId: db.run_id ?? undefined,
+    currentLevel: db.current_level,
+    status: db.status,
+    iterationCount: db.iteration_count,
+    failureClass: db.failure_class ?? undefined,
+    knownLimitationId: db.known_limitation_id ?? undefined,
+    resolutionPath: (db.resolution_path ?? undefined) as EscalationAction | undefined,
+    resolutionNotes: db.resolution_notes ?? undefined,
+    finalArtifactId: db.final_artifact_id ?? undefined,
+    resolvedAt: db.resolved_at ?? undefined,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+export interface ReviewGateEscalation {
+  escalation: AssetEscalation;
+  run?: Run;
+  deliverable?: CampaignDeliverable;
+}
+
+const REVIEW_GATE_OPEN_ESCALATION_STATUSES: EscalationStatus[] = ["hitl_required", "in_progress"];
+
+function reviewGateCutoffIso(days = 30): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+export async function getOpenReviewGateEscalations(
+  clientId: string,
+  days = 30,
+): Promise<ReviewGateEscalation[]> {
+  const cutoff = reviewGateCutoffIso(days);
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .in("status", REVIEW_GATE_OPEN_ESCALATION_STATUSES)
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get Review Gate escalations: ${error.message}`);
+
+  const escalations = (data as DbAssetEscalation[]).map(mapDbAssetEscalation);
+  const runIds = [...new Set(escalations.map((item) => item.runId).filter(Boolean))] as string[];
+  const deliverableIds = [...new Set(escalations.map((item) => item.deliverableId).filter(Boolean))] as string[];
+
+  const runsById = new Map<string, Run>();
+  if (runIds.length > 0) {
+    const { data: runRows, error: runError } = await supabase
+      .from("runs")
+      .select("*")
+      .in("id", runIds);
+
+    if (runError) throw new Error(`Failed to get escalation runs: ${runError.message}`);
+    for (const row of (runRows as DbRun[])) {
+      const run = mapDbRunToRun(row);
+      runsById.set(run.runId, run);
+    }
+  }
+
+  const deliverablesById = new Map<string, CampaignDeliverable>();
+  if (deliverableIds.length > 0) {
+    const { data: deliverableRows, error: deliverableError } = await supabase
+      .from("campaign_deliverables")
+      .select("*")
+      .in("id", deliverableIds);
+
+    if (deliverableError) throw new Error(`Failed to get escalation deliverables: ${deliverableError.message}`);
+    for (const row of (deliverableRows as DbCampaignDeliverable[])) {
+      const deliverable = mapDbDeliverableToDeliverable(row);
+      deliverablesById.set(deliverable.id, deliverable);
+    }
+  }
+
+  return escalations
+    .map((escalation) => ({
+      escalation,
+      run: escalation.runId ? runsById.get(escalation.runId) : undefined,
+      deliverable: escalation.deliverableId ? deliverablesById.get(escalation.deliverableId) : undefined,
+    }))
+    .filter((item) => !clientId || item.run?.clientId === clientId);
+}
+
+export interface ResolveEscalationResponse {
+  escalation: AssetEscalation;
+  runHitlCleared: boolean;
+}
+
+export async function resolveEscalationAccept(
+  escalationId: string,
+  resolutionNotes: string,
+): Promise<ResolveEscalationResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/resolve`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: "accepted",
+      resolution_path: "accept",
+      resolution_notes: resolutionNotes,
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ResolveEscalationResponse;
+}
+
+export function subscribeToAssetEscalations(
+  clientId: string,
+  onChange: () => void,
+): () => void {
+  const channel = supabase
+    .channel(`asset_escalations:${clientId || "all"}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "asset_escalations",
+      },
+      () => {
+        onChange();
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 export type BeatName =
   | "intro"
   | "hook_1"

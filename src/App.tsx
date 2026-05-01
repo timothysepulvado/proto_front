@@ -33,6 +33,7 @@ import AnchorStillPanel, { EmptyAnchorState } from "./components/AnchorStillPane
 import ActiveClientBadge from "./components/ActiveClientBadge";
 import CampaignDashboard from "./components/CampaignDashboard";
 import AuditTriageTable from "./components/AuditTriageTable";
+import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
 import type { AuditReportShot } from "./lib/auditReport";
 import {
   createRun,
@@ -45,6 +46,8 @@ import {
   getPendingReviewRuns,
   getPendingReviewCount,
   getClientRuns,
+  getOpenReviewGateEscalations,
+  subscribeToAssetEscalations,
   type Campaign,
   type Run,
   type RunLog,
@@ -336,6 +339,7 @@ export default function App() {
   const [finalHitlShotNumber, setFinalHitlShotNumber] = useState<number | null>(null);
   const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
   const [globalPendingCount, setGlobalPendingCount] = useState(0);
+  const [openEscalationCount, setOpenEscalationCount] = useState(0);
 
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
@@ -466,6 +470,34 @@ export default function App() {
     };
   }, [activeClient]);
 
+  // Track escalation-level HITL independently from legacy run.status review queue.
+  useEffect(() => {
+    if (!activeClient) {
+      setOpenEscalationCount(0);
+      return undefined;
+    }
+    let cancelled = false;
+
+    const refreshOpenEscalations = async () => {
+      try {
+        const items = await getOpenReviewGateEscalations(activeClient, 30);
+        if (!cancelled) setOpenEscalationCount(items.length);
+      } catch {
+        if (!cancelled) setOpenEscalationCount(0);
+      }
+    };
+
+    void refreshOpenEscalations();
+    const unsubscribe = subscribeToAssetEscalations(activeClient, () => {
+      void refreshOpenEscalations();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [activeClient]);
+
   const runMenuOptions = [
     { id: "full", label: "Full Pipeline", mode: "full" },
     { id: "ingest", label: "Ingest and Index", mode: "ingest", pillar: "Brand Memory" },
@@ -484,6 +516,7 @@ export default function App() {
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
   const isFeaturedClient = Boolean(currentClient?.featured);
+  const reviewAttentionCount = pendingReviewRuns.length + openEscalationCount;
   const isCampaignDashboard = Boolean(currentClient && isClientDetailOpen && !selectedCampaign);
   const isAnchorStillLayout = activePillar === "creative" && creativeSubtab === "stills" && isFeaturedClient && Boolean(selectedCampaign);
   const workspaceMaxClass = isAnchorStillLayout
@@ -1083,46 +1116,63 @@ export default function App() {
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
 
-                  {/* Review Gate: show pending review queue */}
-                  {activePillar === "review" && pendingReviewRuns.length > 0 ? (
-                    <div className="mt-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
-                          <Eye size={10} className="mr-1.5" />
-                          {pendingReviewRuns.length} run{pendingReviewRuns.length !== 1 ? "s" : ""} awaiting review
-                        </span>
-                      </div>
-                      {pendingReviewRuns.map((run) => (
-                        <button
-                          key={run.runId}
-                          onClick={() => {
-                            setCurrentRun(run);
-                            setShowReviewPanel(true);
-                          }}
-                          className="w-full flex items-center justify-between p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all group text-left"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-[10px] font-mono text-white truncate">
-                              {run.mode.toUpperCase()} — {new Date(run.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
-                            </p>
-                            <p className="text-[8px] font-mono text-white/30 uppercase tracking-wider">
-                              Run {run.runId.slice(0, 8)}
-                            </p>
-                          </div>
-                          <div className="flex items-center space-x-2 shrink-0 ml-2">
-                            <span className="text-[8px] font-mono text-amber-400 uppercase px-2 py-0.5 border border-amber-500/30 bg-amber-500/10 rounded">
-                              Review
+                  {/* Review Gate: show escalation-level HITL plus legacy run queue */}
+                  {activePillar === "review" ? (
+                    <div className="space-y-3">
+                      <ReviewGateEscalationSurface
+                        clientId={activeClient}
+                        onCountChange={setOpenEscalationCount}
+                        onOpenDeliverable={({ deliverableId, runId, shotNumber }) => {
+                          setSelectedShot({
+                            n: shotNumber,
+                            id: deliverableId,
+                            runId,
+                            initialTab: "orchestrator",
+                          });
+                        }}
+                      />
+
+                      {pendingReviewRuns.length > 0 ? (
+                        <div className="space-y-2 rounded-2xl border border-white/10 bg-black/20 p-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
+                              <Eye size={10} className="mr-1.5" />
+                              {pendingReviewRuns.length} run{pendingReviewRuns.length !== 1 ? "s" : ""} awaiting artifact review
                             </span>
-                            <ChevronDown size={12} className="text-white/20 -rotate-90 group-hover:text-amber-400 transition-colors" />
                           </div>
-                        </button>
-                      ))}
+                          {pendingReviewRuns.map((run) => (
+                            <button
+                              key={run.runId}
+                              onClick={() => {
+                                setCurrentRun(run);
+                                setShowReviewPanel(true);
+                              }}
+                              className="w-full flex items-center justify-between p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all group text-left"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-[10px] font-mono text-white truncate">
+                                  {run.mode.toUpperCase()} — {new Date(run.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                </p>
+                                <p className="text-[8px] font-mono text-white/30 uppercase tracking-wider">
+                                  Run {run.runId.slice(0, 8)}
+                                </p>
+                              </div>
+                              <div className="flex items-center space-x-2 shrink-0 ml-2">
+                                <span className="text-[8px] font-mono text-amber-400 uppercase px-2 py-0.5 border border-amber-500/30 bg-amber-500/10 rounded">
+                                  Review
+                                </span>
+                                <ChevronDown size={12} className="text-white/20 -rotate-90 group-hover:text-amber-400 transition-colors" />
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : openEscalationCount === 0 ? (
+                        <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
+                          <ShieldCheck size={10} className="mr-1.5" />
+                          No run-level artifact reviews — all clear
+                        </p>
+                      ) : null}
                     </div>
-                  ) : activePillar === "review" && pendingReviewRuns.length === 0 ? (
-                    <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
-                      <ShieldCheck size={10} className="mr-1.5" />
-                      No pending reviews — all clear
-                    </p>
                   ) : activePillar === "creative" && activeClient ? (
                     <>
                       <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
@@ -1389,22 +1439,29 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Review Button - when HITL needed, active run needs review, or pending reviews exist */}
-                        {(currentClient.alert || currentRun?.status === "needs_review" || pendingReviewRuns.length > 0) && (
+                        {/* Review Button - when HITL needed, active run needs review, pending reviews, or open escalations exist */}
+                        {(currentClient.alert || currentRun?.status === "needs_review" || reviewAttentionCount > 0) && (
                           <button
                             onClick={() => {
-                              // Use current run if it needs review, otherwise use first pending run
-                              if (!currentRun && pendingReviewRuns.length > 0) {
-                                setCurrentRun(pendingReviewRuns[0]);
+                              const shouldOpenArtifactReview = currentRun?.status === "needs_review" || pendingReviewRuns.length > 0;
+                              if (shouldOpenArtifactReview) {
+                                // Use current run if it needs review, otherwise use first pending run
+                                if (currentRun?.status !== "needs_review" && pendingReviewRuns.length > 0) {
+                                  setCurrentRun(pendingReviewRuns[0]);
+                                }
+                                setShowReviewPanel(true);
+                              } else {
+                                setActivePillar("review");
+                                setIsClientDetailOpen(true);
+                                setIsExpanded(true);
                               }
-                              setShowReviewPanel(true);
                             }}
                             className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
-                            {pendingReviewRuns.length > 0 && (
+                            {reviewAttentionCount > 0 && (
                               <span className="ml-2 px-1.5 py-0.5 bg-black/20 rounded-lg text-[9px] font-mono">
-                                {pendingReviewRuns.length}
+                                {reviewAttentionCount}
                               </span>
                             )}
                           </button>

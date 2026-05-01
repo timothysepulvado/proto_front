@@ -46,6 +46,7 @@ import {
   getEscalation,
   getEscalationByArtifact,
   listEscalationsByRun,
+  updateEscalation,
   getOrchestrationDecisions,
   getOrchestrationDecisionsByRun,
   getShotSummaries,
@@ -1170,6 +1171,88 @@ app.get("/api/escalations/:id", async (req: Request, res: Response) => {
     res.json({ ...escalation, decisions });
   } catch (err) {
     console.error("GET /api/escalations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/escalations/:id/resolve - Operator resolves an open escalation.
+app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const body = req.body as {
+      status?: unknown;
+      resolution_path?: unknown;
+      resolutionPath?: unknown;
+      resolution_notes?: unknown;
+      resolutionNotes?: unknown;
+    };
+
+    const status = body.status;
+    const resolutionPath = body.resolution_path ?? body.resolutionPath;
+    const resolutionNotes = body.resolution_notes ?? body.resolutionNotes;
+
+    if (status !== "accepted") {
+      res.status(400).json({ error: "Only status='accepted' is supported by this Review Gate resolver" });
+      return;
+    }
+    if (resolutionPath !== "accept") {
+      res.status(400).json({ error: "resolution_path must be 'accept'" });
+      return;
+    }
+    if (typeof resolutionNotes !== "string" || resolutionNotes.trim().length === 0) {
+      res.status(400).json({ error: "resolution_notes is required" });
+      return;
+    }
+    if (resolutionNotes.length > 2000) {
+      res.status(400).json({ error: "resolution_notes must be 2000 characters or less" });
+      return;
+    }
+
+    const existing = await getEscalation(id);
+    if (!existing) {
+      res.status(404).json({ error: "Escalation not found" });
+      return;
+    }
+
+    const openStatuses = new Set(["hitl_required", "in_progress"]);
+    if (!openStatuses.has(existing.status)) {
+      if (existing.status === "accepted" && existing.resolutionPath === "accept") {
+        res.json({ escalation: existing, runHitlCleared: false, alreadyResolved: true });
+        return;
+      }
+      res.status(409).json({ error: `Escalation is already terminal (${existing.status})` });
+      return;
+    }
+
+    const resolvedAt = new Date().toISOString();
+    const updated = await updateEscalation(id, {
+      status: "accepted",
+      resolutionPath: "accept",
+      resolutionNotes: resolutionNotes.trim(),
+      resolvedAt,
+    });
+
+    let runHitlCleared = false;
+    if (updated.runId) {
+      const runEscalations = await listEscalationsByRun(updated.runId);
+      const hasOtherOpenEscalations = runEscalations.some(
+        (item) => item.id !== updated.id && openStatuses.has(item.status),
+      );
+
+      if (!hasOtherOpenEscalations) {
+        const run = await getRun(updated.runId);
+        if (run?.hitlRequired) {
+          await updateRun(updated.runId, { hitlRequired: false });
+          runHitlCleared = true;
+        }
+      }
+
+      runEvents.emit(`escalation:${updated.runId}`, updated);
+    }
+
+    res.json({ escalation: updated, runHitlCleared });
+  } catch (err) {
+    console.error("PATCH /api/escalations/:id/resolve error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
