@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertTriangle,
@@ -129,8 +129,10 @@ export default function AuditTriageTable({
   // Gap 2 (2026-04-30): in-loop runs since the last audit-mode pass.
   // null = no audit run exists yet OR query failed (banner falls back).
   const [inLoopRunsSinceAudit, setInLoopRunsSinceAudit] = useState<number | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   const loadAuditState = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     setIsLoading(true);
     setError(null);
     try {
@@ -138,12 +140,14 @@ export default function AuditTriageTable({
         api.getCampaignDeliverables(campaignId),
         api.getLatestStillsAuditRun(campaignId),
       ]);
+      if (requestId !== loadRequestIdRef.current) return;
       setDeliverables(nextDeliverables);
       setAuditRun(latestAuditRun);
       setAuditReport(getReportFromRun(latestAuditRun));
 
       if (isAuditActive(latestAuditRun)) {
         const logs = await api.getRunLogs(latestAuditRun.runId).catch(() => []);
+        if (requestId !== loadRequestIdRef.current) return;
         setLiveShots(
           logs
             .map((log) => parseAuditVerdictLog(log.message))
@@ -157,11 +161,13 @@ export default function AuditTriageTable({
       // a regen the operator may want reflected in a fresh audit.
       const auditCutoff = latestAuditRun?.createdAt ?? null;
       const sinceCount = await api.getInLoopRunsSinceAudit(campaignId, auditCutoff);
+      if (requestId !== loadRequestIdRef.current) return;
       setInLoopRunsSinceAudit(sinceCount);
     } catch (err) {
+      if (requestId !== loadRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load audit state");
     } finally {
-      setIsLoading(false);
+      if (requestId === loadRequestIdRef.current) setIsLoading(false);
     }
   }, [campaignId]);
 
@@ -183,6 +189,7 @@ export default function AuditTriageTable({
         if (report) setAuditReport(report);
         if (!isAuditActive(updatedRun)) {
           setLiveShots([]);
+          setInLoopRunsSinceAudit(0);
           onAuditRunSettled?.(updatedRun);
         }
       } catch (err) {

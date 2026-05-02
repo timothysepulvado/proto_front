@@ -56,6 +56,7 @@ import {
   type RunLog,
   type RunMode,
   type Client,
+  type ProductionSlug,
 } from "./api";
 
 type Orientation = "horizontal" | "vertical";
@@ -89,6 +90,7 @@ type DerivedClient = Client & {
   runsLabel: string;
   typeLabel: string;
   statusLabel: string;
+  productionSlug: ProductionSlug;
 };
 
 const hudRoot = hudData as HudRoot;
@@ -107,9 +109,9 @@ const typeByName: Record<string, string> = {
   Lilydale: "AGRI",
 };
 
-const clientUiConfig: Record<string, { displayName?: string; entityLabel?: string; featured?: boolean }> = {
-  "client_drift-mv": { displayName: "BrandStudios", entityLabel: "Agency", featured: true },
-};
+const DEFAULT_PRODUCTION_SLUG = (
+  (import.meta.env.VITE_DEFAULT_PRODUCTION_SLUG as string | undefined)?.trim() || "drift-mv"
+) as ProductionSlug;
 
 const seedLogs: LogEntry[] = [
   { time: "12:04:22", msg: "BRAND_MEMORY_LOADED", status: "OK" },
@@ -301,17 +303,18 @@ const buildClients = (list: Client[]): DerivedClient[] => {
 
   return list.map((client, index) => {
     const status = client.status ?? "active";
-    const uiConfig = clientUiConfig[client.id];
+    const uiConfig = client.uiConfig;
     // Use last run status to simulate run count
     const runsValue = client.lastRunStatus ? 1 : 0;
     return {
       ...client,
       alert: client.lastRunStatus === "needs_review",
       dnaCode: formatDna(client.id, placeholderDna),
-      displayName: uiConfig?.displayName ?? client.name,
-      entityLabel: uiConfig?.entityLabel ?? "Brand",
-      featured: Boolean(uiConfig?.featured),
+      displayName: uiConfig?.displayName?.trim() || client.name,
+      entityLabel: uiConfig?.entityLabel?.trim() || "Brand",
+      featured: Boolean(client.featured ?? uiConfig?.featured),
       health: computeHealth(status, runsValue, index),
+      productionSlug: ((uiConfig?.productionSlug?.trim() || DEFAULT_PRODUCTION_SLUG) as ProductionSlug),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
       typeLabel: typeByName[client.name] ?? "CUSTOM",
@@ -415,11 +418,7 @@ export default function App() {
       try {
         const runs = await getClientRuns(activeClient);
         if (cancelled) return;
-        const latestCampaignRun = runs.find((run) => run.campaignId);
-        const featuredRun = clientUiConfig[activeClient]?.featured
-          ? runs.find((run) => run.runId.startsWith("9bfdf23e"))
-          : undefined;
-        const preferredRun = featuredRun ?? latestCampaignRun;
+        const preferredRun = runs.find((run) => run.campaignId);
         setCurrentRun((previous) => {
           if (previous?.clientId === activeClient && previous.campaignId && previous.runId === preferredRun?.runId) {
             return previous;
@@ -1242,12 +1241,12 @@ export default function App() {
 	                              />
                               </div>
                               <div className="order-1 min-w-0 lg:order-2">
-	                              {selectedAnchorShot != null ? (
-	                                <AnchorStillPanel
-	                                  productionSlug="drift-mv"
-	                                  shotNumber={selectedAnchorShot}
-	                                  campaignId={currentRun?.campaignId}
-	                                />
+		                              {selectedAnchorShot != null ? (
+		                                <AnchorStillPanel
+		                                  productionSlug={currentClient.productionSlug}
+		                                  shotNumber={selectedAnchorShot}
+		                                  campaignId={currentRun?.campaignId}
+		                                />
 	                              ) : (
 	                                <EmptyAnchorState />
 	                              )}
@@ -1536,6 +1535,7 @@ export default function App() {
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
         campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
+        productionSlug={currentClient?.productionSlug}
         runId={selectedShot.runId ?? currentRun?.runId}
         initialTab={selectedShot.initialTab}
         pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}

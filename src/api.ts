@@ -5,6 +5,13 @@ export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 export type ClientStatus = "active" | "inactive" | "archived";
 
+export interface ClientUiConfig {
+  displayName?: string;
+  entityLabel?: string;
+  featured?: boolean;
+  productionSlug?: string;
+}
+
 export interface RunStage {
   id: string;
   name: string;
@@ -195,6 +202,7 @@ export interface Client {
   id: string;
   name: string;
   status: ClientStatus;
+  uiConfig?: ClientUiConfig;
   featured?: boolean;
   lastRunId?: string;
   lastRunAt?: string;
@@ -250,11 +258,30 @@ interface DbClient {
   id: string;
   name: string;
   status: ClientStatus;
+  ui_config?: Record<string, unknown> | null;
   last_run_id: string | null;
   last_run_at: string | null;
   last_run_status: RunStatus | null;
   created_at: string;
   updated_at: string;
+}
+
+function readUiConfigString(config: Record<string, unknown>, snakeKey: string, camelKey: string): string | undefined {
+  const value = config[snakeKey] ?? config[camelKey];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function mapDbClientUiConfig(value: Record<string, unknown> | null | undefined): ClientUiConfig | undefined {
+  if (!value) return undefined;
+  const config: ClientUiConfig = {};
+  const displayName = readUiConfigString(value, "display_name", "displayName");
+  const entityLabel = readUiConfigString(value, "entity_label", "entityLabel");
+  const productionSlug = readUiConfigString(value, "production_slug", "productionSlug");
+  if (displayName) config.displayName = displayName;
+  if (entityLabel) config.entityLabel = entityLabel;
+  if (productionSlug) config.productionSlug = productionSlug;
+  if (typeof value.featured === "boolean") config.featured = value.featured;
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 // Mappers
@@ -307,10 +334,13 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
 }
 
 function mapDbClientToClient(dbClient: DbClient): Client {
+  const uiConfig = mapDbClientUiConfig(dbClient.ui_config);
   return {
     id: dbClient.id,
     name: dbClient.name,
     status: dbClient.status,
+    uiConfig,
+    featured: uiConfig?.featured,
     lastRunId: dbClient.last_run_id ?? undefined,
     lastRunAt: dbClient.last_run_at ?? undefined,
     lastRunStatus: dbClient.last_run_status ?? undefined,

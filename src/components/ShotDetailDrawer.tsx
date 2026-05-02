@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../api";
-import type { Artifact, ArtifactIterationRow, ArtifactIterationsResponse, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, RunLog } from "../api";
+import type { Artifact, ArtifactIterationRow, ArtifactIterationsResponse, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, ProductionSlug, RunLog } from "../api";
 import type { AuditReportShot } from "../lib/auditReport";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
@@ -114,6 +114,7 @@ interface ShotDetailDrawerProps {
   shotNumber: number | null;
   deliverableId: string | null;
   campaignId?: string | null;
+  productionSlug?: ProductionSlug;
   runId?: string;
   initialTab?: DrawerTab;
   pinnedTimelineEventId?: string;
@@ -690,7 +691,7 @@ function IterationCompareModal({
   );
 }
 
-export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, runId, initialTab, pinnedTimelineEventId, auditShot, onClose, onRunSelect }: ShotDetailDrawerProps) {
+export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId, productionSlug = "drift-mv", runId, initialTab, pinnedTimelineEventId, auditShot, onClose, onRunSelect }: ShotDetailDrawerProps) {
   const [activeTab, setActiveTab] = useState<DrawerTab>("narrative");
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [logs, setLogs] = useState<RunLog[]>([]);
@@ -704,11 +705,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
   const [expandedDecisionId, setExpandedDecisionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [iterationLoadError, setIterationLoadError] = useState<string | null>(null);
+  const [overrideLoadError, setOverrideLoadError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const drawerRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const pinnedTimelineRef = useRef<HTMLDivElement>(null);
   const compareOpenRef = useRef(false);
+  const loadRequestIdRef = useRef(0);
 
   useEffect(() => {
     setActiveTab(initialTab ?? "narrative");
@@ -723,7 +727,10 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     setSelectedIterationIds([]);
     setCompareRows(null);
     setLoadError(null);
+    setIterationLoadError(null);
+    setOverrideLoadError(null);
     if (!deliverableId) {
+      loadRequestIdRef.current += 1;
       setIsLoading(false);
     }
   }, [deliverableId, initialTab, pinnedTimelineEventId, runId]);
@@ -788,12 +795,23 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
   useEffect(() => {
     if (!deliverableId) return;
     const currentDeliverableId = deliverableId;
+    const requestId = ++loadRequestIdRef.current;
     let cancelled = false;
 
     async function load() {
       setIsLoading(true);
       setLoadError(null);
+      setIterationLoadError(null);
+      setOverrideLoadError(null);
       try {
+        let nextIterationError: string | null = null;
+        let nextOverrideError: string | null = null;
+        const emptyIterations: ArtifactIterationsResponse = {
+          deliverableId: currentDeliverableId,
+          shotNumber: null,
+          rows: [],
+          generatedAt: new Date().toISOString(),
+        };
         const [runArtifacts, runLogs, runTrail, deliverableDetail, productionCatalog, iterations] = await Promise.all([
           runId
             ? api.getArtifacts(runId).then((items) => items.filter((item) => item.deliverableId === currentDeliverableId))
@@ -801,12 +819,18 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           runId ? api.getRunLogs(runId) : Promise.resolve<RunLog[]>([]),
           runId ? fetchTrail(runId, currentDeliverableId) : Promise.resolve<DeliverableTrail | null>(null),
           api.getDeliverable(currentDeliverableId).catch(() => null),
-          api.getProductionShots("drift-mv").then((response) => response.shots).catch(() => []),
-          api.getArtifactIterationsForDeliverable(currentDeliverableId),
+          api.getProductionShots(productionSlug).then((response) => response.shots).catch(() => []),
+          api.getArtifactIterationsForDeliverable(currentDeliverableId).catch((err) => {
+            nextIterationError = err instanceof Error ? err.message : "Couldn't load regen iterations.";
+            return emptyIterations;
+          }),
         ]);
         const overrideCampaignId = campaignId ?? deliverableDetail?.campaignId;
         const overrides = overrideCampaignId
-          ? await api.getOperatorOverridesForCampaign(overrideCampaignId)
+          ? await api.getOperatorOverridesForCampaign(overrideCampaignId).catch((err) => {
+            nextOverrideError = err instanceof Error ? err.message : "Couldn't load operator overrides.";
+            return [] as OperatorOverrideDecision[];
+          })
           : [];
 
         const sortedArtifacts = [...runArtifacts].sort(
@@ -819,7 +843,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           .map((row) => row.artifact)
           .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 
-        if (cancelled) return;
+        if (cancelled || requestId !== loadRequestIdRef.current) return;
         setArtifacts(
           sortedArtifacts.length > 0
             ? sortedArtifacts
@@ -835,12 +859,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
         setProductionShots(productionCatalog);
         setOperatorOverrides(overrides);
         setIterationResponse(iterations);
+        setIterationLoadError(nextIterationError);
+        setOverrideLoadError(nextOverrideError);
       } catch {
-        if (!cancelled) {
+        if (!cancelled && requestId === loadRequestIdRef.current) {
           setLoadError("Couldn't load shot details. Retry.");
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && requestId === loadRequestIdRef.current) {
           setIsLoading(false);
         }
       }
@@ -850,7 +876,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
     return () => {
       cancelled = true;
     };
-  }, [campaignId, deliverableId, reloadNonce, runId]);
+  }, [campaignId, deliverableId, productionSlug, reloadNonce, runId]);
 
   useEffect(() => {
     if (!deliverableId) return undefined;
@@ -1282,14 +1308,21 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                     </button>
                   </div>
                 </div>
-                <p className="sr-only" aria-live="polite">
-                  {selectedIterationRows.length === 0
-                    ? "No iterations staged for compare."
-                    : `${selectedIterationRows.map((row) => row.label).join(" and ")} staged for compare.`}
-                </p>
-              </div>
+	                <p className="sr-only" aria-live="polite">
+	                  {selectedIterationRows.length === 0
+	                    ? "No iterations staged for compare."
+	                    : `${selectedIterationRows.map((row) => row.label).join(" and ")} staged for compare.`}
+	                </p>
+	              </div>
 
-              {visibleIterationRows.length === 0 ? (
+	              {(iterationLoadError || overrideLoadError) && (
+	                <div className="rounded-2xl border border-amber-300/20 bg-amber-300/8 p-3 text-[10px] font-mono leading-5 text-amber-100/80" role="alert">
+	                  {iterationLoadError && <p>Iterations unavailable: {iterationLoadError}</p>}
+	                  {overrideLoadError && <p>Operator overrides unavailable: {overrideLoadError}</p>}
+	                </div>
+	              )}
+
+	              {visibleIterationRows.length === 0 ? (
                 <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">
                   No artifacts recorded for this shot yet.
                 </div>
@@ -1422,10 +1455,16 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                 </div>
               )}
             </div>
-          ) : (
-            timeline.length > 0 ? (
-              <div className="space-y-3">
-                {timeline.map((event) => {
+	          ) : (
+	            <>
+	              {overrideLoadError && (
+	                <div className="mb-3 rounded-2xl border border-amber-300/20 bg-amber-300/8 p-3 text-[10px] font-mono leading-5 text-amber-100/80" role="alert">
+	                  Operator overrides unavailable: {overrideLoadError}
+	                </div>
+	              )}
+	              {timeline.length > 0 ? (
+	                <div className="space-y-3">
+	                {timeline.map((event) => {
                   const pinned = event.id === pinnedTimelineEventId;
                   return (
                     <div key={event.id} ref={pinned ? pinnedTimelineRef : undefined} className="relative pl-6">
@@ -1444,13 +1483,14 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                     </div>
                   );
                 })}
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">
-                No timeline events recorded for this shot yet.
-              </div>
-            )
-          )}
+	                </div>
+	              ) : (
+	                <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5 text-[12px] text-white/55">
+	                  No timeline events recorded for this shot yet.
+	                </div>
+	              )}
+	            </>
+	          )}
         </div>
 
         <div className="border-t border-white/10 px-5 py-3 text-[8px] font-mono uppercase tracking-widest text-white/30">

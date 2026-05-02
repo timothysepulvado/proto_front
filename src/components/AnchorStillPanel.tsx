@@ -241,6 +241,7 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
   const fileInputRef = useRef<HTMLInputElement>(null);
   const refetchTimerRef = useRef<number | null>(null);
   const badgeTimerRef = useRef<number | null>(null);
+  const loadRequestIdRef = useRef(0);
   const [still, setStill] = useState<ProductionShotStillCatalogItem | null>(null);
   const [shot, setShot] = useState<ProductionShotState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -256,19 +257,22 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
   const [revision, setRevision] = useState(() => Date.now());
 
   const load = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
     try {
       setError(null);
       const [stillResponse, shotResponse] = await Promise.all([
         getProductionShotStills(productionSlug),
         getProductionShots(productionSlug),
       ]);
+      if (requestId !== loadRequestIdRef.current) return;
       setStill(stillResponse.shots.find((item) => item.shot === shotNumber) ?? null);
       setShot(shotResponse.shots.find((item) => item.shotNumber === shotNumber) ?? null);
       setRevision(Date.now());
     } catch (err) {
+      if (requestId !== loadRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Couldn't load anchor still state.");
     } finally {
-      setIsLoading(false);
+      if (requestId === loadRequestIdRef.current) setIsLoading(false);
     }
   }, [productionSlug, shotNumber]);
 

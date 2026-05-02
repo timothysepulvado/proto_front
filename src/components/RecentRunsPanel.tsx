@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ChevronDown,
@@ -68,17 +68,22 @@ export default function RecentRunsPanel({ clientId, campaignId, onRunClick }: Re
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const refreshRequestIdRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++refreshRequestIdRef.current;
     try {
+      setIsLoading(true);
       setError(null);
       const nextRuns = await api.getCampaignRecentRuns(campaignId, 10);
+      if (requestId !== refreshRequestIdRef.current) return;
       setRuns(nextRuns);
       setLastRefreshedAt(new Date().toISOString());
     } catch (err) {
+      if (requestId !== refreshRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load recent runs");
     } finally {
-      setIsLoading(false);
+      if (requestId === refreshRequestIdRef.current) setIsLoading(false);
     }
   }, [campaignId]);
 

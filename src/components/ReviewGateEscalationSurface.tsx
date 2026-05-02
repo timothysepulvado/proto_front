@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -62,12 +62,15 @@ export default function ReviewGateEscalationSurface({
   const [notesById, setNotesById] = useState<Record<string, string>>({});
   const [resolvingId, setResolvingId] = useState<string | null>(null);
   const [lastRealtimeAt, setLastRealtimeAt] = useState<string | null>(null);
+  const refreshRequestIdRef = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!clientId) return;
+    const requestId = ++refreshRequestIdRef.current;
     try {
       setError(null);
       const next = await getOpenReviewGateEscalations(clientId, 30);
+      if (requestId !== refreshRequestIdRef.current) return;
       setItems(next);
       onCountChange?.(next.length);
       setNotesById((current) => {
@@ -78,9 +81,10 @@ export default function ReviewGateEscalationSurface({
         return merged;
       });
     } catch (err) {
+      if (requestId !== refreshRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Couldn't load escalation queue.");
     } finally {
-      setIsLoading(false);
+      if (requestId === refreshRequestIdRef.current) setIsLoading(false);
     }
   }, [clientId, onCountChange]);
 

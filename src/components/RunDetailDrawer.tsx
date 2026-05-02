@@ -160,23 +160,33 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
   const [error, setError] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const loadRequestIdRef = useRef(0);
+  const activeRunIdRef = useRef<string | null>(null);
 
   const loadDetail = useCallback(async (id: string) => {
+    const requestId = ++loadRequestIdRef.current;
+    activeRunIdRef.current = id;
     try {
       setIsLoading(true);
       setError(null);
       const payload = await api.getRunDetail(id);
+      if (requestId !== loadRequestIdRef.current || activeRunIdRef.current !== id) return;
       setDetail(payload);
     } catch (err) {
+      if (requestId !== loadRequestIdRef.current || activeRunIdRef.current !== id) return;
       setError(err instanceof Error ? err.message : "Failed to load run detail");
       setDetail(null);
     } finally {
-      setIsLoading(false);
+      if (requestId === loadRequestIdRef.current && activeRunIdRef.current === id) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     if (!runId) {
+      loadRequestIdRef.current += 1;
+      activeRunIdRef.current = null;
       setDetail(null);
       setError(null);
       setIsLoading(false);
@@ -197,12 +207,15 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
     const unsubscribe = api.subscribeToLogs(
       runId,
       (log) => {
+        if (activeRunIdRef.current !== runId) return;
         setDetail((previous) => previous ? { ...previous, logs: upsertLog(previous.logs, log) } : previous);
       },
       () => {
+        if (activeRunIdRef.current !== runId) return;
         void loadDetail(runId);
       },
       (err) => {
+        if (activeRunIdRef.current !== runId) return;
         setError(err.message);
       },
     );

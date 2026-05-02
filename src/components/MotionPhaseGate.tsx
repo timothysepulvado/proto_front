@@ -231,18 +231,24 @@ export default function MotionPhaseGate({ clientId, campaignId, onReviewGateClic
   const [isConfirming, setIsConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [lastQueuedRun, setLastQueuedRun] = useState<Run | null>(null);
+  const refreshRequestIdRef = useRef(0);
 
   const refresh = useCallback(async (quiet = false) => {
+    const requestId = ++refreshRequestIdRef.current;
     try {
       if (!quiet) setIsRefreshing(true);
       setError(null);
       const next = await api.getMotionPhaseGateState(campaignId);
+      if (requestId !== refreshRequestIdRef.current) return;
       setGateState(next);
     } catch (err) {
+      if (requestId !== refreshRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load motion-phase gate state");
     } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+      if (requestId === refreshRequestIdRef.current) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [campaignId]);
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Clock, DollarSign, Layers, Plus, Sparkles } from "lucide-react";
 import {
   getCampaignDeliverables,
@@ -115,9 +115,11 @@ export default function CampaignDashboard({ clientId, brandName, onCampaignSelec
   const [cards, setCards] = useState<CampaignCard[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
+    const requestId = ++loadRequestIdRef.current;
 
     async function loadCampaigns() {
       try {
@@ -131,7 +133,12 @@ export default function CampaignDashboard({ clientId, brandName, onCampaignSelec
 
         const campaignCards = await Promise.all(campaigns.map(async (campaign) => {
           const deliverables = await getCampaignDeliverables(campaign.id).catch(() => []);
-          const run = runs.find((candidate) => candidate.campaignId === campaign.id) ?? null;
+          const run = runs
+            .filter((candidate) => candidate.campaignId === campaign.id)
+            .reduce<Run | null>((latest, candidate) => {
+              if (!latest) return candidate;
+              return Date.parse(candidate.updatedAt) > Date.parse(latest.updatedAt) ? candidate : latest;
+            }, null);
           const latestDeliverableUpdate = deliverables.reduce<string | undefined>((latest, deliverable) => (
             latest ? getLatestIso(latest, deliverable.updatedAt) : deliverable.updatedAt
           ), undefined);
@@ -154,16 +161,16 @@ export default function CampaignDashboard({ clientId, brandName, onCampaignSelec
           } satisfies CampaignCard;
         }));
 
-        if (!cancelled) {
+        if (!cancelled && requestId === loadRequestIdRef.current) {
           setCards(campaignCards);
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && requestId === loadRequestIdRef.current) {
           setError(err instanceof Error ? err.message : "Failed to load campaigns");
           setCards([]);
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled && requestId === loadRequestIdRef.current) setIsLoading(false);
       }
     }
 
