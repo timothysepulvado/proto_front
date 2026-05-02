@@ -229,13 +229,48 @@ tmux capture-pane -t brandy-proto_front:agents.2 -p # full pane snapshot
 
 **DO NOT raw-spawn `codex exec --ephemeral` from Brandy's Bash tool to dispatch Karl.** Burned 2 hours of session time on this 2026-04-30: the codex app-server daemon caches workdir state across invocations, and ephemeral sessions inherit that state instead of `-C` + inline `BRANDY_DOMAIN` env vars. Result: Karl repeatedly landed in whichever domain's repo had the most-recent codex app-server activity (e.g., teachce-portal), not `proto_front`. The TUI panel + agent-comm bypasses this entirely — same persistent session, same workdir, same auth state.
 
-**If Karl's panel is dead** (pane shows plain `zsh`, not the codex TUI prompt), restart it:
+**Verifying Karl is actually alive — DON'T trust `agent-comm status` alone (lesson learned 2026-05-01 PM):**
+
+`agent-comm status karl` reads from a state file the script maintains itself. It can return `idle` even when the codex TUI process inside pane 2 has exited and the pane is back at a bare zsh prompt. Same for `agent-comm last karl` — it returns the last captured screen, which can be HOURS stale.
+
+Three signals must ALL agree before assuming Karl is alive:
 
 ```bash
+# 1. Script status (necessary but not sufficient)
+agent-comm status karl  # must say "idle" or "busy"
+
+# 2. Process check — confirm a codex binary is actually running
+ps aux | grep -E 'codex.*karl-max' | grep -v grep
+# Must show a recent codex process (PID + start time). If empty → DEAD.
+
+# 3. Send a fresh ping and watch the scrollback for a response within 10-15s
+agent-comm send karl "Brandy: health check. Reply 'alive' and nothing else."
+sleep 12
+tmux capture-pane -t brandy-proto_front:agents.2 -p -S -100 | tail -25
+# Must show "› Brandy: health check..." input + "• alive" response.
+# If the ping doesn't appear in the scrollback → keys aren't landing → DEAD.
+```
+
+**Gotchas exposed in the same session:**
+- `tmux list-panes -F '#{pane_current_command}'` shows the parent shell command (e.g., `node` for the parent shell that spawned codex, OR `-zsh` if codex died) — NOT the foreground codex TUI. Don't use this as a liveness signal.
+- `tmux capture-pane -p` (no `-S`) may render empty when codex uses alternate-screen mode; always use `-S -100` to grab scrollback.
+- The `agent-comm last karl` output frequently lags reality by hours. Always cross-check against a fresh ping response.
+
+**If Karl's panel is dead** (pane shows plain `zsh`, ps shows no codex process, OR ping doesn't get a response):
+
+```bash
+# CRITICAL: only run this if codex is NOT already running. If codex is alive,
+# `tmux send-keys "codex -p karl-max" Enter` will type that string AS A PROMPT
+# inside the TUI (Karl will think you're asking him to launch codex-in-codex).
+# Verify with the `ps aux` check above first.
+
 tmux send-keys -t brandy-proto_front:agents.2 "codex -p karl-max" Enter
-sleep 12  # codex bootstrap — 8-12s
-tmux capture-pane -t brandy-proto_front:agents.2 -p | tail -5
-# Verify you see "model: gpt-5.5 xhigh / directory: ~/proto_front / permissions: YOLO mode"
+sleep 14  # codex bootstrap — 8-14s
+tmux capture-pane -t brandy-proto_front:agents.2 -p -S -100 | tail -15
+# Verify the OpenAI Codex banner appears with:
+#   model:       gpt-5.5 xhigh
+#   directory:   ~/proto_front
+#   permissions: YOLO mode
 ```
 
 Then dispatch via agent-comm as usual.
