@@ -40,6 +40,8 @@ import pytest
 pytest.importorskip("brand_engine.core.image_grader", reason="Phase A pending — module not yet created")
 
 from brand_engine.core.image_grader import grade_image_v2  # noqa: E402
+from brand_engine.core.models import ImageGradeRequest  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 
 # ─── Test fixtures ──────────────────────────────────────────────────────────
@@ -603,6 +605,85 @@ class TestGradeImageV2CampaignDirectionAxiom:
         assert "## CAMPAIGN DIRECTION" not in system_prompt, (
             "CAMPAIGN DIRECTION emitted when no directional_history was provided"
         )
+
+
+# ─── PR #2 review item 0.B.22 — request-contract validator ─────────────────
+
+
+class TestImageGradeRequestValidator:
+    """`ImageGradeRequest` enforces `mode='in_loop' → pivot_rewrite_history non-empty`.
+
+    Without this validator a caller could submit `mode='in_loop'` with no history;
+    Rules 6 (history consume) and 7 (degenerate-loop guard) silently no-op and
+    the in-loop guarantees collapse to audit-mode behavior. Added 2026-05-02
+    per PR #2 review item 0.B.22 (brief 2026-05-02-karl-pr2-cleanup-and-followups.md).
+    """
+
+    _BASE_KWARGS = {
+        "image_path": str(SHOT_5_ITER_1_IMAGE),
+        "still_prompt": "test prompt",
+        "narrative_beat": SAMPLE_NARRATIVE_BEAT,
+        "story_context": SAMPLE_STORY_CONTEXT,
+        "anchor_paths": SAMPLE_ANCHOR_PATHS,
+        "reference_paths": SAMPLE_REFERENCE_PATHS,
+    }
+
+    def test_in_loop_with_none_history_rejected(self):
+        """mode='in_loop' + pivot_rewrite_history=None → ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            ImageGradeRequest(
+                **self._BASE_KWARGS,
+                pivot_rewrite_history=None,
+                mode="in_loop",
+            )
+        assert "in_loop" in str(exc_info.value).lower()
+        assert "pivot_rewrite_history" in str(exc_info.value).lower()
+
+    def test_in_loop_with_empty_list_history_rejected(self):
+        """mode='in_loop' + pivot_rewrite_history=[] → ValidationError (empty list is falsy)."""
+        with pytest.raises(ValidationError) as exc_info:
+            ImageGradeRequest(
+                **self._BASE_KWARGS,
+                pivot_rewrite_history=[],
+                mode="in_loop",
+            )
+        assert "in_loop" in str(exc_info.value).lower()
+
+    def test_in_loop_with_populated_history_accepted(self):
+        """mode='in_loop' + non-empty pivot_rewrite_history → constructs successfully."""
+        request = ImageGradeRequest(
+            **self._BASE_KWARGS,
+            pivot_rewrite_history=SHOT_5_PIVOT_HISTORY_AFTER_ITER_1,
+            mode="in_loop",
+        )
+        assert request.mode == "in_loop"
+        assert request.pivot_rewrite_history == SHOT_5_PIVOT_HISTORY_AFTER_ITER_1
+
+    def test_audit_with_none_history_accepted(self):
+        """mode='audit' + pivot_rewrite_history=None → constructs successfully (sanity)."""
+        request = ImageGradeRequest(
+            **self._BASE_KWARGS,
+            pivot_rewrite_history=None,
+            mode="audit",
+        )
+        assert request.mode == "audit"
+        assert request.pivot_rewrite_history is None
+
+    def test_audit_with_history_accepted(self):
+        """mode='audit' + pivot_rewrite_history=[...] → constructs (audit may carry history but won't use it)."""
+        request = ImageGradeRequest(
+            **self._BASE_KWARGS,
+            pivot_rewrite_history=SHOT_5_PIVOT_HISTORY_AFTER_ITER_1,
+            mode="audit",
+        )
+        assert request.mode == "audit"
+        # Validator only blocks the inverse (in_loop without history); audit can carry it.
+
+    def test_default_mode_audit_with_no_history_accepted(self):
+        """Defaults: mode='audit', pivot_rewrite_history=None → constructs (sanity)."""
+        request = ImageGradeRequest(**self._BASE_KWARGS)
+        assert request.mode == "audit"
+        assert request.pivot_rewrite_history is None
 
 
 # ─── Production rigor TODOs (Phase F integration) ───────────────────────────

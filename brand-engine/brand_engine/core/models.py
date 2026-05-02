@@ -1,7 +1,7 @@
 """Pydantic models for brand engine inputs and outputs."""
 
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ============ Narrative envelope (Chunk 1 — context-aware grading) ============
@@ -394,19 +394,43 @@ class ImageGradeRequest(BaseModel):
     pivot_rewrite_history: Optional[list[dict]] = Field(
         default=None,
         description=(
-            "None for audit-mode; list of prior iter records for in_loop mode. "
+            "None for audit-mode; non-empty list of prior iter records for in_loop mode. "
             "Each record holds the iter critic verdict + orchestrator decision. "
-            "Triggers Rules 6 (history consume) and 7 (degenerate-loop guard)."
+            "Triggers Rules 6 (history consume) and 7 (degenerate-loop guard). "
+            "Required (non-empty) when mode='in_loop' — enforced by model validator."
         ),
     )
     mode: ImageGradeMode = Field(
         default="audit",
-        description="audit (skip Rules 6+7) | in_loop (apply Rules 6+7)",
+        description=(
+            "audit (skip Rules 6+7, pivot_rewrite_history may be None) | "
+            "in_loop (apply Rules 6+7, pivot_rewrite_history MUST be non-empty)"
+        ),
     )
     shot_number: Optional[int] = Field(
         default=None,
         description="Optional shot number for logging/return — derived from narrative_beat if absent",
     )
+
+    @model_validator(mode="after")
+    def _check_in_loop_requires_pivot_history(self) -> "ImageGradeRequest":
+        """In-loop mode REQUIRES pivot_rewrite_history with at least one record.
+
+        Without history the critic cannot consume Rule 6 (pivot history consumption)
+        or Rule 7 (degenerate-loop guard) — those rules silently no-op and the
+        in-loop guarantees collapse to audit-mode behavior. Reject the request
+        rather than letting a downstream caller bypass the guardrails.
+
+        PR #2 review item 0.B.22 — see
+        ~/agent-vault/briefs/2026-05-02-karl-pr2-cleanup-and-followups.md
+        """
+        if self.mode == "in_loop" and not self.pivot_rewrite_history:
+            raise ValueError(
+                "ImageGradeRequest with mode='in_loop' requires non-empty "
+                "pivot_rewrite_history (Rules 6+7 cannot apply otherwise). "
+                "Use mode='audit' for first-iter calls without history."
+            )
+        return self
 
 
 class ImageGradeResult(BaseModel):
