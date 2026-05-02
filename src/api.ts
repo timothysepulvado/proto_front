@@ -414,6 +414,7 @@ export async function getLatestStillsAuditRun(campaignId: string): Promise<Run |
     .select("*")
     .eq("campaign_id", campaignId)
     .eq("mode", "stills")
+    .contains("metadata", { audit_mode: true })
     .order("created_at", { ascending: false })
     .limit(25);
 
@@ -421,9 +422,7 @@ export async function getLatestStillsAuditRun(campaignId: string): Promise<Run |
     throw new Error(`Failed to get latest stills audit run: ${error.message}`);
   }
 
-  const auditRuns = (data as DbRun[])
-    .map(mapDbRunToRun)
-    .filter((run) => run.metadata?.audit_mode === true || Boolean(run.metadata?.audit_report));
+  const auditRuns = (data as DbRun[]).map(mapDbRunToRun);
 
   return auditRuns.find((run) => run.status === "completed" && Boolean(run.metadata?.audit_report))
     ?? auditRuns.find((run) => run.status === "running" || run.status === "pending")
@@ -565,16 +564,19 @@ export async function getOperatorOverridesForCampaign(campaignId: string): Promi
     .from("runs")
     .select("id,campaign_id,mode,created_at,metadata")
     .eq("campaign_id", campaignId)
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(250);
 
   if (error) throw new Error(`Failed to get operator overrides: ${error.message}`);
 
   const rows = (data as DbRunOperatorOverride[]) ?? [];
+  const chronologicalRows = [...rows].sort((left, right) => {
+    return eventTimestamp(left.created_at) - eventTimestamp(right.created_at);
+  });
   const shotCounts = new Map<number, number>();
   const shotOrdinalByRun = new Map<string, number>();
 
-  for (const row of rows) {
+  for (const row of chronologicalRows) {
     const metadata = isPlainRecord(row.metadata) ? row.metadata : null;
     if (row.mode !== "stills" || isAuditModeRun(metadata)) continue;
 
