@@ -13,6 +13,7 @@
  *   6. `resolveProductionSlug` rejects malformed clientId
  *   7. Feature flag default — `STILLS_MODE_ENABLED` defaults false
  *   8. Cost cap default — `STILLS_PER_SHOT_HARD_CAP_USD` defaults to $1.00
+ *   9-22. PR #2 Phase 0.A guard/security helpers
  *
  * Integration coverage of `runAuditMode` / `runInLoopMode` requires fetch +
  * Supabase mocks; deferred to a Phase B+ follow-up that introduces a
@@ -23,14 +24,16 @@
  *   npx tsx os-api/tests/phase-b-stills-runner.ts
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// Force STILLS_MODE_ENABLED off for the import — we test it explicitly below.
-delete process.env.STILLS_MODE_ENABLED;
-delete process.env.STILLS_PER_SHOT_COST_CAP;
-delete process.env.STILLS_AUDIT_CONCURRENCY;
+// Force deterministic stills config for the import. Running from os-api/
+// loads .env via downstream modules, and dotenv does not override existing
+// process.env keys, so set the expected defaults explicitly before import.
+process.env.STILLS_MODE_ENABLED = "false";
+process.env.STILLS_PER_SHOT_COST_CAP = "1.0";
+process.env.STILLS_AUDIT_CONCURRENCY = "8";
 
 // Set TEMP_GEN_PATH to a temp dir BEFORE importing so loadCampaignManifest
 // reads the fixture tree we build below.
@@ -42,10 +45,16 @@ const {
   loadCampaignManifest,
   resolveProductionSlug,
   pickInLoopTargets,
+  parseShotDescriptionNumber,
+  buildAuditDecisionRecordInput,
+  buildHardCapHitlPlan,
   STILLS_MODE_ENABLED,
   STILLS_PER_SHOT_HARD_CAP_USD,
   STILLS_AUDIT_CONCURRENCY,
 } = stillsRunnerImport;
+const { validateRunModeFeatureFlag, validateCampaignClientScope } = await import("../src/run-create-guards.js");
+const { ForbiddenPathError, resolveExistingRealPathInsideAllowedRoots } = await import("../src/path-security.js");
+const { validateStillSourcePath, updateReferenceImagesForStillDecision } = await import("../src/productions.js");
 
 // `pMap` is module-private. Reuse the same Promise-pool pattern in-test to
 // validate the concurrency invariant; the production implementation is
@@ -426,6 +435,181 @@ const fixtureDeliverables: CampaignDeliverableFixture[] = [
   console.log("  ✓ pickInLoopTargets — undefined/null/[] shotIds all route to default path");
 }
 
+// ─── Test 15: three-digit shot numbers parse and target correctly ─────────
+{
+  const manifest: ManifestPayloadFixture = {
+    productionSlug: "large-campaign",
+    shots: [
+      { id: 5, visual: "shot five" },
+      { id: 50, visual: "shot fifty" },
+      { id: 500, visual: "shot five hundred" },
+    ],
+    storyContext: {},
+    anchorPaths: [],
+    referencePaths: [],
+  };
+  const deliverables: CampaignDeliverableFixture[] = [
+    mkDeliverable("deliv-5", "Shot 005 · intro", "approved"),
+    mkDeliverable("deliv-50", "Shot 050 · middle", "approved"),
+    mkDeliverable("deliv-500", "Shot 500 · finale", "approved"),
+  ];
+  const decision = pickInLoopTargets(manifest, deliverables, [5, 50, 500]);
+  assert.deepEqual(
+    decision.targets.map((target) => target.shot.id),
+    [5, 50, 500],
+    "shot IDs 5, 50, and 500 all resolve",
+  );
+  assert.equal(parseShotDescriptionNumber("shot-500 · finale"), 500);
+  assert.equal(decision.skipped.length, 0);
+  console.log("  ✓ PR #2 0.A.1 — three-digit shot descriptions resolve");
+}
+
+// ─── Test 16: stills run mode is feature-flag gated at route level ────────
+{
+  assert.deepEqual(
+    validateRunModeFeatureFlag("stills", {}),
+    { ok: false, status: 403, error: "stills_mode_disabled" },
+    "stills mode rejects when STILLS_MODE_ENABLED is unset",
+  );
+  assert.deepEqual(
+    validateRunModeFeatureFlag("stills", { STILLS_MODE_ENABLED: "true" }),
+    { ok: true },
+    "stills mode accepts when STILLS_MODE_ENABLED=true",
+  );
+  assert.deepEqual(validateRunModeFeatureFlag("images", {}), { ok: true });
+  console.log("  ✓ PR #2 0.A.2 — mode=stills is guarded by STILLS_MODE_ENABLED");
+}
+
+// ─── Test 17: campaign/client scope blocks cross-tenant run attachment ────
+{
+  assert.deepEqual(
+    validateCampaignClientScope({ clientId: "client_b" }, "client_a"),
+    { ok: false, status: 403, error: "campaign_client_mismatch" },
+    "campaign from another client is rejected",
+  );
+  assert.deepEqual(
+    validateCampaignClientScope({ clientId: "client_a" }, "client_a"),
+    { ok: true },
+    "campaign from same client is accepted",
+  );
+  assert.deepEqual(
+    validateCampaignClientScope(null, "client_a"),
+    { ok: false, status: 404, error: "Campaign not found" },
+  );
+  console.log("  ✓ PR #2 0.A.3 — campaignId must belong to URL clientId");
+}
+
+// ─── Test 18: local artifact fallback rejects symlink escapes ─────────────
+{
+  const root = join(fixtureRoot, "artifact-root");
+  const outside = join(fixtureRoot, "outside-secret.txt");
+  const sneaky = join(root, "productions", "sneaky.png");
+  mkdirSync(join(root, "productions"), { recursive: true });
+  writeFileSync(outside, "outside root");
+  symlinkSync(outside, sneaky);
+  assert.throws(
+    () => resolveExistingRealPathInsideAllowedRoots(sneaky, [root]),
+    ForbiddenPathError,
+    "symlink inside allowed tree pointing outside is rejected after realpath",
+  );
+  console.log("  ✓ PR #2 0.A.4 — realpath guard blocks local-file symlink escapes");
+}
+
+// ─── Test 19: production sourcePath must stay inside allowed roots ────────
+{
+  const allowedRoot = join(fixtureRoot, "productions", "drift-mv");
+  const outsideRoot = join(fixtureRoot, "source-outside");
+  const outsidePng = join(outsideRoot, "replacement.png");
+  mkdirSync(allowedRoot, { recursive: true });
+  mkdirSync(outsideRoot, { recursive: true });
+  writeFileSync(outsidePng, Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
+  assert.throws(
+    () => validateStillSourcePath("drift-mv", outsidePng, [allowedRoot]),
+    ForbiddenPathError,
+    "sourcePath outside production source roots is rejected",
+  );
+  console.log("  ✓ PR #2 0.A.5 — replacement sourcePath is allowlist-scoped");
+}
+
+// ─── Test 20: rejecting a still removes it from reference_images ──────────
+{
+  const stillPath = "/tmp/shot_07.png";
+  const approved = updateReferenceImagesForStillDecision(["/tmp/other.png"], stillPath, "approve");
+  assert.deepEqual(approved, [stillPath, "/tmp/other.png"], "approval prepends still path");
+  const rejected = updateReferenceImagesForStillDecision(approved, stillPath, "reject");
+  assert.deepEqual(rejected, ["/tmp/other.png"], "rejection removes still path");
+  console.log("  ✓ PR #2 0.A.6 — reject path removes denied still from reference_images");
+}
+
+// ─── Test 21: audit verdict records carry canonical decision metadata ─────
+{
+  type AuditVerdict = Parameters<typeof buildAuditDecisionRecordInput>[0]["verdict"];
+  const verdict: AuditVerdict = {
+    verdict: "FAIL",
+    aggregate_score: 2.75,
+    criteria: [{ name: "direction", score: 2, notes: "reverted" }],
+    detected_failure_classes: ["campaign_direction_reversion_mech_heavy"],
+    confidence: 0.92,
+    summary: "Direction reverted",
+    reasoning: "The image reintroduced the abandoned mech-heavy direction.",
+    recommendation: "L2_approach_change",
+    model: "gemini-3-pro-vision",
+    cost: 0.0123,
+    latency_ms: 456,
+    shot_number: 7,
+    image_path: "/tmp/shot_07.png",
+  };
+  const record = buildAuditDecisionRecordInput({
+    escalationId: "esc_1",
+    artifactId: "art_1",
+    runId: "run_1",
+    deliverableId: "deliv_1",
+    shotId: 7,
+    imagePath: "/tmp/shot_07.png",
+    verdict,
+    traceId: "trace_123",
+  });
+  assert.equal(record.inputContext.decision_type, "audit_verdict");
+  assert.equal(record.decision.decision_type, "audit_verdict");
+  assert.equal(record.decision.failure_class, "campaign_direction_reversion_mech_heavy");
+  assert.equal(record.cost, 0.0123);
+  assert.equal(record.latencyMs, 456);
+  console.log("  ✓ PR #2 0.A.7 — audit verdict decision rows preserve trace/cost/verdict context");
+}
+
+// ─── Test 22: hard-cap HITL plan persists run + escalation side effects ───
+{
+  type HardCapVerdict = Parameters<typeof buildHardCapHitlPlan>[0]["verdict"];
+  const verdict: HardCapVerdict = {
+    verdict: "FAIL",
+    aggregate_score: 2.1,
+    criteria: [],
+    detected_failure_classes: ["degenerate_loop"],
+    confidence: 0.9,
+    summary: "Looping",
+    reasoning: "No material improvement.",
+    recommendation: "L3_redesign",
+    model: "gemini-3-pro-vision",
+    cost: 0.01,
+    latency_ms: 100,
+    image_path: "/tmp/shot_07.png",
+  };
+  const plan = buildHardCapHitlPlan({
+    runId: "run_1",
+    shotId: 7,
+    iter: 8,
+    hardCap: 8,
+    deliverableId: "deliv_1",
+    artifactId: "art_1",
+    verdict,
+  });
+  assert.equal(plan.runUpdates.hitlRequired, true);
+  assert.match(plan.runUpdates.hitlNotes, /shot 7/);
+  assert.equal(plan.escalation.status, "hitl_required");
+  assert.equal(plan.escalation.failureClass, "degenerate_loop");
+  console.log("  ✓ PR #2 0.A.8 — hard-cap path has run bubble + asset escalation plan");
+}
+
 // ─── Cleanup ───────────────────────────────────────────────────────────────
 try {
   rmSync(fixtureRoot, { recursive: true, force: true });
@@ -433,4 +617,4 @@ try {
   // best-effort
 }
 
-console.log("\nPhase B stills-runner unit tests: 14/14 passed");
+console.log("\nPhase B stills-runner unit tests: 22/22 passed");
