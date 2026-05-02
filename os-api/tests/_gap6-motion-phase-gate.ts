@@ -116,12 +116,14 @@ assert.equal(notesByShot.get(4)?.state, "pending", "manifest direction caveat pr
 assert.equal(notesByShot.has(22), false, "manifest split-screen note is skipped when the shot is not locked in this campaign scope");
 
 const unblocked = aggregateMotionPhaseGateState({
-  ...state,
   campaignId: "campaign-gap6-unblocked",
+  productionSlug: "drift-mv",
+  now: new Date("2026-05-01T08:00:00.000Z"),
   deliverables: [
     { id: "del-shot-01", status: "approved", description: "Shot 01 · intro" },
   ],
   runs: [],
+  approvedDecisions: [],
   escalations: [],
   manifest: null,
 });

@@ -44,7 +44,7 @@ Productized from the manual orchestration that shipped the Drift MV inaugural ca
 STILLS_MODE_ENABLED=true
 # Optional tuning (defaults shown):
 STILLS_AUDIT_CONCURRENCY=8         # parallel critics in flight
-STILLS_PER_SHOT_COST_CAP=1.0       # USD; HITL escalation when exceeded
+STILLS_PER_SHOT_COST_CAP_USD=1.0   # USD; HITL escalation when exceeded
 ```
 
 Restart os-api after editing `.env`.
@@ -53,7 +53,7 @@ Restart os-api after editing `.env`.
 
 ```bash
 cd ~/proto_front/brand-engine && python -m brand_engine.api.server   # :8100
-cd ~/Temp-gen && python -m api.server                                # :8200
+cd ~/Temp-gen && python -m brand_engine.api.server                                # :8200
 cd ~/proto_front && npm run dev:api                                  # :3001
 ```
 
@@ -144,7 +144,7 @@ In-loop mode iterates `campaign_deliverables` in non-terminal status (`generatin
 **Per-shot loop:**
 1. POST to `/grade_image_v2` with `mode: "in_loop"` + `pivot_rewrite_history` from manifest
 2. If verdict is `ship` → log SHIP at iter N, move on (operator approves via HUD)
-3. Else delegate to `escalation_loop.ts::handleQAFailure` — runs degenerate-loop guard (`_countConsecutiveSamePromptRegens` + `_maybePromoteLevel` L1×3 → L2×2 → L3×2 → HITL), records `orchestration_decisions` row, applies $1.00/shot cumulative cost cap (`STILLS_PER_SHOT_COST_CAP`)
+3. Else delegate to `escalation_loop.ts::handleQAFailure` — runs degenerate-loop guard (`_countConsecutiveSamePromptRegens` + `_maybePromoteLevel` L1×3 → L2×2 → L3×2 → HITL), records `orchestration_decisions` row, applies $1.00/shot cumulative cost cap (`STILLS_PER_SHOT_COST_CAP_USD`)
 4. On `outcome === "regenerate"` → POST Temp-gen `/generate/image` with the orchestrator's new still prompt + manifest anchors as references
 
 ✅ **Phase B+ #6 SHIPPED 2026-04-30 (`2183d33`):** the runner now closes the regen → artifact-row → re-grade loop fully in-process. After Temp-gen writes a regen still, `createArtifactWithUpload` registers it tied to (current run, current deliverable, iter+1) with `metadata.parentArtifactId` provenance; next iter's `getArtifactsByRun` picks it up and the critic re-grades the new image. Phase B+ #7 (`4e9876f`) added `metadata.localPath` read priority so the local-file grader resolves the disk copy instead of the public Storage URL. Phase B+ #3 auto-seed (`29949ad`) registers a synthetic seed artifact when no artifact exists for a (current run, deliverable) pair but a prior-run artifact OR an on-disk locked still exists — escalation can attach. The full chain is now operator-visible via Gap 8 Iterations tab (`3a13380`) in `<ShotDetailDrawer>` with parent breadcrumbs + side-by-side Compare modal.
@@ -421,8 +421,8 @@ Critic returned `verdict=FAIL` with reasoning indicating bad path or unreadable 
 **Recovery:**
 1. Check sidecar processes: `ps aux | grep -E "api.server|brand-engine"`
 2. Restart per project README:
-   - brand-engine: `cd ~/proto_front/brand-engine && python -m api.server`
-   - Temp-gen: `cd ~/Temp-gen && python -m api.server`
+   - brand-engine: `cd ~/proto_front/brand-engine && python -m brand_engine.api.server`
+   - Temp-gen: `cd ~/Temp-gen && python -m brand_engine.api.server`
 3. **Do NOT proceed with `[DEMO]` fallback** — `[DEMO]`-prefix in real client work is a P1 incident per `AGENTS.md` Production posture. Halt the run, fix sidecar, resume.
 
 ---
@@ -451,26 +451,33 @@ Worker safety: even with the flag off, the worker's `OS_API_OWNED_MODES = ('regr
 The audit smoke #1 caught a degraded-mode artifact: brand-engine `known_limitations_loader` hits "Invalid API key" on every request → critic runs without the failure-class catalog → recommendations stay correct but scores skew +0.3-0.5 because deduction prompts aren't applied.
 
 **Symptom in brand-engine log:**
-```
+
+```text
 ERROR:brand_engine.core.known_limitations_loader:Failed to create Supabase client: Invalid API key
 ```
 
 **Fix:**
 
 1. Copy current valid key from os-api (which works):
+
    ```bash
    grep '^SUPABASE_KEY=' ~/proto_front/os-api/.env | head -1
    ```
+
 2. Compare to brand-engine's:
+
    ```bash
    grep '^SUPABASE_KEY=' ~/proto_front/brand-engine/.env | head -1
    ```
+
 3. If different, update brand-engine's `.env` with the working value (preserve all other keys).
 4. Restart brand-engine sidecar:
+
    ```bash
    pkill -TERM -f 'brand_engine\.api\.server'
    cd ~/proto_front/brand-engine && .venv/bin/python -m brand_engine.api.server > /tmp/brand-engine.log 2>&1 &
    ```
+
 5. Verify catalog loads — first audit verdict should NOT log the "Invalid API key" error.
 6. Re-fire audit smoke (~$3 budget). Expect score drift to drop to ≤±0.2.
 
@@ -480,13 +487,13 @@ Phase B SHIPPED 2026-04-29 PM + audit smoke #1 PASS. Remaining gates:
 
 - [x] Phase B (runner) lands — DONE (commits `ef18a76` + `4c713b2`); curl examples above are real
 - [x] **Audit smoke #1** — DONE (run `389ae296...`, 15/15 recommendation match, score drift attributed to env not code)
-- [ ] **Phase B+ #1**: brand-engine `.env` SUPABASE_KEY refresh (procedure above) — drops score drift to ≤±0.2
-- [ ] **Phase B+ #2**: sidecar X-Trace-Id passthrough — brand-engine `_emit_critic_log` honors the runner's X-Trace-Id rather than generating its own
-- [ ] **Phase B+ #3**: cost reporting in `_call_gemini_vision` — compute from token counts × Gemini 3 Pro Vision rate (currently returns 0)
-- [ ] **In-loop sidecar smoke** — fire `auditMode: false` against deliberately-broken seed prompt; verify L1→L2 promotion via degenerate-loop guard. ~$0.50 budget. (Best done after Phase C templates land so regen prompts are production-quality.)
-- [ ] **Cost-cap sidecar smoke** — `STILLS_PER_SHOT_COST_CAP=0.05` forces HITL escalation. ~$0.20 budget.
-- [ ] **Phase C** (Brandy) — image-class L1/L2/L3 prompt templates + 22nd rule for non-human pose-driven subjects + 2000-char ceiling enforcement in orchestrator prompt-builder.
-- [ ] **Phase E** (Karl) — HUD "Run Audit" CTA + triage table (reads `runs.metadata.audit_report`) + `ShotDetailDrawer` "Trigger Pivot" button.
+- [x] **Phase B+ #1**: brand-engine `.env` SUPABASE_KEY refresh procedure documented above — live ops path validated
+- [x] **Phase B+ #2**: sidecar X-Trace-Id passthrough — brand-engine `_emit_critic_log` honors the runner's X-Trace-Id rather than generating its own
+- [x] **Phase B+ #3**: auto-seed when no current-run artifact exists — runner registers a synthetic seed artifact for escalation attachment
+- [x] **In-loop sidecar smoke** — drift-mv closing run `01ead7d8-...` verified critic→orchestrator→regen loop, L1/L2/L3/HITL outcomes, and operator override closure
+- [x] **Cost-cap / HITL bubble** — hard-cap path persists `runs.hitl_required` plus canonical `asset_escalations` row; use `STILLS_PER_SHOT_COST_CAP_USD=0.05` only for manual smoke
+- [x] **Phase B+ #4-#8** — direction integrity, Rule 7 2000-char budget, loop closure, localPath grading, and HITL bubble shipped; Phase C prompt-template tightening remains Brandy-owned follow-up
+- [x] **Phase E / HUD operator UX (Karl)** — Review Gate escalation, audit triage, override pills, recent runs, canonical refs, motion gate, direction drift, and regen iterations browser shipped 8/8
 - [ ] **Phase F** (Brandy) — `pipeline_metrics` table, cost-alert thresholds, `WatcherSignalsPanel` stills-mode binding, Datadog/OTEL collector option.
 - [ ] **Phase G** (Brandy) — architecture mermaid diagram (`docs/architecture/stills-pipeline.md`), troubleshooting failure-mode → recovery table (`docs/troubleshooting/stills-mode.md`).
 - [ ] **Phase H** (Brandy) — multi-campaign RLS audit, `GET /api/campaigns/:id/cost-ledger`, `GET /api/campaigns/:id/audit-log`, cross-campaign isolation smoke.

@@ -62,6 +62,7 @@ import {
   updateRun,
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
+import { getTempGenDir } from "./temp-gen-env.js";
 import type {
   Run,
   ImageGradeResult,
@@ -72,7 +73,7 @@ import type {
 
 // ─── Config (env-overridable) ──────────────────────────────────────────────
 
-const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || "/Users/timothysepulvado/Temp-gen";
+const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || getTempGenDir();
 
 /**
  * Per-shot cumulative cost cap for stills runs. Tighter than the video
@@ -80,7 +81,9 @@ const TEMP_GEN_PATH = process.env.TEMP_GEN_PATH || "/Users/timothysepulvado/Temp
  * `escalation_loop.ts::PER_SHOT_HARD_CAP_USD` via `perShotCapOverride`.
  */
 export const STILLS_PER_SHOT_HARD_CAP_USD = Number.parseFloat(
-  process.env.STILLS_PER_SHOT_COST_CAP ?? "1.0",
+  process.env.STILLS_PER_SHOT_COST_CAP_USD
+    ?? process.env.STILLS_PER_SHOT_COST_CAP
+    ?? "1.0",
 );
 
 /**

@@ -14,6 +14,7 @@
  *   7. Feature flag default — `STILLS_MODE_ENABLED` defaults false
  *   8. Cost cap default — `STILLS_PER_SHOT_HARD_CAP_USD` defaults to $1.00
  *   9-22. PR #2 Phase 0.A guard/security helpers
+ *   23-24. PR #2 Phase 0.B seed-script guards
  *
  * Integration coverage of `runAuditMode` / `runInLoopMode` requires fetch +
  * Supabase mocks; deferred to a Phase B+ follow-up that introduces a
@@ -32,7 +33,7 @@ import { tmpdir } from "node:os";
 // loads .env via downstream modules, and dotenv does not override existing
 // process.env keys, so set the expected defaults explicitly before import.
 process.env.STILLS_MODE_ENABLED = "false";
-process.env.STILLS_PER_SHOT_COST_CAP = "1.0";
+process.env.STILLS_PER_SHOT_COST_CAP_USD = "1.0";
 process.env.STILLS_AUDIT_CONCURRENCY = "8";
 
 // Set TEMP_GEN_PATH to a temp dir BEFORE importing so loadCampaignManifest
@@ -55,6 +56,7 @@ const {
 const { validateRunModeFeatureFlag, validateCampaignClientScope } = await import("../src/run-create-guards.js");
 const { ForbiddenPathError, resolveExistingRealPathInsideAllowedRoots } = await import("../src/path-security.js");
 const { validateStillSourcePath, updateReferenceImagesForStillDecision } = await import("../src/productions.js");
+const { assertExpectedTiers, mapDeliverablesByShot } = await import("../scripts/seed-drift-mv-pivot.js");
 
 // `pMap` is module-private. Reuse the same Promise-pool pattern in-test to
 // validate the concurrency invariant; the production implementation is
@@ -274,6 +276,46 @@ async function pMap<T, R>(
   console.log(
     `  ✓ env defaults: STILLS_MODE_ENABLED=${STILLS_MODE_ENABLED} cap=$${STILLS_PER_SHOT_HARD_CAP_USD} conc=${STILLS_AUDIT_CONCURRENCY}`,
   );
+}
+
+// ─── Tests 23-24: seed script duplicate/tier validation (PR #2 0.B.6-0.B.7) ──
+{
+  type SeedDeliverableRow = Parameters<typeof mapDeliverablesByShot>[0][number];
+  const row = (id: string, shot: number): SeedDeliverableRow => ({
+    id,
+    campaign_id: "campaign_1",
+    description: `Shot ${String(shot).padStart(2, "0")} · fixture`,
+    current_prompt: null,
+    ai_model: null,
+    status: "pending",
+    reference_images: [`productions/drift-mv/stills/shot_${String(shot).padStart(2, "0")}.png`],
+    negative_prompts: null,
+  });
+
+  assert.throws(
+    () => mapDeliverablesByShot([row("deliv_a", 5), row("deliv_b", 5)]),
+    /Duplicate deliverables mapped to shot #5: deliv_a and deliv_b/,
+    "seed script must fail fast on duplicate deliverables for the same shot",
+  );
+  console.log("  ✓ PR #2 0.B.6 — seed script rejects duplicate shot deliverables");
+}
+
+{
+  type ParsedShot = Parameters<typeof assertExpectedTiers>[0] extends Map<number, infer T> ? T : never;
+  const tierMap = new Map<number, ParsedShot>();
+  for (const shot of [2, 5, 6, 8, 10, 11, 15, 25, 26, 27]) {
+    tierMap.set(shot, { shotNumber: shot, tier: "A", newVisual: "fixture visual" });
+  }
+  tierMap.set(1, { shotNumber: 1, tier: "B", newVisual: "fixture visual" });
+  assert.doesNotThrow(() => assertExpectedTiers(tierMap));
+
+  tierMap.set(5, { shotNumber: 5, tier: "B", newVisual: "wrong tier" });
+  assert.throws(
+    () => assertExpectedTiers(tierMap),
+    /shot #5 parsed as tier B but expected A/,
+    "seed script must reject required shots parsed into the wrong tier",
+  );
+  console.log("  ✓ PR #2 0.B.7 — seed script validates expected audit tiers");
 }
 
 // ─── Tests 9-14: pickInLoopTargets (Phase B+ targeted-regen, 2026-04-30) ───
@@ -617,4 +659,4 @@ try {
   // best-effort
 }
 
-console.log("\nPhase B stills-runner unit tests: 22/22 passed");
+console.log("\nPhase B stills-runner unit tests: 24/24 passed");

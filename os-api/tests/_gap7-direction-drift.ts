@@ -123,4 +123,36 @@ assert.ok(shot22);
 assert.equal(shot22.directionDrift, false);
 assert.equal(shot22.verdict, "PASS");
 
+const staleOverrideIndicators = aggregateDirectionDriftIndicators({
+  deliverables: [{ id: "shot-20", description: "Shot 20 · bridge · fortress wall" }],
+  events: [
+    {
+      deliverableId: "shot-20",
+      shotNumber: 20,
+      runId: "fresh-audit",
+      timestamp: "2026-05-02T09:00:00.000Z",
+      source: "orchestration_decision",
+      verdict: "FAIL",
+      score: 2.6,
+      failureClasses: ["campaign_direction_reversion_mech_heavy"],
+      decisionId: "fresh-decision",
+    },
+    {
+      deliverableId: "shot-20",
+      shotNumber: 20,
+      runId: "old-override-run",
+      timestamp: "2026-05-01T09:00:00.000Z",
+      source: "operator_override",
+      verdict: null,
+      score: 3.2,
+      failureClasses: [],
+      clearsDirectionDrift: true,
+    },
+  ],
+});
+const staleOverrideShot20 = staleOverrideIndicators.get("shot-20");
+assert.ok(staleOverrideShot20);
+assert.equal(staleOverrideShot20.directionDrift, true, "older operator override must not clear a fresher drift verdict");
+assert.equal(staleOverrideShot20.source, "orchestration_decision");
+
 console.log("✓ Gap 7 direction-drift helper tests passed");

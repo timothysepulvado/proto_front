@@ -1180,6 +1180,22 @@ function streamFile(res: Response, path: string, contentType: string): void {
 }
 
 function imageContentType(path: string): string {
+  if (existsSync(path)) {
+    try {
+      const signature = readFileSync(path).subarray(0, 12);
+      const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+      if (signature.subarray(0, 8).equals(pngSignature)) return "image/png";
+      if (signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff) return "image/jpeg";
+      if (
+        signature.subarray(0, 4).toString("ascii") === "RIFF"
+        && signature.subarray(8, 12).toString("ascii") === "WEBP"
+      ) {
+        return "image/webp";
+      }
+    } catch {
+      // Fall through to extension detection; streamFile will surface read errors.
+    }
+  }
   const extension = extname(path).toLowerCase();
   if (extension === ".webp") return "image/webp";
   return extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : "image/png";
@@ -1228,7 +1244,8 @@ export function createProductionsRouter(): Router {
     try {
       const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
       const shotNumber = parseShotNumber(getParam(req, "shot"));
-      streamFile(res, shotPaths(productionSlug, shotNumber).still, "image/png");
+      const stillPath = shotPaths(productionSlug, shotNumber).still;
+      streamFile(res, stillPath, imageContentType(stillPath));
     } catch (err) {
       sendJsonError(res, err, "GET /api/productions/:productionSlug/shot/:shot/still");
     }
@@ -1438,7 +1455,8 @@ export function createProductionsRouter(): Router {
     try {
       const productionSlug = validateProductionSlug(getParam(req, "productionSlug"));
       const shotNumber = parseShotNumber(getParam(req, "n"));
-      streamFile(res, shotPaths(productionSlug, shotNumber).still, "image/png");
+      const stillPath = shotPaths(productionSlug, shotNumber).still;
+      streamFile(res, stillPath, imageContentType(stillPath));
     } catch (err) {
       sendJsonError(res, err, "GET /api/productions/:productionSlug/shots/:n/still");
     }

@@ -462,8 +462,15 @@ function productionSlugFromRunsOrCampaign(campaign: Campaign | null, runs: Run[]
     const slug = readString(run.metadata?.production_slug);
     if (slug) return slug;
   }
-  const name = campaign?.name?.toLowerCase() ?? "";
-  if (name.includes("drift mv")) return "drift-mv";
+  const guardrails = isRecord(campaign?.guardrails) ? campaign.guardrails : null;
+  const configuredSlug = readString(guardrails?.production_slug)
+    ?? readString(guardrails?.productionSlug)
+    ?? readString(guardrails?.temp_gen_production_slug)
+    ?? readString(guardrails?.tempGenProductionSlug);
+  if (configuredSlug) return configuredSlug;
+  const fallbackSlug = readString(process.env.DEFAULT_PRODUCTION_SLUG)
+    ?? readString(process.env.TEMP_GEN_PRODUCTION_SLUG);
+  if (fallbackSlug) return fallbackSlug;
   return undefined;
 }
 
@@ -1220,11 +1227,16 @@ export async function getDirectionDriftIndicatorsByCampaign(
       const deliverable = deliverableByShot.get(shotNumber);
       if (!deliverable) continue;
       const rawDecision = isRecord(rawValue) ? rawValue : {};
+      const overrideTimestamp = readString(rawDecision.decision_at)
+        ?? readString(rawDecision.decisionAt)
+        ?? run.updatedAt
+        ?? run.completedAt
+        ?? run.createdAt;
       events.push({
         deliverableId: deliverable.id,
         shotNumber,
         runId: run.runId,
-        timestamp: run.updatedAt ?? run.completedAt ?? run.createdAt,
+        timestamp: overrideTimestamp,
         source: "operator_override",
         verdict: null,
         score: readNumber(rawDecision.critic_score) ?? null,
