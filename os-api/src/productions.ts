@@ -7,6 +7,7 @@ import express from "express";
 import type { Request, Response, Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { buildTempGenProcessEnv, getTempGenDir } from "./temp-gen-env.js";
+import { ForbiddenPathError, resolveExistingRealPathInsideAllowedRoots, splitAllowedRoots } from "./path-security.js";
 import { supabase } from "./supabase.js";
 
 const KNOWN_PRODUCTIONS = new Set(["drift-mv"]);
@@ -415,24 +416,36 @@ function resolveUserPath(rawPath: string): string {
   return trimmed;
 }
 
-function validateStillSourcePath(rawPath: unknown): string {
+export function productionSourceRoots(productionSlug: string): string[] {
+  const configured = splitAllowedRoots(process.env.PRODUCTIONS_SOURCE_ROOTS);
+  return configured.length > 0 ? configured : [productionRoot(productionSlug)];
+}
+
+export function validateStillSourcePath(
+  productionSlug: string,
+  rawPath: unknown,
+  allowedRoots: readonly string[] = productionSourceRoots(productionSlug),
+): string {
   if (typeof rawPath !== "string") throw validationError("sourcePath must be a string");
   const sourcePath = resolve(resolveUserPath(rawPath));
-  if (!existsSync(sourcePath)) throw Object.assign(new Error(`Replacement still not found: ${sourcePath}`), { name: "NotFoundError" });
-  const stats = statSync(sourcePath);
+  const realSourcePath = resolveExistingRealPathInsideAllowedRoots(sourcePath, allowedRoots, {
+    missingMessage: `Replacement still not found: ${sourcePath}`,
+    forbiddenMessage: "sourcePath is outside the configured production source roots",
+  });
+  const stats = statSync(realSourcePath);
   if (!stats.isFile()) throw validationError("sourcePath must resolve to a file");
   if (stats.size > 50 * 1024 * 1024) throw validationError("Replacement still must be 50MB or smaller");
   const allowedExtensions = new Set([".png", ".jpg", ".jpeg"]);
-  if (!allowedExtensions.has(extname(sourcePath).toLowerCase())) {
+  if (!allowedExtensions.has(extname(realSourcePath).toLowerCase())) {
     throw validationError("Replacement still must be a .png, .jpg, or .jpeg file");
   }
 
-  const signature = readFileSync(sourcePath).subarray(0, 8);
+  const signature = readFileSync(realSourcePath).subarray(0, 8);
   const pngSignature = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
   const isPng = signature.equals(pngSignature);
   const isJpeg = signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
   if (!isPng && !isJpeg) throw validationError("Replacement still must be a valid PNG or JPEG image");
-  return sourcePath;
+  return realSourcePath;
 }
 
 function detectImageExtension(buffer: Buffer): ".png" | ".jpg" {
@@ -467,17 +480,26 @@ function validateStillUploadBody(productionSlug: string, shotNumber: number, fil
   return uploadPath;
 }
 
+export function updateReferenceImagesForStillDecision(
+  currentRefs: readonly string[],
+  stillPath: string,
+  decision: "approve" | "reject",
+): string[] {
+  const withoutStill = currentRefs.filter((item) => item !== stillPath);
+  return decision === "approve" ? [stillPath, ...withoutStill] : withoutStill;
+}
+
 function resolveStillReplacementSource(
   productionSlug: string,
   shotNumber: number,
   body: { sourcePath?: unknown; fileBase64?: unknown; fileName?: unknown },
 ): { sourcePath: string; tempUploadPath: string | null } {
   if (body.sourcePath !== undefined) {
-    return { sourcePath: validateStillSourcePath(body.sourcePath), tempUploadPath: null };
+    return { sourcePath: validateStillSourcePath(productionSlug, body.sourcePath), tempUploadPath: null };
   }
   if (body.fileBase64 !== undefined) {
     const tempUploadPath = validateStillUploadBody(productionSlug, shotNumber, body.fileBase64, body.fileName);
-    return { sourcePath: validateStillSourcePath(tempUploadPath), tempUploadPath };
+    return { sourcePath: validateStillSourcePath(productionSlug, tempUploadPath), tempUploadPath };
   }
   throw validationError("sourcePath or fileBase64 is required");
 }
@@ -651,7 +673,7 @@ async function approveShotStill(productionSlug: string, shotNumber: number, deli
   const currentRefs = Array.isArray((deliverable as DeliverableApprovalRow).reference_images)
     ? ((deliverable as DeliverableApprovalRow).reference_images ?? [])
     : [];
-  const nextRefs = [paths.still, ...currentRefs.filter((item) => item !== paths.still)];
+  const nextRefs = updateReferenceImagesForStillDecision(currentRefs, paths.still, "approve");
   const { data: updatedDeliverable, error: deliverableUpdateError } = await supabase
     .from("campaign_deliverables")
     .update({ reference_images: nextRefs })
@@ -723,7 +745,7 @@ async function rejectShotStill(productionSlug: string, shotNumber: number, reaso
   const currentRefs = Array.isArray((deliverable as DeliverableApprovalRow).reference_images)
     ? ((deliverable as DeliverableApprovalRow).reference_images ?? [])
     : [];
-  const nextRefs = [paths.still, ...currentRefs.filter((item) => item !== paths.still)];
+  const nextRefs = updateReferenceImagesForStillDecision(currentRefs, paths.still, "reject");
   const { data: updatedDeliverable, error: deliverableUpdateError } = await supabase
     .from("campaign_deliverables")
     .update({ reference_images: nextRefs })
@@ -1015,6 +1037,10 @@ async function extractStartingStillFromCanonical(productionSlug: string, shotNum
 
 function sendJsonError(res: Response, err: unknown, label: string): void {
   const message = err instanceof Error ? err.message : "Unknown error";
+  if (err instanceof ForbiddenPathError || (err instanceof Error && err.name === "ForbiddenError")) {
+    res.status(403).json({ error: message });
+    return;
+  }
   if (err instanceof Error && err.name === "ValidationError") {
     res.status(400).json({ error: message });
     return;
