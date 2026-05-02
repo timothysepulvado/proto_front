@@ -314,11 +314,11 @@ class TestLoadImagePart:
 
 class TestGetClient:
     def setup_method(self):
-        # Reset module-level singleton between tests
-        ig._genai_client = None
+        # Reset module-level cache between tests
+        ig._genai_clients.clear()
 
     def teardown_method(self):
-        ig._genai_client = None
+        ig._genai_clients.clear()
 
     def test_ai_studio_requires_an_api_key(self, monkeypatch):
         for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY"):
@@ -352,6 +352,19 @@ class TestGetClient:
         # Client constructor only called once (singleton cache)
         assert mock_client.call_count == 1
 
+    def test_cache_is_scoped_by_backend_config(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_API_KEY", "fake-key")
+        monkeypatch.setenv("VERTEX_PROJECT_ID", "test-project-xyz")
+        monkeypatch.setenv("VERTEX_REGION", "us-east1")
+        with patch("brand_engine.core.image_grader.genai.Client") as mock_client:
+            mock_client.side_effect = [MagicMock(name="ai_studio"), MagicMock(name="vertex")]
+            ai_client = _get_client("ai_studio")
+            vertex_client = _get_client("vertex")
+            ai_client_again = _get_client("ai_studio")
+        assert ai_client is ai_client_again
+        assert ai_client is not vertex_client
+        assert mock_client.call_count == 2
+
 
 # ─── _call_gemini_vision retry behavior ─────────────────────────────────────
 
@@ -364,10 +377,10 @@ class TestCallGeminiVisionRetry:
     """
 
     def setup_method(self):
-        ig._genai_client = None
+        ig._genai_clients.clear()
 
     def teardown_method(self):
-        ig._genai_client = None
+        ig._genai_clients.clear()
 
     def _make_image_at(self, tmp_path: Path) -> str:
         from PIL import Image

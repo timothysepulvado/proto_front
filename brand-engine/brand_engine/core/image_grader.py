@@ -148,7 +148,7 @@ _DEDUCT_MARKER_RE = re.compile(r"<<DEDUCT:\s*([^>]+?)\s*>>")
 _DEDUCT_PAIR_RE = re.compile(r"([a-z_][a-z0-9_]*)\s*=\s*(-?\d+(?:\.\d+)?)")
 
 # ── Module-scope client cache (lazy-init via _get_client) ───────────────────
-_genai_client: Optional[genai.Client] = None
+_genai_clients: dict[tuple[str, str, str], genai.Client] = {}
 
 
 def _parse_deductions_from_mitigation(mitigation: Optional[str]) -> dict[str, float]:
@@ -262,14 +262,17 @@ def _get_client(backend: str) -> genai.Client:
     """Lazy-init Gemini client. Mirrors VideoGrader.client property
     (video_grader.py:553-582). Same env-var precedence + Vertex/AI-Studio
     split — both critics share auth posture."""
-    global _genai_client
-    if _genai_client is not None:
-        return _genai_client
+    backend = backend.lower()
     if backend == "vertex":
-        _genai_client = genai.Client(
+        project = os.getenv("VERTEX_PROJECT_ID", "bran-479523")
+        location = os.getenv("VERTEX_REGION", "global")
+        cache_key = (backend, project, location)
+        if cache_key in _genai_clients:
+            return _genai_clients[cache_key]
+        _genai_clients[cache_key] = genai.Client(
             vertexai=True,
-            project=os.getenv("VERTEX_PROJECT_ID", "bran-479523"),
-            location=os.getenv("VERTEX_REGION", "global"),
+            project=project,
+            location=location,
         )
     else:
         api_key = (
@@ -282,8 +285,11 @@ def _get_client(backend: str) -> genai.Client:
                 "GOOGLE_GENAI_API_KEY (or GEMINI_API_KEY / GOOGLE_API_KEY) "
                 "is required for the ai_studio backend."
             )
-        _genai_client = genai.Client(api_key=api_key)
-    return _genai_client
+        cache_key = (backend, api_key, "")
+        if cache_key in _genai_clients:
+            return _genai_clients[cache_key]
+        _genai_clients[cache_key] = genai.Client(api_key=api_key)
+    return _genai_clients[cache_key]
 
 
 # Phase B+ #2 (2026-04-30): per-request trace ID propagation. The FastAPI
@@ -830,9 +836,13 @@ def grade_image_v2(
         )
         for c in parsed.get("criteria", [])
     ]
-    if not criteria:
-        # Fall back to zero-scored placeholders so verdict computation doesn't divide by zero
-        criteria = [VideoGradeCriterion(name=n, score=0.0, notes="(missing from response)") for n in STILLS_CRITERIA]
+    expected_criteria_count = len(STILLS_CRITERIA)
+    if len(criteria) != expected_criteria_count:
+        raise ValueError(
+            "Gemini stills critic returned "
+            f"{len(criteria)}/{expected_criteria_count} criteria; expected exactly "
+            f"{expected_criteria_count}."
+        )
 
     detected = [str(fm) for fm in parsed.get("detected_failure_classes", [])]
     blocking_modes = {

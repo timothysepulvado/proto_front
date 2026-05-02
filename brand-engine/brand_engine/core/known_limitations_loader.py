@@ -124,7 +124,7 @@ def load_image_class_limitations(force_refresh: bool = False) -> list[dict]:
                 "category": row.get("category", ""),
                 "description": row.get("description", ""),
                 "mitigation": row.get("mitigation", "") or "",
-                "severity": row.get("severity", "warning"),
+                "severity": row.get("severity") or "warning",
             })
         _cache = catalog
         _cache_loaded_at = now

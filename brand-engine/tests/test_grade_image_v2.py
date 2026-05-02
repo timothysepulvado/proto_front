@@ -174,6 +174,23 @@ class TestGradeImageV2AuditMode:
         assert "pivot_rewrite_history" not in result.get("reasoning", "").lower() or \
                "no prior iter" in result.get("reasoning", "").lower()
 
+    def test_partial_criteria_response_is_rejected(self):
+        """A non-empty but incomplete rubric must not be accepted as PASS/WARN."""
+        partial = _ship_verdict_fixture()
+        partial["criteria"] = partial["criteria"][:1]
+        with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:
+            mock_gemini.return_value = json.dumps(partial)
+            with pytest.raises(ValueError, match=r"1/6 criteria"):
+                grade_image_v2(
+                    image_path=str(SHOT_5_ITER_1_IMAGE),
+                    still_prompt=SAMPLE_NARRATIVE_BEAT["still_prompt"],
+                    narrative_beat=SAMPLE_NARRATIVE_BEAT,
+                    story_context=SAMPLE_STORY_CONTEXT,
+                    anchor_paths=SAMPLE_ANCHOR_PATHS,
+                    reference_paths=SAMPLE_REFERENCE_PATHS,
+                    pivot_rewrite_history=None,
+                    mode="audit",
+                )
     def test_audit_skips_rules_6_and_7(self):
         """Audit-mode passes pivot_rewrite_history=None; rubric skips Rules 6 + 7."""
         with patch("brand_engine.core.image_grader._call_gemini_vision") as mock_gemini:

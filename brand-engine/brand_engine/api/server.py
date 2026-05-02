@@ -233,7 +233,7 @@ async def grade_video(request: VideoGradeRequest):
 async def grade_image_v2_route(
     request: ImageGradeRequest,
     x_trace_id: str | None = Header(default=None, alias="X-Trace-Id"),
-):
+) -> ImageGradeResult:
     """Grade a single still image using Gemini 3 Pro Vision (ADR-004 Phase A).
 
     Two modes:
@@ -280,11 +280,15 @@ async def grade_image_v2_route(
         # 2000-char ceiling is a client input error → 422.
         # Critic JSON invalid is an upstream error → 502.
         msg = str(e)
-        if "2000" in msg or "char" in msg.lower():
+        msg_lower = msg.lower()
+        if "2000" in msg_lower and "char" in msg_lower:
             logger.warning("Image grade pre-flight rejected: %s", msg)
-            raise HTTPException(status_code=422, detail=msg)
+            raise HTTPException(status_code=422, detail=msg) from e
         logger.error("Image grade JSON error: %s", msg)
-        raise HTTPException(status_code=502, detail=f"Stills critic returned invalid output: {msg}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stills critic returned invalid output: {msg}",
+        ) from e
     except FileNotFoundError as e:
         # Should not happen — grade_image_v2 returns synthetic FAIL on missing
         # image rather than raising. But surface a 404 for defense-in-depth.
