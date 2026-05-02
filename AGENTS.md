@@ -206,6 +206,7 @@ Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 - Roadmap updates: `~/agent-vault/domains/brandstudios/ROADMAP.md`
 
 ### Karl (Codex / GPT-5.5 xhigh) — implementation lead
+
 - **Frontend work** — React components, Tailwind styling, UI polish
 - **API routes** — Express endpoint implementation in os-api/
 - **Wiring tasks** — connecting existing backend to frontend (e.g., hook component to API)

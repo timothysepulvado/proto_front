@@ -27,27 +27,28 @@ Production rigor: every test should also assert on the structured-log emission
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-# Test-first: this import will fail until Phase A implementation lands.
-# When Phase A author creates the module, update this import to match.
-# Suggested module path: brand_engine.core.image_grader
-# Suggested function: grade_image_v2(...)
-pytest.importorskip("brand_engine.core.image_grader", reason="Phase A pending — module not yet created")
+try:
+    from brand_engine.core.image_grader import grade_image_v2
+    from brand_engine.core.models import ImageGradeRequest
+except ImportError as exc:  # pragma: no cover - collection-time guard
+    pytest.fail(f"Phase A image grader imports must be available: {exc}", pytrace=False)
 
-from brand_engine.core.image_grader import grade_image_v2  # noqa: E402
-from brand_engine.core.models import ImageGradeRequest  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 
 # ─── Test fixtures ──────────────────────────────────────────────────────────
 
-DRIFT_MV_ROOT = Path.home() / "Temp-gen" / "productions" / "drift-mv"
-SHOT_5_ITER_1_IMAGE = DRIFT_MV_ROOT / "stills" / "shot_05.png"
+TEST_FIXTURE_DIR = Path(__file__).parent / "fixtures"
+SHOT_5_ITER_1_IMAGE = TEST_FIXTURE_DIR / "tiny-still.png"
+LIVE_DRIFT_MV_ROOT = Path.home() / "Temp-gen" / "productions" / "drift-mv"
+LIVE_SHOT_5_ITER_1_IMAGE = LIVE_DRIFT_MV_ROOT / "stills" / "shot_05.png"
 
 SAMPLE_NARRATIVE_BEAT = {
     "shot_number": 5,
@@ -66,12 +67,12 @@ SAMPLE_STORY_CONTEXT = {
 }
 
 SAMPLE_ANCHOR_PATHS = [
-    str(DRIFT_MV_ROOT / "anchors" / "brandy_anchor.png"),
+    str(TEST_FIXTURE_DIR / "tiny-anchor.png"),
 ]
 
 SAMPLE_REFERENCE_PATHS = [
-    str(DRIFT_MV_ROOT / "stills" / "shot_22.png"),
-    str(DRIFT_MV_ROOT / "stills" / "shot_23.png"),
+    str(TEST_FIXTURE_DIR / "tiny-reference-a.png"),
+    str(TEST_FIXTURE_DIR / "tiny-reference-b.png"),
 ]
 
 # Pivot history mirroring the shot 5 audit-driven L1 fix that shipped 2026-04-29
@@ -345,23 +346,26 @@ class TestGradeImageV2Smoke:
     """
 
     @pytest.mark.skipif(
-        not (Path.home() / "Temp-gen" / "productions" / "drift-mv" / "stills" / "shot_05.png").exists(),
-        reason="Drift MV shot_05.png not present; live smoke skipped",
+        not os.environ.get("SMOKE_LIVE"),
+        reason="Live smoke opt-in via SMOKE_LIVE=1",
     )
     @pytest.mark.skipif(
-        True,  # opt-in only; flip to env-var check in Phase A
-        reason="Live smoke opt-in via SMOKE_LIVE=1 (TODO Phase A: wire to env)",
+        not LIVE_SHOT_5_ITER_1_IMAGE.exists(),
+        reason="Drift MV shot_05.png not present; live smoke skipped",
     )
     def test_live_smoke_shot_5_iter_1_matches_manual_audit(self):
         """Smoke: live Gemini call on shot 5 iter 1 → expect ~4.46 ±0.3 aggregate."""
         # No mock — this is a live test
         result = grade_image_v2(
-            image_path=str(SHOT_5_ITER_1_IMAGE),
+            image_path=str(LIVE_SHOT_5_ITER_1_IMAGE),
             still_prompt="...load actual prompt from manifest...",
             narrative_beat=SAMPLE_NARRATIVE_BEAT,
             story_context=SAMPLE_STORY_CONTEXT,
-            anchor_paths=SAMPLE_ANCHOR_PATHS,
-            reference_paths=SAMPLE_REFERENCE_PATHS,
+            anchor_paths=[str(LIVE_DRIFT_MV_ROOT / "anchors" / "brandy_anchor.png")],
+            reference_paths=[
+                str(LIVE_DRIFT_MV_ROOT / "stills" / "shot_22.png"),
+                str(LIVE_DRIFT_MV_ROOT / "stills" / "shot_23.png"),
+            ],
             pivot_rewrite_history=None,
             mode="audit",
         )

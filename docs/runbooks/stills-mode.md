@@ -471,6 +471,7 @@ ERROR:brand_engine.core.known_limitations_loader:Failed to create Supabase clien
    ```
 
 3. If different, update brand-engine's `.env` with the working value (preserve all other keys).
+
 4. Restart brand-engine sidecar:
 
    ```bash
@@ -479,6 +480,7 @@ ERROR:brand_engine.core.known_limitations_loader:Failed to create Supabase clien
    ```
 
 5. Verify catalog loads — first audit verdict should NOT log the "Invalid API key" error.
+
 6. Re-fire audit smoke (~$3 budget). Expect score drift to drop to ≤±0.2.
 
 ## Production rigor TODOs

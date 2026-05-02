@@ -6,14 +6,18 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   getCanonicalReferencesForManifest,
   getShotCanonicalReferences,
 } from "../src/productions.js";
 
-const tempGenDir = process.env.TEMP_GEN_DIR ?? join(process.env.HOME ?? "", "Temp-gen");
+const testDir = dirname(fileURLToPath(import.meta.url));
+const tempGenDir = join(testDir, "fixtures", "temp-gen");
+process.env.TEMP_GEN_DIR = tempGenDir;
+
 const manifestPath = join(tempGenDir, "productions", "drift-mv", "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { characters?: unknown };
 

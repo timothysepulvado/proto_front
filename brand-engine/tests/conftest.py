@@ -5,7 +5,11 @@ loader so test_grade_image_v2.py can run without a network call.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+from typing import Any
+
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
 
 # Mirror of migration 009_image_class_known_limitations.sql — 8 image-class
@@ -13,7 +17,7 @@ import pytest
 # description, mitigation, severity). Kept in-source so fixture drift from
 # migration drift is caught by the test_video_grader_truncation regression
 # suite (no schema dependency on this fixture).
-IMAGE_CLASS_LIMITATIONS_FIXTURE: list[dict] = [
+IMAGE_CLASS_LIMITATIONS_FIXTURE: list[dict[str, Any]] = [
     {
         "failure_mode": "narrative_beat_inversion_active_vs_deactivated",
         "category": "character",
@@ -74,21 +78,25 @@ IMAGE_CLASS_LIMITATIONS_FIXTURE: list[dict] = [
 
 
 @pytest.fixture(autouse=True)
-def mock_supabase_known_limitations(monkeypatch):
+def mock_supabase_known_limitations(monkeypatch: MonkeyPatch) -> None:
     """Auto-applied — replaces the Supabase loader with the in-memory fixture
     so every test runs without network access.
 
     Tests that want to test the loader itself can override this fixture by
     re-monkeypatching inside the test function.
     """
+    def fresh_image_class_limitations(*_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+        """Return fresh row/list objects so tests cannot share mutable state."""
+        return deepcopy(IMAGE_CLASS_LIMITATIONS_FIXTURE)
+
     monkeypatch.setattr(
         "brand_engine.core.known_limitations_loader.load_image_class_limitations",
-        lambda *args, **kwargs: IMAGE_CLASS_LIMITATIONS_FIXTURE,
+        fresh_image_class_limitations,
     )
     # Also patch the symbol as imported into image_grader (Python name binding —
     # the import-time `from known_limitations_loader import load_image_class_limitations`
     # creates a local reference that monkeypatching the source module doesn't update).
     monkeypatch.setattr(
         "brand_engine.core.image_grader.load_image_class_limitations",
-        lambda *args, **kwargs: IMAGE_CLASS_LIMITATIONS_FIXTURE,
+        fresh_image_class_limitations,
     )

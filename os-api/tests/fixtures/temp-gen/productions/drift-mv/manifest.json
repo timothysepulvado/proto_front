@@ -1,0 +1,14 @@
+{
+  "shots": [],
+  "characters": {
+    "mech_openai": {
+      "canonical_reference_still": "stills/shot_07.png",
+      "canonical_reference_locked_at": "2026-04-30",
+      "canonical_reference_locked_by": "Tim direction",
+      "canonical_reference_rationale": "Canonical visual ground-truth for future mech_openai regens."
+    },
+    "mech_claude": {
+      "description": "No canonical reference set in this fixture."
+    }
+  }
+}
