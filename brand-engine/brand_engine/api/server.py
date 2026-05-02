@@ -289,9 +289,9 @@ async def grade_image_v2_route(
         # Should not happen — grade_image_v2 returns synthetic FAIL on missing
         # image rather than raising. But surface a 404 for defense-in-depth.
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error("Image grade failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Image grade failed trace_id=%s", x_trace_id or "none")
+        raise HTTPException(status_code=500, detail="internal_error")
     finally:
         # Always reset the ContextVar so a subsequent request running on the
         # same task context doesn't inherit this caller's trace ID.
