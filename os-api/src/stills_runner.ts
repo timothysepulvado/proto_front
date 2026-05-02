@@ -55,6 +55,10 @@ import {
   getArtifactsByRun,
   getLatestArtifactByDeliverable,
   addArtifact,
+  createEscalation,
+  getEscalationByArtifact,
+  recordOrchestrationDecision,
+  updateEscalation,
   updateRun,
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
@@ -368,6 +372,113 @@ interface AuditShotResult {
   errorMessage: string | null;
 }
 
+/** "Shot 7", "Shot 007", "shot_500", "shot-50" — case-insensitive. */
+const SHOT_DESCRIPTION_RE = /\bshot[\s_-]*0*(\d{1,3})\b/i;
+
+export function parseShotDescriptionNumber(description: string | null | undefined): number | null {
+  const match = description?.match(SHOT_DESCRIPTION_RE);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function buildAuditDecisionRecordInput(args: {
+  escalationId: string;
+  artifactId: string;
+  runId: string;
+  deliverableId?: string;
+  shotId: number;
+  imagePath: string;
+  verdict: ImageGradeResult;
+  traceId: string;
+}) {
+  const failureClass = args.verdict.detected_failure_classes[0] ?? null;
+  return {
+    escalationId: args.escalationId,
+    runId: args.runId,
+    iteration: 1,
+    inputContext: {
+      decision_type: "audit_verdict",
+      mode: "audit",
+      trace_id: args.traceId,
+      artifact_id: args.artifactId,
+      artifactId: args.artifactId,
+      deliverable_id: args.deliverableId ?? null,
+      deliverableId: args.deliverableId ?? null,
+      shot_id: args.shotId,
+      shotId: args.shotId,
+      image_path: args.imagePath,
+      imagePath: args.imagePath,
+      qa_verdict: args.verdict,
+    },
+    decision: {
+      decision_type: "audit_verdict",
+      action: args.verdict.recommendation,
+      verdict: args.verdict.verdict,
+      recommendation: args.verdict.recommendation,
+      aggregate_score: args.verdict.aggregate_score,
+      failure_class: failureClass,
+      detected_failure_classes: args.verdict.detected_failure_classes,
+      confidence: args.verdict.confidence,
+      summary: args.verdict.summary,
+      reasoning: args.verdict.reasoning,
+      trace_id: args.traceId,
+    },
+    model: args.verdict.model,
+    cost: args.verdict.cost,
+    latencyMs: args.verdict.latency_ms,
+  };
+}
+
+async function persistAuditVerdictDecision(
+  run: Run,
+  stageId: string,
+  result: AuditShotResult,
+  traceId: string,
+  deliverable?: CampaignDeliverable,
+): Promise<void> {
+  if (!result.verdict) return;
+  const padded = String(result.shotId).padStart(2, "0");
+  const artifact: Artifact = {
+    id: randomUUID(),
+    runId: run.runId,
+    clientId: run.clientId,
+    campaignId: run.campaignId,
+    deliverableId: deliverable?.id,
+    type: "image",
+    name: `audit_shot_${padded}.png`,
+    path: result.imagePath,
+    stage: stageId,
+    metadata: {
+      source: "stills_runner_audit_verdict",
+      auditMode: true,
+      shotNumber: result.shotId,
+      localPath: result.imagePath,
+      traceId,
+    },
+    createdAt: new Date().toISOString(),
+  };
+  const persistedArtifact = await addArtifact(artifact);
+  const escalation = await createEscalation({
+    artifactId: persistedArtifact.id,
+    deliverableId: deliverable?.id,
+    runId: run.runId,
+    currentLevel: "L1",
+    status: "resolved",
+    failureClass: result.verdict.detected_failure_classes[0],
+  });
+  await recordOrchestrationDecision(buildAuditDecisionRecordInput({
+    escalationId: escalation.id,
+    artifactId: persistedArtifact.id,
+    runId: run.runId,
+    deliverableId: deliverable?.id,
+    shotId: result.shotId,
+    imagePath: result.imagePath,
+    verdict: result.verdict,
+    traceId,
+  }));
+}
+
 /**
  * Audit mode — parallel critic on every locked still in the manifest. No
  * regen. Per-shot decision rows in `orchestration_decisions` form the audit
@@ -381,6 +492,26 @@ async function runAuditMode(
 ): Promise<boolean> {
   const stageId = "grade";
   const productionRoot = join(TEMP_GEN_PATH, "productions", manifest.productionSlug);
+  const deliverableByShot = new Map<number, CampaignDeliverable>();
+  if (run.campaignId) {
+    try {
+      const deliverables = await getDeliverablesByCampaign(run.campaignId);
+      for (const deliverable of deliverables) {
+        const shotNumber = parseShotDescriptionNumber(deliverable.description);
+        if (shotNumber !== null && !deliverableByShot.has(shotNumber)) {
+          deliverableByShot.set(shotNumber, deliverable);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await emitLog(
+        run.runId,
+        stageId,
+        "warn",
+        `[audit] failed to load deliverables for audit decision linkage (${msg}); decisions will be artifact/run-scoped only.`,
+      );
+    }
+  }
 
   // Collect shots that have a locked still PNG on disk. Skip with a log
   // line for missing ones — the manual flow shipped only the locked PNGs.
@@ -452,13 +583,9 @@ async function runAuditMode(
     },
   );
 
-  // Audit trail: emit a structured run_logs row per verdict. Phase F can
-  // upgrade this to a dedicated `pipeline_metrics` / `audit_reports` table
-  // when observability lands; for Phase B the parseable-log-line pattern
-  // matches the existing realtime SSE substrate the HUD already consumes.
-  // The orchestration_decisions table is intentionally NOT used for audit:
-  // the asset_escalations.artifact_id FK is NOT NULL and audits don't have
-  // an artifact row to anchor to.
+  // Audit trail: emit the legacy structured run_logs row and the canonical
+  // orchestration_decisions row. Audit verdicts get a synthetic artifact
+  // anchor because orchestration_decisions requires an escalation_id FK.
   for (const r of results) {
     if (!r.verdict) continue; // critic failed — already logged
     const v = r.verdict;
@@ -489,6 +616,24 @@ async function runAuditMode(
       cost: v.cost,
       traceId,
     });
+
+    try {
+      await persistAuditVerdictDecision(
+        run,
+        stageId,
+        r,
+        traceId,
+        deliverableByShot.get(r.shotId),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await emitLog(
+        run.runId,
+        stageId,
+        "warn",
+        `[audit] shot ${r.shotId}: failed to persist audit_verdict orchestration_decision (${msg}); run_logs/audit_report retain the verdict.`,
+      );
+    }
   }
 
   // Emit aggregate summary to logs (Phase F will hook a metrics emitter
@@ -573,9 +718,6 @@ const STILLS_IN_LOOP_HARD_CAP = 8;
 
 // ─── In-loop targeting (pure helper, exported for unit testing) ────────────
 
-/** "Shot 7", "Shot 07", "shot_7", "shot-7" — case-insensitive. */
-const SHOT_DESCRIPTION_RE = /\bshot[\s_-]*(\d{1,2})\b/i;
-
 export type InLoopTarget = {
   shot: ManifestShot;
   deliverable: CampaignDeliverable;
@@ -596,6 +738,33 @@ export type InLoopTargetingDecision = {
     description?: string;
   }>;
 };
+
+export function buildHardCapHitlPlan(args: {
+  runId: string;
+  shotId: number;
+  iter: number;
+  hardCap: number;
+  deliverableId: string;
+  artifactId: string;
+  verdict?: ImageGradeResult | null;
+}) {
+  const failureClass = args.verdict?.detected_failure_classes[0];
+  return {
+    runUpdates: {
+      hitlRequired: true,
+      hitlNotes: `[stills in_loop] shot ${args.shotId} exhausted hard iter cap ${args.hardCap} at iter ${args.iter}; deliverable ${args.deliverableId}; artifact ${args.artifactId}.`,
+    },
+    escalation: {
+      artifactId: args.artifactId,
+      deliverableId: args.deliverableId,
+      runId: args.runId,
+      currentLevel: "L3" as const,
+      status: "hitl_required" as const,
+      failureClass,
+    },
+    resolutionNotes: `Forced HITL after STILLS_IN_LOOP_HARD_CAP=${args.hardCap} for shot ${args.shotId}.`,
+  };
+}
 
 /**
  * Decide which (shot, deliverable) pairs to iterate in in-loop mode.
@@ -628,8 +797,7 @@ export function pickInLoopTargets(
 
   const findDeliverableForShot = (shotId: number): CampaignDeliverable | null => {
     const found = allDeliverables.find((d) => {
-      const m = d.description?.match(SHOT_DESCRIPTION_RE);
-      return m ? Number.parseInt(m[1], 10) === shotId : false;
+      return parseShotDescriptionNumber(d.description) === shotId;
     });
     return found ?? null;
   };
@@ -660,8 +828,7 @@ export function pickInLoopTargets(
       });
       continue;
     }
-    const m = d.description?.match(SHOT_DESCRIPTION_RE);
-    const shotNumber = m ? Number.parseInt(m[1], 10) : null;
+    const shotNumber = parseShotDescriptionNumber(d.description);
     if (shotNumber === null || !Number.isFinite(shotNumber)) {
       skipped.push({
         reason: "couldnt_parse_shot_number",
@@ -751,6 +918,8 @@ async function runInLoopMode(
 
     let iter = 0;
     let lastArtifact: Artifact | null = null;
+    let lastCandidate: Artifact | null = null;
+    let lastVerdict: ImageGradeResult | null = null;
     while (iter < STILLS_IN_LOOP_HARD_CAP) {
       iter += 1;
 
@@ -769,6 +938,7 @@ async function runInLoopMode(
       // Read order: metadata.localPath → path → fallback locked still on disk.
       const candidateLocalPath = (candidate?.metadata as { localPath?: string } | undefined)?.localPath;
       const imagePath = candidateLocalPath ?? candidate?.path ?? stillPath;
+      lastCandidate = candidate ?? null;
       if (!existsSync(imagePath)) {
         await emitLog(
           run.runId,
@@ -800,6 +970,7 @@ async function runInLoopMode(
         );
         break;
       }
+      lastVerdict = verdict;
 
       await emitLog(
         run.runId,
@@ -863,6 +1034,7 @@ async function runInLoopMode(
               createdAt: new Date().toISOString(),
             };
             candidate = await addArtifact(seeded);
+            lastCandidate = candidate;
             await emitLog(
               run.runId,
               stageId,
@@ -887,6 +1059,7 @@ async function runInLoopMode(
               createdAt: new Date().toISOString(),
             };
             candidate = await addArtifact(seeded);
+            lastCandidate = candidate;
             await emitLog(
               run.runId,
               stageId,
@@ -1078,6 +1251,56 @@ async function runInLoopMode(
         "warn",
         `[in_loop] shot ${shot.id}: hit hard iter cap ${STILLS_IN_LOOP_HARD_CAP}. Forcing HITL.`,
       );
+      const hitlArtifact = lastArtifact ?? lastCandidate;
+      if (!hitlArtifact) {
+        await emitLog(
+          run.runId,
+          stageId,
+          "warn",
+          `[in_loop] shot ${shot.id}: hard-cap HITL persistence skipped because no artifact was available to anchor asset_escalations.`,
+        );
+      } else {
+        const plan = buildHardCapHitlPlan({
+          runId: run.runId,
+          shotId: shot.id,
+          iter,
+          hardCap: STILLS_IN_LOOP_HARD_CAP,
+          deliverableId: deliverable.id,
+          artifactId: hitlArtifact.id,
+          verdict: lastVerdict,
+        });
+        try {
+          const updated = await updateRun(run.runId, plan.runUpdates);
+          if (updated) run = updated;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await emitLog(
+            run.runId,
+            stageId,
+            "warn",
+            `[in_loop] shot ${shot.id}: failed to bubble hard-cap hitl_required to runs row (${msg}).`,
+          );
+        }
+        try {
+          const existing = await getEscalationByArtifact(hitlArtifact.id, run.runId);
+          const escalation = existing
+            ? await updateEscalation(existing.id, {
+                status: "hitl_required",
+                failureClass: plan.escalation.failureClass,
+                resolutionNotes: plan.resolutionNotes,
+              })
+            : await createEscalation(plan.escalation);
+          runEvents.emit(`escalation:${run.runId}`, escalation);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await emitLog(
+            run.runId,
+            stageId,
+            "warn",
+            `[in_loop] shot ${shot.id}: failed to persist hard-cap asset_escalation (${msg}).`,
+          );
+        }
+      }
     }
     if (lastArtifact) {
       // Reserved for a future regen→artifact closure step.
