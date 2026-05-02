@@ -213,12 +213,22 @@ Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 - **Fast iteration** — when the spec is clear and it's build-not-design
 - Karl runs in `~/proto_front` with full filesystem access
 
-**Karl's runtime — the canonical mechanism (locked-in 2026-04-30):**
+**Karl's runtime — the canonical mechanism (locked-in 2026-04-30, hardened 2026-05-02):**
 
-Karl runs as a **persistent codex TUI in tmux pane `brandy-proto_front:agents.2`**, launched via start-brandy.sh as `codex -p karl-max` (gpt-5.5 xhigh, YOLO mode, ~/proto_front cwd). Brandy dispatches by sending keys into that existing TUI session via `agent-comm`:
+Karl runs as a **persistent codex TUI in tmux pane `brandy-proto_front:agents.2`**, launched via start-brandy.sh as `codex -p karl-max`. The `-p karl-max` flag is **non-negotiable** — without it codex starts with raw defaults (no YOLO, no full-access sandbox), Karl will hit a permission prompt the moment he tries to write/commit/push, and someone has to babysit. Always launch with the profile.
+
+**What `-p karl-max` actually pins (per `~/.codex/config.toml`):**
+- `model = "gpt-5.5"` (current latest — bump this in config.toml when OpenAI ships next-gen; not auto)
+- `model_reasoning_effort = "xhigh"` (extra-high reasoning depth)
+- `approval_policy = "never"` (= YOLO — no per-tool prompts)
+- `sandbox_mode = "danger-full-access"` (= file writes anywhere, network, npm, git push without prompts)
+- `web_search = "cached"` (live web search via `karl-research` profile)
+- `model_instructions_file = ~/.codex/karl-instructions.md` (loads vault protocol, status save, daily-log appends)
+
+Brandy dispatches by sending keys into that existing TUI session via `agent-comm`:
 
 ```bash
-agent-comm send karl "In ~/proto_front, [specific task]. Files: [list]. 
+agent-comm send karl "In ~/proto_front, [specific task]. Files: [list].
 Follow the patterns in [existing file]. Today is [date]."
 
 # Status / read helpers
@@ -226,6 +236,15 @@ agent-comm status karl                              # idle | busy | unknown
 agent-comm last karl                                # most recent screen capture
 tmux capture-pane -t brandy-proto_front:agents.2 -p # full pane snapshot
 ```
+
+**Brandy session env note:** `agent-comm`'s session detection falls through to `brandy-brandy-agent-team` if `BRANDY_SESSION` is unset AND the working directory's basename doesn't match its case statement (proto_front, brandstudios-dashboard, brandstudios-landing, brandy-agent-team, personal, thegroupproject, Teach). When Brandy is `cd`'d into a subdirectory like `~/proto_front/brand-engine`, the basename `brand-engine` falls through and `agent-comm` reports `can't find session: brandy-brandy-agent-team`. Fix: write a session marker so subsequent calls resolve correctly:
+
+```bash
+echo "brandy-proto_front" > ~/agent-vault/streams/.session
+# Or set per-call: BRANDY_SESSION=brandy-proto_front agent-comm send karl "..."
+```
+
+The marker is read on every `agent-comm` invocation if `BRANDY_SESSION` env is unset.
 
 **DO NOT raw-spawn `codex exec --ephemeral` from Brandy's Bash tool to dispatch Karl.** Burned 2 hours of session time on this 2026-04-30: the codex app-server daemon caches workdir state across invocations, and ephemeral sessions inherit that state instead of `-C` + inline `BRANDY_DOMAIN` env vars. Result: Karl repeatedly landed in whichever domain's repo had the most-recent codex app-server activity (e.g., teachce-portal), not `proto_front`. The TUI panel + agent-comm bypasses this entirely — same persistent session, same workdir, same auth state.
 
@@ -267,13 +286,39 @@ tmux capture-pane -t brandy-proto_front:agents.2 -p -S -100 | tail -25
 tmux send-keys -t brandy-proto_front:agents.2 "codex -p karl-max" Enter
 sleep 14  # codex bootstrap — 8-14s
 tmux capture-pane -t brandy-proto_front:agents.2 -p -S -100 | tail -15
-# Verify the OpenAI Codex banner appears with:
-#   model:       gpt-5.5 xhigh
-#   directory:   ~/proto_front
-#   permissions: YOLO mode
 ```
 
+**Banner verification — ALL THREE lines must be present (lesson learned 2026-05-02):**
+
+```
+╭──────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.128.0)                   │
+│                                              │
+│ model:       gpt-5.5 xhigh                   │  ← model + reasoning effort
+│ directory:   ~/proto_front                   │  ← cwd
+│ permissions: YOLO mode                       │  ← profile loaded ✓
+╰──────────────────────────────────────────────╯
+```
+
+If `permissions: YOLO mode` is **missing** from the banner, the `karl-max` profile did NOT load. Karl will hit prompts on the first write/commit/push. **Stop-the-world condition** — kill the codex (Ctrl-C twice or `q` to quit), then re-launch with the explicit `-p karl-max` flag:
+
+```bash
+tmux send-keys -t brandy-proto_front:agents.2 C-c C-c  # quit codex cleanly
+sleep 2
+tmux send-keys -t brandy-proto_front:agents.2 "codex -p karl-max" Enter
+sleep 14
+tmux capture-pane -t brandy-proto_front:agents.2 -p -S -100 | tail -15
+# Verify ALL THREE banner lines including "permissions: YOLO mode"
+```
+
+**Common mistakes that strip YOLO:**
+- Typing just `codex` instead of `codex -p karl-max` (uses raw defaults, no profile)
+- Codex prompted for sign-in (device-code OAuth flow) — after sign-in the profile may not auto-apply; verify the banner
+- Profile config.toml was edited mid-session (codex caches profile state per-process; restart picks up changes)
+
 Then dispatch via agent-comm as usual.
+
+**Keeping Karl on the newest model:** the `karl-max` profile pins `model = "gpt-5.5"` literally. When OpenAI ships gpt-5.6 / gpt-6 / next-gen, the `model = ` line in `~/.codex/config.toml` must be manually bumped. The Codex CLI binary itself auto-updates via `start-brandy.sh:update_agents()` (npm install -g @openai/codex@latest), but the model name in the profile does not. After bumping config.toml, restart any running Karl panel to pick up the new model.
 
 ### Jackie (Gemini / 3.1 Pro) — research + multimodal
 - **Large context analysis** — reading entire codebases, audit docs, spec documents
