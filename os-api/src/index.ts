@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 import dotenv from "dotenv";
-import { createReadStream, existsSync } from "fs";
+import { createReadStream } from "fs";
 import path from "path";
 import type { Request, Response } from "express";
 import type { Run, RunCreatePayload, ReviewPayload } from "./types.js";
@@ -62,6 +62,9 @@ import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 import { createProductionsRouter } from "./productions.js";
+import { getTempGenDir } from "./temp-gen-env.js";
+import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
+import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
 
 dotenv.config();
 
@@ -132,6 +135,11 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
+      return;
+    }
+    const modeFlag = validateRunModeFeatureFlag(mode);
+    if (!modeFlag.ok) {
+      res.status(modeFlag.status).json({ error: modeFlag.error });
       return;
     }
 
@@ -227,6 +235,15 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
     if (!client) {
       res.status(404).json({ error: "Client not found" });
       return;
+    }
+
+    if (campaignId) {
+      const campaign = await getCampaign(campaignId);
+      const campaignScope = validateCampaignClientScope(campaign, clientId);
+      if (!campaignScope.ok) {
+        res.status(campaignScope.status).json({ error: campaignScope.error });
+        return;
+      }
     }
 
     if (campaignId && normalizedDeliverableIds && normalizedDeliverableIds.length > 0) {
@@ -621,7 +638,7 @@ app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) =
       return;
     }
 
-    const tempGenRoot = path.resolve(process.env.TEMP_GEN_PATH ?? "/Users/timothysepulvado/Temp-gen");
+    const tempGenRoot = getTempGenDir();
     const localPath = artifactLocalPathFromMetadata(artifact.metadata)
       ?? (artifact.path.startsWith("/") ? artifact.path : null);
     if (!localPath) {
@@ -629,14 +646,23 @@ app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) =
       return;
     }
 
-    const resolved = path.resolve(localPath);
-    if (!resolved.startsWith(`${tempGenRoot}${path.sep}`) && resolved !== tempGenRoot) {
-      res.status(403).json({ error: "Artifact file is outside the configured Temp-gen root" });
-      return;
-    }
-    if (!existsSync(resolved)) {
-      res.status(404).json({ error: "Artifact file not found on disk" });
-      return;
+    let resolved: string;
+    try {
+      resolved = resolveExistingRealPathInsideAllowedRoots(localPath, [tempGenRoot], {
+        missingMessage: "Artifact file not found on disk",
+        missingRootMessage: "Configured Temp-gen root not found on disk",
+        forbiddenMessage: "Artifact file is outside the configured Temp-gen root",
+      });
+    } catch (err) {
+      if (err instanceof ForbiddenPathError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
+      if (err instanceof PathNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      throw err;
     }
 
     res.setHeader("Content-Type", imageContentType(resolved));
