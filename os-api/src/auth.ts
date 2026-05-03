@@ -5,9 +5,16 @@ export const CLIENT_JWT_EXPIRES_IN_SECONDS = 3600;
 
 const JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
 const JWT_AUTH_ENABLED = process.env.JWT_AUTH_ENABLED === "true";
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
-if (JWT_AUTH_ENABLED && !JWT_SECRET) {
-  throw new Error("SUPABASE_JWT_SECRET required when JWT_AUTH_ENABLED=true");
+if (JWT_AUTH_ENABLED) {
+  if (!JWT_SECRET) throw new Error("SUPABASE_JWT_SECRET required when JWT_AUTH_ENABLED=true");
+  if (!SUPABASE_SECRET_KEY) {
+    throw new Error(
+      "SUPABASE_SECRET_KEY required when JWT_AUTH_ENABLED=true — mintClientJwt's clients lookup " +
+        "needs RLS bypass; legacy SUPABASE_KEY fallback would fail under migration 015 RLS policies.",
+    );
+  }
 }
 
 export async function mintClientJwt(clientId: string): Promise<string> {
