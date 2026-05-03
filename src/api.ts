@@ -1,7 +1,7 @@
 import { supabase } from "./lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-const JWT_AUTH_ENABLED = import.meta.env.VITE_JWT_AUTH_ENABLED === "true";
+const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
 export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
@@ -353,26 +353,13 @@ function mapDbClientToClient(dbClient: DbClient): Client {
 
 // Get all clients
 export async function getClients(): Promise<Client[]> {
-  // When JWT auth is enabled, bootstrap the client switcher through os-api's
-  // service-role path. A client-scoped JWT cannot list sibling client rows, and
-  // App.tsx must avoid any direct Supabase reads until the active client token is
-  // applied.
-  if (JWT_AUTH_ENABLED) {
-    const resp = await fetch(`${OS_API_URL}/api/clients`);
-    if (!resp.ok) throw await parseOsApiError(resp);
-    return (await resp.json()) as Client[];
-  }
-
-  const { data, error } = await supabase
-    .from("clients")
-    .select("*")
-    .order("name");
-
-  if (error) {
-    throw new Error(`Failed to get clients: ${error.message}`);
-  }
-
-  return (data as DbClient[]).map(mapDbClientToClient);
+  // Bootstrap the client switcher through os-api's service-role path in both
+  // JWT-on and JWT-off modes. After migration 015, direct anon reads of
+  // `clients` return 0 rows under RLS, which would break the default
+  // JWT_AUTH_ENABLED=false HUD boot path.
+  const resp = await fetch(`${OS_API_URL}/api/clients`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Client[];
 }
 
 // Get a single client
@@ -1448,8 +1435,6 @@ export function subscribeToDriftAlerts(
 }
 
 // ============ Platform Variant Operations ============
-
-const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
 export async function createStillsAuditRun(clientId: string, campaignId: string): Promise<Run> {
   const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
