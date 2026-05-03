@@ -317,13 +317,25 @@ async function assertTenantMismatchValidation(rows: SeededClientRows): Promise<v
 async function assertAnonBlocked(client: SupabaseClient): Promise<void> {
   for (const tbl of PER_CLIENT_TABLES) {
     const { data, error } = await client.from(tbl).select("id, client_id");
-    if (error) continue;
+    if (error) {
+      const isExpectedDeny =
+        error.code === "PGRST301" ||
+        error.code === "42501" ||
+        error.message.includes("permission") ||
+        error.message.includes("RLS");
+      if (!isExpectedDeny) {
+        throw new Error(
+          `[anon] ${tbl} unexpected error (not RLS deny): ${error.code} ${error.message}`,
+        );
+      }
+      continue;
+    }
     const rows = data ?? [];
     if (rows.length > 0) {
       throw new Error(`[anon] ${tbl} returned ${rows.length} row(s); expected 0 rows or RLS deny`);
     }
   }
-  console.log("✓ anon (no JWT) blocked on per-client tables");
+  console.log("✓ anon (no JWT) blocked or returned 0 rows on per-client tables");
 }
 
 async function assertGlobalReadable(client: SupabaseClient, label: string): Promise<void> {
