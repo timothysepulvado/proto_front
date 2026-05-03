@@ -54,7 +54,7 @@ proto_front/
 │   ├── types.ts            ← Shared types (Run, Artifact, Campaign, DriftAlert, MotionPhaseGate, DirectionDriftIndicator, ArtifactIterationRow, etc.)
 │   ├── storage.ts          ← Supabase Storage upload (dual-write to Cloudinary)
 │   ├── cloudinary.ts       ← Optional CDN — 10 platform presets
-│   └── tests/              ← Per-gap typed test suites: _gap4-recent-runs, _gap5-canonical-reference, _gap6-motion-phase-gate, _gap7-direction-drift, _gap8-artifact-iterations + _10d-shot-summaries (16/16) + phase-b-stills-runner (14/14)
+│   └── tests/              ← Per-gap typed test suites: _gap4-recent-runs, _gap5-canonical-reference, _gap6-motion-phase-gate, _gap7-direction-drift, _gap8-artifact-iterations + _10d-shot-summaries (16/16) + phase-b-stills-runner (24/24, +10 from PR #2 review 0.A.1-0.A.8 + 0.B.6-0.B.7)
 │
 ├── worker/                 ← Python worker (headless run execution)
 │   ├── worker.py           ← Polls Supabase for runs (filtered: not in OS_API_OWNED_MODES)
@@ -66,7 +66,7 @@ proto_front/
 │   ├── api/server.py       ← FastAPI sidecar on :8100 (X-Trace-Id passthrough on /grade_image_v2)
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 12 migrations (001-012). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection
+├── supabase/migrations/    ← 13 migrations (001-013). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection; 013 clients.ui_config JSONB (multi-tenant presentation overrides — display_name/entity_label/featured + future UI flags, matches storage_config pattern)
 ├── output/playwright/      ← Visual QA captures — 28 post-direction-fix-pass-gap{1..8}-{1440,768,375}.png + variants (compare/enabled/blocked/collapsed)
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements, runbooks/stills-mode.md
@@ -192,7 +192,7 @@ The proto_front `.mcp.json` still exists for cases where a Brandy session needs 
 **Storage:** `artifacts` bucket for generated images/videos. Public URLs in artifacts table.
 Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 
-**Migrations:** `supabase/migrations/001-007` — all applied (007 via Management API 2026-04-17).
+**Migrations:** `supabase/migrations/001-013` — all applied (007 via Management API 2026-04-17; 013 via `supabase db query --linked < migrations/013_*.sql` with project-scoped PAT 2026-05-02).
 
 ---
 
