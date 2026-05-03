@@ -494,6 +494,7 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
 
     // Record the HITL decision in hitl_decisions table
     const decision = await addHitlDecision({
+      clientId: run.clientId,
       runId,
       artifactId,
       decision: "approved",
@@ -548,6 +549,7 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
 
     // Record the HITL decision in hitl_decisions table
     const decision = await addHitlDecision({
+      clientId: run.clientId,
       runId,
       artifactId,
       decision: "rejected",
@@ -1025,12 +1027,18 @@ app.get("/api/campaigns/:campaignId/shot-summaries", async (req: Request, res: R
 app.post("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+    const campaign = await getCampaign(campaignId);
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
     const {
       description, aiModel, originalPrompt,
       format, mediaType, durationSeconds, aspectRatio,
       resolution, platform, qualityTier, referenceImages, estimatedCost,
     } = req.body;
     const deliverable = await createDeliverable({
+      clientId: campaign.clientId,
       campaignId,
       description,
       aiModel,

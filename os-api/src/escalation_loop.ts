@@ -130,7 +130,7 @@ export interface QAFailureResult {
  * We keep that separation because the runner already owns the sidecar wrappers.
  */
 export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureResult> {
-  const { runId, artifact, qaVerdict, stageId, runEvents, logger } = ctx;
+  const { runId, clientId, artifact, qaVerdict, stageId, runEvents, logger } = ctx;
 
   await logger("info", `[${stageId}] Escalation loop: handling QA failure for artifact ${artifact.id}`);
 
@@ -154,6 +154,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       ? await getLatestOpenEscalationForDeliverableInRun(artifact.deliverableId, runId)
       : null;
     escalation = await createEscalation({
+      clientId,
       artifactId: artifact.id,
       deliverableId: artifact.deliverableId,
       runId,
@@ -343,6 +344,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
     };
     const iter = escalation.iterationCount + 1;
     await recordOrchestrationDecision({
+      clientId,
       escalationId: escalation.id,
       runId,
       iteration: iter,
@@ -429,6 +431,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   // 5. Record the decision
   const iteration = escalation.iterationCount + 1;
   await recordOrchestrationDecision({
+    clientId,
     escalationId: escalation.id,
     runId,
     iteration,

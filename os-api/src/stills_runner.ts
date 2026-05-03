@@ -386,6 +386,7 @@ export function parseShotDescriptionNumber(description: string | null | undefine
 }
 
 export function buildAuditDecisionRecordInput(args: {
+  clientId: string;
   escalationId: string;
   artifactId: string;
   runId: string;
@@ -397,6 +398,7 @@ export function buildAuditDecisionRecordInput(args: {
 }) {
   const failureClass = args.verdict.detected_failure_classes[0] ?? null;
   return {
+    clientId: args.clientId,
     escalationId: args.escalationId,
     runId: args.runId,
     iteration: 1,
@@ -463,6 +465,7 @@ async function persistAuditVerdictDecision(
   };
   const persistedArtifact = await addArtifact(artifact);
   const escalation = await createEscalation({
+    clientId: run.clientId,
     artifactId: persistedArtifact.id,
     deliverableId: deliverable?.id,
     runId: run.runId,
@@ -471,6 +474,7 @@ async function persistAuditVerdictDecision(
     failureClass: result.verdict.detected_failure_classes[0],
   });
   await recordOrchestrationDecision(buildAuditDecisionRecordInput({
+    clientId: run.clientId,
     escalationId: escalation.id,
     artifactId: persistedArtifact.id,
     runId: run.runId,
@@ -743,6 +747,7 @@ export type InLoopTargetingDecision = {
 };
 
 export function buildHardCapHitlPlan(args: {
+  clientId: string;
   runId: string;
   shotId: number;
   iter: number;
@@ -758,6 +763,7 @@ export function buildHardCapHitlPlan(args: {
       hitlNotes: `[stills in_loop] shot ${args.shotId} exhausted hard iter cap ${args.hardCap} at iter ${args.iter}; deliverable ${args.deliverableId}; artifact ${args.artifactId}.`,
     },
     escalation: {
+      clientId: args.clientId,
       artifactId: args.artifactId,
       deliverableId: args.deliverableId,
       runId: args.runId,
@@ -1264,6 +1270,7 @@ async function runInLoopMode(
         );
       } else {
         const plan = buildHardCapHitlPlan({
+          clientId: run.clientId,
           runId: run.runId,
           shotId: shot.id,
           iter,

@@ -191,6 +191,7 @@ async function upsertDeliverable(shot: ManifestShot): Promise<void> {
   const id = deliverableIdFor(shot.id);
   const row = {
     id,
+    client_id: CLIENT_ID,
     campaign_id: CAMPAIGN_ID,
     description: shotDescription(shot),
     ai_model: "veo-3.1-lite-generate-001",

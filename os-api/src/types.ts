@@ -68,6 +68,7 @@ export interface Run {
 
 export interface DriftMetric {
   id?: string;
+  clientId?: string;
   runId: string;
   artifactId?: string;
   clipZ?: number;
@@ -112,6 +113,7 @@ export interface BrandBaseline {
 
 export interface RunLog {
   id: number;
+  clientId?: string;
   runId: string;
   timestamp: string;
   stage: string;
@@ -146,6 +148,7 @@ export interface Artifact {
 
 export interface CampaignDeliverable {
   id: string;
+  clientId?: string;
   campaignId: string;
   description?: string;
   aiModel?: string;
@@ -186,6 +189,7 @@ export interface Campaign {
 
 export interface HitlDecision {
   id?: string;
+  clientId?: string;
   runId: string;
   artifactId?: string;
   decision: "approved" | "rejected" | "needs_revision";
@@ -321,6 +325,7 @@ export interface KnownLimitation {
 
 export interface AssetEscalation {
   id: string;
+  clientId?: string;
   artifactId: string;
   deliverableId?: string;
   runId?: string;
@@ -339,6 +344,7 @@ export interface AssetEscalation {
 
 export interface OrchestrationDecisionRecord {
   id: string;
+  clientId?: string;
   escalationId: string;
   runId?: string;
   iteration: number;
