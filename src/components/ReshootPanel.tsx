@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Clock3, Film, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, Clock3, Film, Loader2, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import {
   getProductionShots,
   getProductionStillUrl,
   subscribeToProductionEvents,
   triggerProductionRender,
   type ProductionEvent,
+  type ProductionCanonicalReference,
   type ProductionRenderArtifact,
   type ProductionShotState,
   type ProductionSlug,
@@ -14,6 +15,10 @@ import ShotReshootDrawer from "./ShotReshootDrawer";
 
 interface ReshootPanelProps {
   productionSlug?: ProductionSlug;
+  onShotSelect?: (shotNumber: number) => void;
+  activeShotNumber?: number | null;
+  openDrawerOnSelect?: boolean;
+  showRenderControls?: boolean;
 }
 
 function formatBytes(bytes: number | undefined): string {
@@ -35,6 +40,25 @@ function formatDate(iso: string | undefined): string {
 
 function formatBeat(beat: string): string {
   return beat ? beat.replace(/_/g, " ") : "unmapped";
+}
+
+function labelizeCharacter(name: string): string {
+  const replacements: Record<string, string> = {
+    brandy: "Brandy",
+    mech_openai: "OpenAI mech",
+    mech_claude: "Claude mech",
+    mech_gemini: "Gemini mech",
+    mech_grok: "Grok mech",
+    rapper_1: "Rapper 1",
+    rapper_2: "Rapper 2",
+  };
+  return replacements[name] ?? name.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+}
+
+function canonicalReferenceFootnote(references: ProductionCanonicalReference[] | undefined) {
+  if (!references?.length) return null;
+  const names = references.map((reference) => labelizeCharacter(reference.characterName)).join(", ");
+  return `Will use canonical ${names} reference`;
 }
 
 function eventShotNumber(event: ProductionEvent): number | null {
@@ -75,7 +99,13 @@ function StatusBadge({ shot, regenerating }: { shot: ProductionShotState; regene
   );
 }
 
-export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPanelProps) {
+export default function ReshootPanel({
+  productionSlug = "drift-mv",
+  onShotSelect,
+  activeShotNumber = null,
+  openDrawerOnSelect = true,
+  showRenderControls = true,
+}: ReshootPanelProps) {
   const [shots, setShots] = useState<ProductionShotState[]>([]);
   const [renderArtifact, setRenderArtifact] = useState<ProductionRenderArtifact | null>(null);
   const [selectedShotNumber, setSelectedShotNumber] = useState<number | null>(null);
@@ -203,6 +233,16 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
   const backupCount = shots.filter((shot) => shot.canonical.backupExists).length;
   const renderDisabled = renderInFlight || !hasPromoteSinceRender;
 
+  const handleShotSelect = (shotNumber: number) => {
+    onShotSelect?.(shotNumber);
+    if (openDrawerOnSelect) setSelectedShotNumber(shotNumber);
+  };
+
+  const handleOpenDrawer = (shotNumber: number) => {
+    onShotSelect?.(shotNumber);
+    setSelectedShotNumber(shotNumber);
+  };
+
   const handleRender = async () => {
     setRenderProgress(null);
     setError(null);
@@ -231,23 +271,25 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
               <span>{backupCount} backups</span>
             </div>
           </div>
-          <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
-            {renderProgress && (
-              <span className={`max-w-xs truncate rounded-full border px-3 py-1.5 text-[8px] font-mono uppercase tracking-wider ${renderInFlight ? "border-cyan-500/25 bg-cyan-500/10 text-cyan-200" : "border-white/10 bg-white/[0.03] text-white/40"}`}>
-                {renderProgress}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={handleRender}
-              disabled={renderDisabled}
-              title={renderDisabled && !renderInFlight ? "Promote a pending take first to enable re-render" : "Re-render final cut"}
-              className="flex items-center justify-center rounded-2xl bg-[#ED4C14] px-4 py-3 text-[10px] font-black uppercase tracking-[0.22em] text-white shadow-[0_0_24px_rgba(237,76,20,0.18)] transition-all hover:bg-orange-400 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-orange-300/50"
-            >
-              {renderInFlight ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCw size={14} className="mr-2" />}
-              Re-render Final Cut
-            </button>
-          </div>
+          {showRenderControls && (
+            <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+              {renderProgress && (
+                <span className={`max-w-xs truncate rounded-full border px-3 py-1.5 text-[8px] font-mono uppercase tracking-wider ${renderInFlight ? "border-cyan-500/25 bg-cyan-500/10 text-cyan-200" : "border-white/10 bg-white/[0.03] text-white/40"}`}>
+                  {renderProgress}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleRender}
+                disabled={renderDisabled}
+                title={renderDisabled && !renderInFlight ? "Promote a pending take first to enable re-render" : "Re-render final cut"}
+                className="flex items-center justify-center rounded-2xl bg-[#ED4C14] px-4 py-3 text-[10px] font-black uppercase tracking-[0.22em] text-white shadow-[0_0_24px_rgba(237,76,20,0.18)] transition-all hover:bg-orange-400 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45 focus:outline-none focus:ring-2 focus:ring-orange-300/50"
+              >
+                {renderInFlight ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCw size={14} className="mr-2" />}
+                Re-render Final Cut
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -273,16 +315,24 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {shots.map((shot) => {
-            const regenerating = activeRegens.has(shot.shotNumber);
-            return (
-              <button
-                key={shot.shotNumber}
-                type="button"
-                onClick={() => setSelectedShotNumber(shot.shotNumber)}
-                className={`group relative overflow-hidden rounded-2xl border bg-white/[0.025] p-3 text-left transition-all hover:-translate-y-0.5 hover:border-cyan-400/40 hover:bg-white/[0.045] focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${shot.pending ? "border-amber-500/25" : regenerating ? "border-cyan-400/35" : "border-white/10"}`}
-              >
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            {shots.map((shot) => {
+              const regenerating = activeRegens.has(shot.shotNumber);
+              const canonicalFootnote = canonicalReferenceFootnote(shot.canonicalReferences);
+              return (
+                <article
+                  key={shot.shotNumber}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleShotSelect(shot.shotNumber)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      handleShotSelect(shot.shotNumber);
+                    }
+                  }}
+                  className={`group relative cursor-pointer overflow-hidden rounded-2xl border bg-white/[0.025] p-3 text-left transition-all hover:-translate-y-0.5 hover:border-cyan-400/40 hover:bg-white/[0.045] focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${activeShotNumber === shot.shotNumber ? "border-[#ED4C14]/60 shadow-[0_0_26px_rgba(237,76,20,0.16)]" : shot.pending ? "border-amber-500/25" : regenerating ? "border-cyan-400/35" : "border-white/10"}`}
+                >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="font-mono text-xs font-black uppercase text-white">
@@ -314,19 +364,38 @@ export default function ReshootPanel({ productionSlug = "drift-mv" }: ReshootPan
                   {shot.visualIntent || "Visual intent not captured for this shot."}
                 </p>
 
-                <div className="mt-3 flex items-center justify-between gap-2 text-[8px] font-mono uppercase tracking-wider text-white/30">
-                  <span>{shot.durationS}s · {shot.startS}s</span>
-                  {shot.canonical.backupExists && (
-                    <span className="rounded-full border border-white/10 px-2 py-0.5 text-white/35">Backup available</span>
+                  {canonicalFootnote && (
+                    <p className="mt-2 flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-[0.16em] text-emerald-200/55">
+                      <ShieldCheck size={10} />
+                      <span className="truncate">{canonicalFootnote}</span>
+                    </p>
                   )}
-                </div>
-                {shot.pending && (
-                  <div className="absolute right-3 top-12 rounded-full bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,0.65)] h-2 w-2" />
-                )}
-                {regenerating && <div className="absolute inset-x-0 bottom-0 h-0.5 bg-cyan-400 animate-pulse" />}
-              </button>
-            );
-          })}
+
+                  <div className="mt-3 flex items-center justify-between gap-2 text-[8px] font-mono uppercase tracking-wider text-white/30">
+                    <span>{shot.durationS}s · {shot.startS}s</span>
+                    {shot.canonical.backupExists && (
+                      <span className="rounded-full border border-white/10 px-2 py-0.5 text-white/35">Backup available</span>
+                    )}
+                  </div>
+                  {!openDrawerOnSelect && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleOpenDrawer(shot.shotNumber);
+                      }}
+                      className="mt-3 w-full rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2 text-center text-[8px] font-mono font-bold uppercase tracking-[0.2em] text-cyan-200/75 transition-all hover:border-cyan-300/45 hover:bg-cyan-500/18 hover:text-cyan-100 focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
+                    >
+                      Reshoot controls
+                    </button>
+                  )}
+                  {shot.pending && (
+                    <div className="absolute right-3 top-12 h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,0.65)]" />
+                  )}
+                  {regenerating && <div className="absolute inset-x-0 bottom-0 h-0.5 bg-cyan-400 animate-pulse" />}
+                </article>
+              );
+            })}
         </div>
       )}
 

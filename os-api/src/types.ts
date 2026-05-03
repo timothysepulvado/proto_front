@@ -9,7 +9,7 @@
  * orchestrator asks for it (L1/L2/L3). Idempotent at the deliverable level —
  * deliverables already in terminal-good state (`approved`) are skipped.
  */
-export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade";
+export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 
@@ -50,6 +50,20 @@ export interface Run {
   error?: string;
   hitlRequired?: boolean;
   hitlNotes?: string;
+  /**
+   * Free-form per-run JSONB. ADR-004 Phase B uses two keys:
+   *   - `audit_mode: boolean` — set at run creation by the route handler so
+   *     the runner knows audit vs in-loop without depending on in-memory
+   *     state surviving an os-api restart.
+   *   - `audit_report: { runId, traceId, summary, shots: [...] }` — written
+   *     at audit-mode completion as the canonical triage payload the HUD
+   *     queries (one row, vs grep-scanning run_logs).
+   *   - `trace_id: string` — propagated as X-Trace-Id on brand-engine calls.
+   *   - `production_slug: string` — runner-resolved slug for the manifest.
+   * Other modes may add their own keys; runner writes are read-modify-write.
+   * Backed by migration 011_runs_metadata.sql (NOT NULL DEFAULT '{}').
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface DriftMetric {
@@ -237,6 +251,27 @@ export interface RunCreatePayload {
   campaignId?: string;
   deliverableIds?: string[];
   inputs?: Record<string, unknown>;
+  /**
+   * ADR-004 Phase B (mode === "stills"):
+   *   - true  → audit mode (parallel critic, no regen)
+   *   - false → in-loop mode (per-shot critic + orchestrator + regen)
+   * Ignored for all other modes. Audit mode requires `campaignId` to scope
+   * the audit; the route rejects `auditMode: true` without `campaignId`.
+   */
+  auditMode?: boolean;
+  /**
+   * Phase B+ targeted-regen (2026-04-30, mode === "stills" + auditMode: false):
+   * when set, the in-loop runner treats this list as authoritative scope —
+   * iterates exactly these manifest shot IDs and bypasses the default
+   * `status NOT IN (approved, rejected)` deliverable filter. Every entry must
+   * be a valid manifest shot id (1-based integer). When unset/empty, the
+   * default behavior is unchanged (iterate all non-terminal deliverables).
+   *
+   * Use case: re-grading a small set of stills that were operator-approved
+   * before a critic-rubric calibration shipped (drift-mv 2026-04-30 fix).
+   * Also the operator-control surface for client-onboarding regen workflows.
+   */
+  shotIds?: number[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -354,6 +389,60 @@ export interface VideoGradeResult {
   consensus_note?: string | null;
 }
 
+// ─── Image Grade (mirrors brand-engine ImageGradeResult — ADR-004 Phase A) ─
+// Narrowed for stills: drops L3_accept_with_trim (no clip-trim semantics),
+// drops consensus_note (frame-extraction tiebreak is video-only). Adds
+// shot_number / image_path / new_candidate_limitation per the stills rubric.
+//
+// The Python source of truth is brand_engine.core.models.ImageGradeResult.
+// Schema changes there require this type to update in the same commit.
+export type ImageGradeMode = "audit" | "in_loop";
+
+export type ImageGradeRecommendation =
+  | "ship"
+  | "L1_prompt_fix"
+  | "L2_approach_change"
+  | "L3_redesign";
+
+export interface ImageGradeRequest {
+  image_path: string;
+  /** ≤ 2000 chars — productized NB Pro hard limit. Pre-flight rejects above. */
+  still_prompt: string;
+  narrative_beat: Record<string, unknown>;
+  story_context?: Record<string, unknown>;
+  anchor_paths?: string[];
+  reference_paths?: string[];
+  /** None for audit mode; iter records for in_loop mode (Rules 6+7 active). */
+  pivot_rewrite_history?: Array<Record<string, unknown>> | null;
+  mode?: ImageGradeMode;
+  shot_number?: number | null;
+}
+
+export interface ImageGradeResult {
+  verdict: "PASS" | "WARN" | "FAIL";
+  aggregate_score: number;
+  /** 6 stills criteria — reuses VideoGradeCriterion shape (name/score/notes). */
+  criteria: VideoGradeCriterion[];
+  detected_failure_classes: string[];
+  confidence: number;
+  summary: string;
+  reasoning: string;
+  /** Narrowed union — no L3_accept_with_trim, no L3_escalation. */
+  recommendation: ImageGradeRecommendation;
+  model: string;
+  cost: number;
+  latency_ms: number;
+  shot_number?: number | null;
+  image_path: string;
+  /**
+   * Populated when the critic discovers a failure pattern not yet in the
+   * known_limitations catalog. Shape matches the
+   * known_limitations row schema (failure_mode, category, description,
+   * mitigation, severity).
+   */
+  new_candidate_limitation?: Record<string, unknown> | null;
+}
+
 // ─── Narrative envelope (Chunk 1 — context-aware grading) ───────────────
 // Both critic + orchestrator consume these so every per-shot call knows its
 // position in the 30-shot Drift MV music video + what stylization is
@@ -423,6 +512,34 @@ export interface MusicVideoContext {
   }>;
   ingested_at: string;
   manifest_sha256: string;
+
+  // ─── Phase 5 (2026-04-30) — campaign direction integrity ───────────────
+  // Closes the loop on Tim's 2026-04-30 observation that some Drift MV
+  // stills regressed back to mech-heavy after the 2026-04-25 aftermath/
+  // realistic pivot. The orchestrator now sees campaign-level direction as
+  // a first-class axiom AND a list of explicitly-rejected approaches it
+  // must not propose. Both fields are optional for back-compat — campaigns
+  // seeded before this addition continue working without these.
+
+  /** Canonical mantra string applying to ALL shots in this campaign.
+   *  Drift MV: "Cinematically beautiful · Documentary dry · No effects/
+   *  gloss/polish · Nothing falling out of the sky". Sourced from
+   *  manifest.directional_history.current_direction_mantra (manifest is
+   *  the source of truth; the JSONB blob mirrors at MVC-ingest time). */
+  direction_mantra?: string;
+
+  /** Explicitly-rejected approaches the orchestrator must NOT propose. Each
+   *  entry has a short snake_case name + a date + 1-2 sentence reason. The
+   *  orchestrator's HARD RULE 6 (direction integrity) verifies any proposed
+   *  prompt against this list before recommending regen.
+   *
+   *  Drift MV (2026-04-30): one entry — `mech_heavy_hero_framing`. */
+  abandoned_directions?: Array<{
+    name: string;
+    rejected_at: string; // YYYY-MM-DD
+    reason: string;
+    snapshot_ref?: string; // Filesystem snapshot pointer (ADR-005 lightweight)
+  }>;
 }
 
 /**
@@ -680,6 +797,145 @@ export interface RunEscalationReport {
   };
 }
 
+// ─── Gap 4: Campaign recent runs + run detail drawer ─────────────────────
+export interface RecentCampaignRun {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  mode: RunMode;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationSeconds: number | null;
+  hitlRequired: boolean;
+  hitlNotes?: string;
+  shotIds: number[] | null;
+  auditMode: boolean | null;
+  parentRunId?: string;
+}
+
+export interface RunDetail {
+  run: Run;
+  logs: RunLog[];
+  artifacts: Artifact[];
+  orchestrationDecisionCount: number;
+  totalOrchestrationCost: number;
+  relatedStillsRun?: RecentCampaignRun | null;
+}
+
+// ─── Gap 6: Stills → Veo motion-phase gate ───────────────────────────────
+export type MotionGateShotState =
+  | "locked"
+  | "operator-override"
+  | "operator-accepted"
+  | "canonical"
+  | "pending";
+
+export interface MotionGateShotOfNote {
+  shotNumber: number;
+  deliverableId?: string;
+  state: MotionGateShotState;
+  summary: string;
+  source: "operator_override" | "asset_escalation" | "canonical_reference" | "manifest" | "run_history";
+  runId?: string;
+  criticScore?: number;
+  criticVerdict?: string;
+  decidedIter?: number;
+  decisionBy?: string;
+  decisionAt?: string;
+}
+
+export interface MotionPhaseGateState {
+  campaignId: string;
+  productionSlug?: string;
+  lockedDeliverableIds: string[];
+  lockedCount: number;
+  operatorConfirmedCount: number;
+  lockedWithoutExplicitApprovalCount: number;
+  openHitlCount: number;
+  blocked: boolean;
+  latestStillsRunId?: string;
+  shotsOfNote: MotionGateShotOfNote[];
+  generatedAt: string;
+}
+
+// ─── Gap 7: Per-shot direction-drift indicators ───────────────────────────
+export type DirectionDriftVerdictSource =
+  | "run_logs"
+  | "audit_report"
+  | "orchestration_decision"
+  | "operator_override"
+  | "asset_escalation"
+  | "manifest_caveat";
+
+export interface DirectionDriftIndicator {
+  deliverableId: string;
+  shotNumber: number | null;
+  directionDrift: boolean;
+  latestVerdictRunId: string | null;
+  latestVerdictTimestamp: string | null;
+  matchedClasses: string[];
+  source: DirectionDriftVerdictSource | null;
+  verdict: "PASS" | "WARN" | "FAIL" | null;
+  score: number | null;
+  latestVerdictLogId?: number;
+  latestVerdictDecisionId?: string;
+  timelineEventId?: string;
+}
+
+// ─── Gap 8: Per-shot regen iteration browser ──────────────────────────────
+export type ArtifactIterationVerdictLabel = "PASS" | "WARN" | "FAIL" | "SHIP";
+
+export interface ArtifactIterationVerdict {
+  verdict: ArtifactIterationVerdictLabel | null;
+  score: number | null;
+  recommendation: string | null;
+  failureClasses: string[];
+  logId?: number;
+  decisionId?: string;
+  timestamp?: string;
+  message?: string;
+}
+
+export interface ArtifactIterationOperatorOverride {
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+}
+
+export interface ArtifactIterationRow {
+  artifact: Artifact;
+  deliverableId: string;
+  shotNumber: number | null;
+  runId: string;
+  runCreatedAt: string | null;
+  runOrdinalForShot: number | null;
+  iter: number | null;
+  label: string;
+  displayUrl: string;
+  localPath: string | null;
+  isSeed: boolean;
+  isCarryForward: boolean;
+  parentArtifactId: string | null;
+  parentLabel: string | null;
+  verdict: ArtifactIterationVerdict | null;
+  operatorOverride: ArtifactIterationOperatorOverride | null;
+}
+
+export interface ArtifactIterationsResponse {
+  deliverableId: string;
+  shotNumber: number | null;
+  rows: ArtifactIterationRow[];
+  generatedAt: string;
+}
+
 // Stage definitions for each mode
 export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> = {
   full: [
@@ -707,5 +963,13 @@ export const STAGE_DEFINITIONS: Record<RunMode, { id: string; name: string }[]> 
   ],
   regrade: [
     { id: "regrade", name: "Regrade Existing Artifacts" },
+  ],
+  // ADR-004 Phase B: stills critic-in-loop runner.
+  // - audit-mode: parallel critic verdicts → per-shot orchestration_decisions
+  // - in-loop mode: per-shot critic→orchestrator→regen with degenerate-loop guard
+  stills: [
+    { id: "load_manifest", name: "Load Campaign Manifest" },
+    { id: "grade", name: "Grade Stills" },
+    { id: "lock", name: "Lock Approved Stills" },
   ],
 };

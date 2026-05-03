@@ -210,8 +210,26 @@ export default function ShotReshootDrawer({
     setActionError(null);
     try {
       const result = await promoteProductionShot(productionSlug, shotNumber);
-      await onRefresh();
-      if (result.promoted) onPromoted?.();
+      if (result.promoted) {
+        window.dispatchEvent(new CustomEvent("brandstudios:shot-still-updated", {
+          detail: {
+            productionSlug,
+            shotNumber,
+            timestamp: result.currentStill?.mtime ?? new Date().toISOString(),
+            source: "shot-promoted",
+          },
+        }));
+        onPromoted?.();
+      }
+      try {
+        await onRefresh();
+      } catch (refreshErr) {
+        setActionError(
+          refreshErr instanceof Error
+            ? `Promoted successfully, but refresh failed: ${refreshErr.message}`
+            : "Promoted successfully, but refresh failed.",
+        );
+      }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Couldn't promote this shot. Retry.");
     } finally {

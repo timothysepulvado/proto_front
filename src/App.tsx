@@ -24,12 +24,20 @@ import ReviewPanel from "./components/ReviewPanel";
 import DeliverableTracker from "./components/DeliverableTracker";
 import DeliverableTimeline from "./components/DeliverableTimeline";
 import ShotDetailDrawer from "./components/ShotDetailDrawer";
+import RecentRunsPanel from "./components/RecentRunsPanel";
+import RunDetailDrawer from "./components/RunDetailDrawer";
+import MotionPhaseGate from "./components/MotionPhaseGate";
 import WatcherSignalsPanel from "./components/WatcherSignalsPanel";
 import DriftAlertPanel from "./components/DriftAlertPanel";
 import BaselinePanel from "./components/BaselinePanel";
 import PromptEvolutionPanel from "./components/PromptEvolutionPanel";
 import ReshootPanel from "./components/ReshootPanel";
+import AnchorStillPanel, { EmptyAnchorState } from "./components/AnchorStillPanel";
 import ActiveClientBadge from "./components/ActiveClientBadge";
+import CampaignDashboard from "./components/CampaignDashboard";
+import AuditTriageTable from "./components/AuditTriageTable";
+import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
+import type { AuditReportShot } from "./lib/auditReport";
 import {
   createRun,
   cancelRun,
@@ -41,14 +49,28 @@ import {
   getPendingReviewRuns,
   getPendingReviewCount,
   getClientRuns,
+  getOpenReviewGateEscalations,
+  subscribeToAssetEscalations,
+  type Campaign,
   type Run,
   type RunLog,
   type RunMode,
   type Client,
+  type ProductionSlug,
 } from "./api";
 
 type Orientation = "horizontal" | "vertical";
 type PillarId = "memory" | "creative" | "drift" | "review" | "insight";
+type CreativeSubtab = "deliverables" | "reshoots" | "stills";
+type ShotDrawerTab = "narrative" | "critic" | "orchestrator" | "timeline";
+type SelectedShot = {
+  n: number | null;
+  id: string | null;
+  runId?: string;
+  auditShot?: AuditReportShot | null;
+  initialTab?: ShotDrawerTab;
+  pinnedTimelineEventId?: string;
+};
 
 type LogEntry = {
   time: string;
@@ -60,12 +82,15 @@ type LogEntry = {
 type DerivedClient = Client & {
   alert: boolean;
   dnaCode: string;
+  displayName: string;
+  entityLabel: string;
   featured: boolean;
   health: number;
   runsValue: number;
   runsLabel: string;
   typeLabel: string;
   statusLabel: string;
+  productionSlug: ProductionSlug;
 };
 
 const hudRoot = hudData as HudRoot;
@@ -84,9 +109,9 @@ const typeByName: Record<string, string> = {
   Lilydale: "AGRI",
 };
 
-const clientUiConfig: Record<string, { featured?: boolean }> = {
-  "client_drift-mv": { featured: true },
-};
+const DEFAULT_PRODUCTION_SLUG = (
+  (import.meta.env.VITE_DEFAULT_PRODUCTION_SLUG as string | undefined)?.trim() || "drift-mv"
+) as ProductionSlug;
 
 const seedLogs: LogEntry[] = [
   { time: "12:04:22", msg: "BRAND_MEMORY_LOADED", status: "OK" },
@@ -278,14 +303,18 @@ const buildClients = (list: Client[]): DerivedClient[] => {
 
   return list.map((client, index) => {
     const status = client.status ?? "active";
+    const uiConfig = client.uiConfig;
     // Use last run status to simulate run count
     const runsValue = client.lastRunStatus ? 1 : 0;
     return {
       ...client,
       alert: client.lastRunStatus === "needs_review",
       dnaCode: formatDna(client.id, placeholderDna),
-      featured: Boolean(clientUiConfig[client.id]?.featured),
+      displayName: uiConfig?.displayName?.trim() || client.name,
+      entityLabel: uiConfig?.entityLabel?.trim() || "Brand",
+      featured: Boolean(client.featured ?? uiConfig?.featured),
       health: computeHealth(status, runsValue, index),
+      productionSlug: ((uiConfig?.productionSlug?.trim() || DEFAULT_PRODUCTION_SLUG) as ProductionSlug),
       runsValue,
       runsLabel: formatRunsLabel(runsValue),
       typeLabel: typeByName[client.name] ?? "CUSTOM",
@@ -311,16 +340,20 @@ export default function App() {
   const dragStartPos = useRef({ x: 0, y: 0 });
   const hasMovedRef = useRef(false);
   const [activePillar, setActivePillar] = useState<PillarId>("creative");
-  const [creativeSubtab, setCreativeSubtab] = useState<"deliverables" | "reshoots">("deliverables");
+  const [creativeSubtab, setCreativeSubtab] = useState<CreativeSubtab>("deliverables");
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [finalHitlShotNumber, setFinalHitlShotNumber] = useState<number | null>(null);
   const [pendingReviewRuns, setPendingReviewRuns] = useState<Run[]>([]);
   const [globalPendingCount, setGlobalPendingCount] = useState(0);
+  const [openEscalationCount, setOpenEscalationCount] = useState(0);
 
   // Run state
   const [currentRun, setCurrentRun] = useState<Run | null>(null);
-  const [selectedShot, setSelectedShot] = useState<{ n: number | null; id: string | null }>({ n: null, id: null });
+  const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
+  const [selectedShot, setSelectedShot] = useState<SelectedShot>({ n: null, id: null });
+  const [selectedRunDetailId, setSelectedRunDetailId] = useState<string | null>(null);
+  const [selectedAnchorShot, setSelectedAnchorShot] = useState<number | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
@@ -385,11 +418,7 @@ export default function App() {
       try {
         const runs = await getClientRuns(activeClient);
         if (cancelled) return;
-        const latestCampaignRun = runs.find((run) => run.campaignId);
-        const featuredRun = clientUiConfig[activeClient]?.featured
-          ? runs.find((run) => run.runId.startsWith("9bfdf23e"))
-          : undefined;
-        const preferredRun = featuredRun ?? latestCampaignRun;
+        const preferredRun = runs.find((run) => run.campaignId);
         setCurrentRun((previous) => {
           if (previous?.clientId === activeClient && previous.campaignId && previous.runId === preferredRun?.runId) {
             return previous;
@@ -445,6 +474,34 @@ export default function App() {
     };
   }, [activeClient]);
 
+  // Track escalation-level HITL independently from legacy run.status review queue.
+  useEffect(() => {
+    if (!activeClient) {
+      setOpenEscalationCount(0);
+      return undefined;
+    }
+    let cancelled = false;
+
+    const refreshOpenEscalations = async () => {
+      try {
+        const items = await getOpenReviewGateEscalations(activeClient, 30);
+        if (!cancelled) setOpenEscalationCount(items.length);
+      } catch {
+        if (!cancelled) setOpenEscalationCount(0);
+      }
+    };
+
+    void refreshOpenEscalations();
+    const unsubscribe = subscribeToAssetEscalations(activeClient, () => {
+      void refreshOpenEscalations();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [activeClient]);
+
   const runMenuOptions = [
     { id: "full", label: "Full Pipeline", mode: "full" },
     { id: "ingest", label: "Ingest and Index", mode: "ingest", pillar: "Brand Memory" },
@@ -463,6 +520,18 @@ export default function App() {
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
   const isFeaturedClient = Boolean(currentClient?.featured);
+  const reviewAttentionCount = pendingReviewRuns.length + openEscalationCount;
+  const isCampaignDashboard = Boolean(currentClient && isClientDetailOpen && !selectedCampaign);
+  const isAnchorStillLayout = activePillar === "creative" && creativeSubtab === "stills" && isFeaturedClient && Boolean(selectedCampaign);
+  const workspaceMaxClass = isAnchorStillLayout
+    ? "max-w-[1320px]"
+    : isCampaignDashboard || selectedCampaign
+      ? "max-w-[1180px]"
+      : "max-w-[620px]";
+  const selectedCampaignName = selectedCampaign?.name.split("—")[0]?.trim() || selectedCampaign?.name || "Campaign";
+  const selectedCampaignSubtitle = selectedCampaign && selectedCampaignName !== selectedCampaign.name
+    ? selectedCampaign.name
+    : null;
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
@@ -475,6 +544,10 @@ export default function App() {
       setIsClientDetailOpen(false);
     }
   }, [isExpanded]);
+
+  useEffect(() => {
+    setSelectedAnchorShot(null);
+  }, [activeClient, creativeSubtab]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -518,8 +591,10 @@ export default function App() {
     teardownRunSubscriptions();
 
     setCurrentRun(null);
+    setSelectedCampaign(null);
     setPendingReviewRuns([]);
     setSelectedShot({ n: null, id: null });
+    setSelectedRunDetailId(null);
     setShowReviewPanel(false);
     setFinalHitlShotNumber(null);
     setIsRunning(false);
@@ -534,6 +609,22 @@ export default function App() {
     setActiveClient(nextClientId);
     updateClientUrl(nextClientId);
   }, [activeClient, clients, teardownRunSubscriptions]);
+
+  const handleCampaignSelect = useCallback((campaign: Campaign, run: Run | null) => {
+    teardownRunSubscriptions();
+    setSelectedCampaign(campaign);
+    setCurrentRun(run);
+    setSelectedShot({ n: null, id: null });
+    setSelectedRunDetailId(null);
+    setSelectedAnchorShot(null);
+    setShowReviewPanel(false);
+    setFinalHitlShotNumber(null);
+    setRunError(null);
+    setCurrentStage(null);
+    setShowRunMenu(false);
+    setCreativeSubtab("deliverables");
+    setActivePillar("creative");
+  }, [teardownRunSubscriptions]);
 
   useEffect(() => {
     // Only show seed logs when not running a real run
@@ -578,6 +669,54 @@ export default function App() {
   useEffect(() => {
     return teardownRunSubscriptions;
   }, [teardownRunSubscriptions]);
+
+  const handleAuditLog = useCallback((log: RunLog) => {
+    if (log.stage && log.stage !== "system") {
+      setCurrentStage(log.stage);
+    }
+    setLogs((prev) => {
+      const entry: LogEntry = {
+        time: new Date(log.timestamp).toLocaleTimeString("en-US", { hour12: false }),
+        msg: log.message,
+        status: log.level === "error" ? "WAIT" : log.level === "warn" ? "BUSY" : "OK",
+        stage: log.stage,
+      };
+      const next = [...prev, entry];
+      if (next.length > 50) next.shift();
+      return next;
+    });
+    setTimeout(() => {
+      if (logsContainerRef.current) {
+        logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+      }
+    }, 10);
+  }, []);
+
+  const handleAuditRunStarted = useCallback((run: Run) => {
+    teardownRunSubscriptions();
+    setCurrentRun(run);
+    setRunError(null);
+    setIsRunning(true);
+    setCurrentStage("grade");
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs([{ time: now, msg: `AUDIT_STARTED_${run.runId.slice(0, 8).toUpperCase()}`, status: "BUSY", stage: "grade" }]);
+  }, [teardownRunSubscriptions]);
+
+  const handleAuditRunSettled = useCallback((run: Run) => {
+    setCurrentRun(run);
+    setIsRunning(false);
+    setCurrentStage(null);
+    const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [
+      ...prev,
+      {
+        time: now,
+        msg: `AUDIT_${run.status.toUpperCase()}`,
+        status: run.status === "completed" ? "OK" : "WAIT",
+        stage: "complete",
+      },
+    ]);
+  }, []);
 
   const handleStartRun = useCallback(async (mode: RunMode) => {
     if (!activeClient) return;
@@ -740,7 +879,7 @@ export default function App() {
       </div>
 
       <div
-        className={`flex-1 flex flex-row relative z-20 transition-all duration-1000 ease-out ${
+	        className={`min-w-0 flex-1 flex flex-row relative z-20 transition-all duration-1000 ease-out ${
           isExpanded ? "opacity-100" : "opacity-0 pointer-events-none scale-[1.05] blur-xl"
         }`}
       >
@@ -788,7 +927,7 @@ export default function App() {
                   </div>
 
                   <span className="absolute left-16 bg-cyan-900/90 px-3 py-1 rounded text-[10px] font-mono border border-cyan-500/30 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none uppercase tracking-widest whitespace-nowrap">
-                    {client.name}
+                    {client.displayName}
                   </span>
 
                   {client.alert && (
@@ -815,19 +954,19 @@ export default function App() {
           <OverlayEffects />
         </aside>
 
-        <div className="flex-1 flex flex-col relative min-h-0">
-          <div className="pt-2 px-8 md:px-10 shrink-0">
-            <nav className="group h-9 w-full max-w-2xl ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative overflow-hidden">
+        <div className="flex-1 flex flex-col relative min-h-0 min-w-0">
+          <div className="pt-2 px-4 sm:px-8 md:px-10 shrink-0">
+            <nav className="group h-9 w-full max-w-2xl ml-0 sm:ml-8 border border-cyan-500/10 bg-black/25 backdrop-blur-md flex items-center justify-between px-4 sm:px-6 rounded-full transition-all duration-300 hover:bg-black/35 hover:border-cyan-400/30 relative overflow-hidden">
               <TickMarks count={80} />
 
               <div className="flex items-center space-x-6 text-[8px] font-mono tracking-[0.35em] z-10">
                 <span className="text-cyan-400 flex items-center animate-pulse">
                   <ShieldCheck size={11} className="mr-2" /> Core Sync Ready
                 </span>
-                <span className="text-white/40 flex items-center">
+                <span className="text-white/40 hidden sm:flex items-center">
                   LATENCY: <span className="text-white ml-2">0.0004ms</span>
                 </span>
-                <span className="text-white/40 flex items-center uppercase">
+                <span className="text-white/40 hidden md:flex items-center uppercase">
                   Uptime: <span className="text-white ml-2">99.98%</span>
                 </span>
               </div>
@@ -872,8 +1011,8 @@ export default function App() {
             </nav>
           </div>
 
-          <main className="flex-1 p-6 md:p-10 flex flex-col items-start justify-start relative overflow-y-auto min-h-0">
-            {currentRun?.runId && (
+          <main className="flex-1 p-4 md:p-10 flex flex-col items-start justify-start relative overflow-y-auto min-h-0 min-w-0">
+            {selectedCampaign && currentRun?.runId && (
               <div className="pointer-events-auto absolute right-6 top-6 z-30">
                 <WatcherSignalsPanel
                   key={currentRun.runId}
@@ -897,16 +1036,16 @@ export default function App() {
             </div>
 
             {currentClient && isClientDetailOpen && (
-              <div className="w-full max-w-[480px] z-10 space-y-4 ml-4">
+              <div className={`w-full min-w-0 z-10 space-y-4 ml-0 md:ml-4 ${workspaceMaxClass}`}>
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
                   <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
                   <div className="space-y-2">
-                    <h1 className="text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl whitespace-nowrap">
-                      {currentClient.name}
+                    <h1 className="text-3xl sm:text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl break-words sm:whitespace-nowrap">
+                      {currentClient.displayName}
                     </h1>
                     <div className="flex items-center space-x-4">
                       <p className="text-[11px] font-mono tracking-[0.5em] text-cyan-400/60 uppercase">
-                        Brand Memory <span className="text-white/40 text-[9px] ml-2">{currentClient.dnaCode}</span>
+                        {currentClient.entityLabel} Memory <span className="text-white/40 text-[9px] ml-2">{currentClient.dnaCode}</span>
                       </p>
                       <div className="h-px w-20 bg-cyan-500/30" />
                       <span className="px-2 py-0.5 border border-cyan-500/50 rounded text-[8px] font-mono text-cyan-400 bg-cyan-500/10">
@@ -919,15 +1058,55 @@ export default function App() {
                   </div>
                 </div>
 
+                {!selectedCampaign ? (
+                  <CampaignDashboard
+                    clientId={currentClient.id}
+                    brandName={currentClient.displayName}
+                    onCampaignSelect={handleCampaignSelect}
+                  />
+                ) : (
+                  <>
+                <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 backdrop-blur-xl">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-[8px] font-mono uppercase tracking-[0.28em] text-cyan-200/45">
+                        {currentClient.displayName} / Campaigns / Active Workspace
+                      </p>
+                      <h2 className="mt-1 truncate text-xl font-black uppercase italic tracking-tight text-white">
+                        {selectedCampaignName}
+                      </h2>
+                      {selectedCampaignSubtitle && (
+                        <p className="mt-1 truncate text-[9px] font-mono uppercase tracking-[0.18em] text-white/35">
+                          {selectedCampaignSubtitle}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedCampaign(null);
+                        setSelectedShot({ n: null, id: null });
+                        setSelectedRunDetailId(null);
+                        setSelectedAnchorShot(null);
+                        setShowRunMenu(false);
+                      }}
+                      className="inline-flex shrink-0 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-[8px] font-mono uppercase tracking-[0.22em] text-cyan-100 transition-all hover:border-cyan-300/45 hover:bg-cyan-300 hover:text-black"
+                    >
+                      <ChevronDown size={12} className="mr-2 rotate-90" />
+                      Campaigns
+                    </button>
+                  </div>
+                </div>
+
                 <ActiveClientBadge client={currentClient} />
 
                 {/* Four Pillars Tabs */}
                 <div className="flex space-x-1 bg-black/20 p-1 rounded-xl border border-white/5">
                   {pillars.map((pillar) => (
-                    <button
-                      key={pillar.id}
-                      onClick={() => setActivePillar(pillar.id)}
-                      className={`flex-1 py-2 px-3 text-[9px] font-mono uppercase tracking-wider rounded-lg transition-all ${
+	                    <button
+	                      key={pillar.id}
+	                      onClick={() => setActivePillar(pillar.id)}
+	                      className={`min-w-0 flex-1 truncate py-2 px-2 sm:px-3 text-[8px] sm:text-[9px] font-mono uppercase tracking-wider rounded-lg transition-all ${
                         activePillar === pillar.id
                           ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
                           : "text-white/40 hover:text-white/70 hover:bg-white/5"
@@ -944,58 +1123,93 @@ export default function App() {
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
 
-                  {/* Review Gate: show pending review queue */}
-                  {activePillar === "review" && pendingReviewRuns.length > 0 ? (
-                    <div className="mt-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
-                          <Eye size={10} className="mr-1.5" />
-                          {pendingReviewRuns.length} run{pendingReviewRuns.length !== 1 ? "s" : ""} awaiting review
-                        </span>
-                      </div>
-                      {pendingReviewRuns.map((run) => (
-                        <button
-                          key={run.runId}
-                          onClick={() => {
-                            setCurrentRun(run);
-                            setShowReviewPanel(true);
-                          }}
-                          className="w-full flex items-center justify-between p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all group text-left"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-[10px] font-mono text-white truncate">
-                              {run.mode.toUpperCase()} — {new Date(run.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
-                            </p>
-                            <p className="text-[8px] font-mono text-white/30 uppercase tracking-wider">
-                              Run {run.runId.slice(0, 8)}
-                            </p>
-                          </div>
-                          <div className="flex items-center space-x-2 shrink-0 ml-2">
-                            <span className="text-[8px] font-mono text-amber-400 uppercase px-2 py-0.5 border border-amber-500/30 bg-amber-500/10 rounded">
-                              Review
+                  {/* Review Gate: show escalation-level HITL plus legacy run queue */}
+                  {activePillar === "review" ? (
+                    <div className="space-y-3">
+                      <ReviewGateEscalationSurface
+                        clientId={activeClient}
+                        onCountChange={setOpenEscalationCount}
+                        onOpenDeliverable={({ deliverableId, runId, shotNumber }) => {
+                          setSelectedShot({
+                            n: shotNumber,
+                            id: deliverableId,
+                            runId,
+                            initialTab: "orchestrator",
+                          });
+                        }}
+                      />
+
+                      {pendingReviewRuns.length > 0 ? (
+                        <div className="space-y-2 rounded-2xl border border-white/10 bg-black/20 p-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-mono text-amber-400/80 uppercase tracking-widest flex items-center">
+                              <Eye size={10} className="mr-1.5" />
+                              {pendingReviewRuns.length} run{pendingReviewRuns.length !== 1 ? "s" : ""} awaiting artifact review
                             </span>
-                            <ChevronDown size={12} className="text-white/20 -rotate-90 group-hover:text-amber-400 transition-colors" />
                           </div>
-                        </button>
-                      ))}
+                          {pendingReviewRuns.map((run) => (
+                            <button
+                              key={run.runId}
+                              onClick={() => {
+                                setCurrentRun(run);
+                                setShowReviewPanel(true);
+                              }}
+                              className="w-full flex items-center justify-between p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all group text-left"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-[10px] font-mono text-white truncate">
+                                  {run.mode.toUpperCase()} — {new Date(run.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                </p>
+                                <p className="text-[8px] font-mono text-white/30 uppercase tracking-wider">
+                                  Run {run.runId.slice(0, 8)}
+                                </p>
+                              </div>
+                              <div className="flex items-center space-x-2 shrink-0 ml-2">
+                                <span className="text-[8px] font-mono text-amber-400 uppercase px-2 py-0.5 border border-amber-500/30 bg-amber-500/10 rounded">
+                                  Review
+                                </span>
+                                <ChevronDown size={12} className="text-white/20 -rotate-90 group-hover:text-amber-400 transition-colors" />
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : openEscalationCount === 0 ? (
+                        <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
+                          <ShieldCheck size={10} className="mr-1.5" />
+                          No run-level artifact reviews — all clear
+                        </p>
+                      ) : null}
                     </div>
-                  ) : activePillar === "review" && pendingReviewRuns.length === 0 ? (
-                    <p className="text-[9px] font-mono text-cyan-400/40 mt-2 flex items-center">
-                      <ShieldCheck size={10} className="mr-1.5" />
-                      No pending reviews — all clear
-                    </p>
-                  ) : activePillar === "creative" && activeClient ? (
-                    <>
-                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
-                        {[
-                          { id: "deliverables" as const, label: "Deliverables" },
-                          ...(isFeaturedClient ? [{ id: "reshoots" as const, label: "Reshoots" }] : []),
-                        ].map((tab) => (
+	                  ) : activePillar === "creative" && activeClient ? (
+	                    <>
+                        {currentRun?.campaignId && (
+                          <RecentRunsPanel
+                            clientId={activeClient}
+                            campaignId={currentRun.campaignId}
+                            onRunClick={setSelectedRunDetailId}
+                          />
+                        )}
+                        {isFeaturedClient && currentRun?.campaignId && (
+                          <MotionPhaseGate
+                            clientId={activeClient}
+                            campaignId={currentRun.campaignId}
+                            onReviewGateClick={() => setActivePillar("review")}
+                            onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
+                          />
+                        )}
+	                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
+	                        {[
+	                          { id: "deliverables" as const, label: "Deliverables" },
+	                          ...(isFeaturedClient ? [
+                              { id: "reshoots" as const, label: "Reshoots" },
+                              { id: "stills" as const, label: "Stills + Anchors" },
+                            ] : []),
+	                        ].map((tab) => (
                           <button
                             key={tab.id}
                             type="button"
                             onClick={() => setCreativeSubtab(tab.id)}
-                            className={`flex-1 rounded-lg px-3 py-2 text-[8px] font-mono uppercase tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
+	                            className={`min-w-0 flex-1 truncate rounded-lg px-2 sm:px-3 py-2 text-[7px] sm:text-[8px] font-mono uppercase tracking-[0.18em] sm:tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
                               creativeSubtab === tab.id
                                 ? "border border-cyan-500/30 bg-cyan-500/15 text-cyan-300"
                                 : "border border-transparent text-white/35 hover:bg-white/5 hover:text-white/65"
@@ -1005,9 +1219,41 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
-                        <ReshootPanel />
-                      ) : (
+	                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
+	                        <ReshootPanel showRenderControls={false} />
+	                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
+                          <div className="space-y-3">
+                            <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
+                              <p className="text-[9px] font-mono uppercase tracking-[0.24em] text-cyan-100/70">
+                                Stills + Anchors
+                              </p>
+                              <p className="mt-1 text-[9px] leading-relaxed text-white/35">
+                                Select a shot on the left to curate the campaign anchor still, reject starting frames, snapshot a new frame, or replace the hero visual.
+                              </p>
+                            </div>
+	                          <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+                              <div className="order-2 min-w-0 lg:order-1">
+	                              <ReshootPanel
+	                                onShotSelect={setSelectedAnchorShot}
+	                                activeShotNumber={selectedAnchorShot}
+	                                openDrawerOnSelect={false}
+                                  showRenderControls={false}
+	                              />
+                              </div>
+                              <div className="order-1 min-w-0 lg:order-2">
+		                              {selectedAnchorShot != null ? (
+		                                <AnchorStillPanel
+		                                  productionSlug={currentClient.productionSlug}
+		                                  shotNumber={selectedAnchorShot}
+		                                  campaignId={currentRun?.campaignId}
+		                                />
+	                              ) : (
+	                                <EmptyAnchorState />
+	                              )}
+                              </div>
+	                          </div>
+                          </div>
+	                      ) : (
                         <>
                           {isFeaturedClient && !currentRun?.campaignId ? (
                             <div className="flex flex-col items-center justify-center py-8">
@@ -1020,12 +1266,36 @@ export default function App() {
                             <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
                           ) : (
                             <>
+                              {isFeaturedClient && (
+                                <AuditTriageTable
+                                  key={`audit:${activeClient}:${currentRun.campaignId}`}
+                                  clientId={currentClient.id}
+                                  campaignId={currentRun.campaignId}
+                                  campaignName={selectedCampaignName}
+                                  onAuditRunStarted={handleAuditRunStarted}
+                                  onAuditRunSettled={handleAuditRunSettled}
+                                  onAuditLog={handleAuditLog}
+                                  onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
+                                    n: shotNumber,
+                                    id: deliverableId,
+                                    runId,
+                                    auditShot,
+                                    initialTab: "critic",
+                                  })}
+                                />
+                              )}
                               {isFeaturedClient && <DeliverableTimeline />}
                               <DeliverableTracker
                                 key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
                                 campaignId={currentRun.campaignId}
                                 runId={currentRun.runId}
-                                onShotClick={(n, id) => setSelectedShot({ n, id })}
+                                onShotClick={(n, id, options) => setSelectedShot({
+                                  n,
+                                  id,
+                                  runId: options?.runId,
+                                  initialTab: options?.initialTab,
+                                  pinnedTimelineEventId: options?.pinnedTimelineEventId,
+                                })}
                               />
                             </>
                           )}
@@ -1034,7 +1304,7 @@ export default function App() {
                     </>
                   ) : activePillar === "creative" ? (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
-                      Select a client to manage prompt evolution
+                      Select a BrandStudios workspace to manage prompt evolution
                     </p>
                   ) : activePillar === "drift" && activeClient ? (
                     <>
@@ -1043,7 +1313,7 @@ export default function App() {
                     </>
                   ) : activePillar === "drift" ? (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
-                      Select a client to view drift alerts
+                      Select a BrandStudios workspace to view drift alerts
                     </p>
                   ) : activePillar === "insight" ? (
                     <div className="mt-3 rounded-2xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 px-4 py-5">
@@ -1198,22 +1468,29 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Review Button - when HITL needed, active run needs review, or pending reviews exist */}
-                        {(currentClient.alert || currentRun?.status === "needs_review" || pendingReviewRuns.length > 0) && (
+                        {/* Review Button - when HITL needed, active run needs review, pending reviews, or open escalations exist */}
+                        {(currentClient.alert || currentRun?.status === "needs_review" || reviewAttentionCount > 0) && (
                           <button
                             onClick={() => {
-                              // Use current run if it needs review, otherwise use first pending run
-                              if (!currentRun && pendingReviewRuns.length > 0) {
-                                setCurrentRun(pendingReviewRuns[0]);
+                              const shouldOpenArtifactReview = currentRun?.status === "needs_review" || pendingReviewRuns.length > 0;
+                              if (shouldOpenArtifactReview) {
+                                // Use current run if it needs review, otherwise use first pending run
+                                if (currentRun?.status !== "needs_review" && pendingReviewRuns.length > 0) {
+                                  setCurrentRun(pendingReviewRuns[0]);
+                                }
+                                setShowReviewPanel(true);
+                              } else {
+                                setActivePillar("review");
+                                setIsClientDetailOpen(true);
+                                setIsExpanded(true);
                               }
-                              setShowReviewPanel(true);
                             }}
                             className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
-                            {pendingReviewRuns.length > 0 && (
+                            {reviewAttentionCount > 0 && (
                               <span className="ml-2 px-1.5 py-0.5 bg-black/20 rounded-lg text-[9px] font-mono">
-                                {pendingReviewRuns.length}
+                                {reviewAttentionCount}
                               </span>
                             )}
                           </button>
@@ -1230,15 +1507,17 @@ export default function App() {
                       </div>
                     </div>
                     <OverlayEffects className="rounded-[2rem]" />
-                  </div>
-                </div>
-              </div>
-            )}
+	                  </div>
+	                </div>
+                  </>
+                )}
+	              </div>
+	            )}
           </main>
         </div>
 
-        <aside
-          className={`h-full border-l border-transparent flex flex-col items-center py-6 relative pointer-events-none overflow-hidden transition-[width,transform,opacity,background-color,backdrop-filter] duration-500 ${
+	        <aside
+	          className={`hidden h-full border-l border-transparent sm:flex flex-col items-center py-6 relative pointer-events-none overflow-hidden transition-[width,transform,opacity,background-color,backdrop-filter] duration-500 ${
             isExpanded
               ? "w-12 opacity-100 bg-black/10 backdrop-blur-sm translate-x-0 border-cyan-500/10"
               : "w-0 opacity-0 bg-transparent backdrop-blur-none translate-x-4"
@@ -1252,18 +1531,30 @@ export default function App() {
       </div>
 
       <ShotDetailDrawer
-        key={`${activeClient}:${currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}`}
+        key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}:${selectedShot.pinnedTimelineEventId ?? "no-pin"}`}
         shotNumber={selectedShot.n}
         deliverableId={selectedShot.id}
-        runId={currentRun?.runId}
+        campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
+        productionSlug={currentClient?.productionSlug}
+        runId={selectedShot.runId ?? currentRun?.runId}
+        initialTab={selectedShot.initialTab}
+        pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}
+        auditShot={selectedShot.auditShot}
         onClose={() => setSelectedShot({ n: null, id: null })}
+        onRunSelect={setSelectedRunDetailId}
+      />
+
+      <RunDetailDrawer
+        runId={selectedRunDetailId}
+        onClose={() => setSelectedRunDetailId(null)}
+        onRunSelect={setSelectedRunDetailId}
       />
 
       {showReviewPanel && currentRun && currentClient && (
         <ReviewPanel
           key={`${activeClient}:${currentRun.runId}`}
           runId={currentRun.runId}
-          clientName={currentClient.name}
+          clientName={currentClient.displayName}
           initialFinalHitlShotNumber={finalHitlShotNumber}
           onClose={() => {
             setShowReviewPanel(false);
@@ -1284,9 +1575,9 @@ export default function App() {
                   <Layers className="text-cyan-400" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold tracking-[0.3em] text-white uppercase">New Client Setup</h2>
+	                  <h2 className="text-lg font-bold tracking-[0.3em] text-white uppercase">New BrandStudios Setup</h2>
                   <p className="text-[9px] font-mono text-cyan-400 opacity-50 uppercase tracking-[0.2em]">
-                    Ready to onboard
+	                    Ready to onboard a brand workspace
                   </p>
                 </div>
               </div>
@@ -1300,7 +1591,7 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase font-mono opacity-40 ml-1 tracking-widest">
-                    Client Name
+	                    Brand Name
                   </label>
                   <input
                     type="text"
@@ -1337,7 +1628,7 @@ export default function App() {
               </div>
 
               <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(34,211,238,0.3)] hover:bg-white transition-all active:scale-95">
-                Create Client
+	                Create BrandStudios Workspace
               </button>
             </div>
             <OverlayEffects className="rounded-[3rem]" />

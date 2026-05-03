@@ -412,6 +412,194 @@ check("buildUserMessage: section order is SHOT POSITION → NEIGHBOR SHOTS → S
   assert.ok(iSp > 0 && iNs > iSp && iSb > iNs && iQa > iSb, "section order wrong");
 });
 
+// ─── Phase 5 (2026-04-30): Direction integrity (Rule 6) gate ──────────────
+//
+// Closes the loop on Tim's 2026-04-30 observation that some Drift MV stills
+// regressed to mech-heavy. The orchestrator now sees campaign-level direction
+// as a first-class axiom AND a list of explicitly-rejected approaches it
+// must not propose. These checks pin the system-prompt rendering of
+// MusicVideoContext.direction_mantra and .abandoned_directions.
+
+const MV_CONTEXT_WITH_DIRECTION: MusicVideoContext = {
+  ...MV_CONTEXT,
+  direction_mantra:
+    "Cinematically beautiful · Documentary dry · No effects/gloss/polish · Nothing falling out of the sky",
+  abandoned_directions: [
+    {
+      name: "mech_heavy_hero_framing",
+      rejected_at: "2026-04-25",
+      reason:
+        "Tim pivoted from mech-heavy to aftermath/realistic. Multiple mechs as primary subjects, parade-formation arrangements, action-figure diorama composition, and mech-as-hero framing are all explicitly rejected.",
+      snapshot_ref: "manifest_pre_pivot_backup.json",
+    },
+  ],
+};
+
+check("buildSystemPrompt(mvc+direction): emits CAMPAIGN DIRECTION section", () => {
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  // Section heading is rendered with the unique-to-emitted-section
+  // "(canonical, applies to ALL shots)" suffix; Rule 6 doctrine just
+  // mentions the bare phrase, so this assertion targets the rendered form.
+  assert.ok(
+    sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION section missing when direction_mantra is set",
+  );
+  assert.ok(
+    sp.includes("Cinematically beautiful"),
+    "mantra string not rendered",
+  );
+});
+
+check("buildSystemPrompt(mvc+direction): emits ABANDONED DIRECTIONS list", () => {
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  assert.ok(
+    sp.includes("ABANDONED DIRECTIONS"),
+    "ABANDONED DIRECTIONS heading missing",
+  );
+  assert.ok(
+    sp.includes("mech_heavy_hero_framing"),
+    "abandoned-direction name not rendered",
+  );
+  assert.ok(
+    sp.includes("rejected 2026-04-25"),
+    "abandoned-direction date not rendered",
+  );
+  assert.ok(
+    sp.includes("manifest_pre_pivot_backup.json"),
+    "snapshot_ref pointer not rendered",
+  );
+});
+
+check("buildSystemPrompt(mvc): doctrine carries Rule 6 direction integrity", () => {
+  // Rule 6 lives in SYSTEM_PROMPT_CORE so it's present whether or not the
+  // campaign has direction data — the rule degrades to no-op without context.
+  const sp = buildSystemPrompt(MV_CONTEXT_WITH_DIRECTION);
+  assert.ok(
+    sp.includes("Rule 6 — Direction integrity"),
+    "Rule 6 direction-integrity hard rule missing from doctrine",
+  );
+  assert.ok(
+    sp.includes("direction reversion almost never resolves at prompt level"),
+    "Rule 6 escalation guidance missing",
+  );
+});
+
+check("buildSystemPrompt(mvc, no direction fields): no rendered CAMPAIGN DIRECTION section", () => {
+  // Back-compat: campaigns seeded before Phase 5 that don't carry
+  // direction_mantra/abandoned_directions still work — Rule 6 becomes a no-op.
+  // We assert on the rendered-section marker (with "(canonical..." suffix),
+  // not the bare phrase, because Rule 6 doctrine references the section by
+  // name and that reference is always present in the cached doctrine.
+  const sp = buildSystemPrompt(MV_CONTEXT);
+  assert.ok(
+    !sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION rendered-section leaked into MVC without direction fields",
+  );
+  assert.ok(
+    !sp.includes("### ABANDONED DIRECTIONS (canonical-rejected"),
+    "ABANDONED DIRECTIONS rendered-section leaked into MVC without direction fields",
+  );
+});
+
+check("buildSystemPrompt(non-MV): no rendered CAMPAIGN DIRECTION section", () => {
+  const sp = buildSystemPrompt();
+  // Same logic: Rule 6 doctrine references "## CAMPAIGN DIRECTION" by name;
+  // assert on the rendered-section marker only.
+  assert.ok(
+    !sp.includes("## CAMPAIGN DIRECTION (canonical, applies to ALL shots)"),
+    "CAMPAIGN DIRECTION rendered-section leaked into non-MV prompt",
+  );
+});
+
+// ─── Rule 7 — prompt-length budget (Phase B+ #5, 2026-04-30) ────────────────
+
+check("buildSystemPrompt: Rule 7 prompt-length budget rendered with 2000-char ceiling", () => {
+  const sp = buildSystemPrompt();
+  assert.ok(sp.includes("Rule 7 — Prompt-length budget"), "Rule 7 heading present");
+  assert.ok(sp.includes("≤ **2000 characters**"), "explicit 2000-char ceiling rendered");
+  assert.ok(sp.includes("HTTP 500"), "Temp-gen rejection symptom documented");
+  assert.ok(sp.includes("HTTP 422"), "brand-engine rejection symptom documented");
+});
+
+check("OUTPUT JSON SCHEMA references Rule 7 ceiling for new_still_prompt + new_veo_prompt", () => {
+  const sp = buildSystemPrompt();
+  assert.ok(
+    sp.includes("\"new_still_prompt\": \"<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>\""),
+    "schema row for new_still_prompt cites Rule 7",
+  );
+  assert.ok(
+    sp.includes("\"new_veo_prompt\": \"<full prompt text ≤2000 chars (Rule 7 hard ceiling), or null>\""),
+    "schema row for new_veo_prompt cites Rule 7",
+  );
+});
+
+// _enforcePromptBudget tests — load via dynamic import so we don't break the
+// test file's existing import pattern.
+{
+  const orch = await import("../src/orchestrator.js");
+  const enforce = orch._enforcePromptBudget;
+  const BUDGET = orch.ORCHESTRATOR_PROMPT_BUDGET_CHARS;
+
+  check("_enforcePromptBudget: null in → null out", () => {
+    assert.equal(enforce(null, "new_still_prompt"), null);
+    assert.equal(enforce(null, "new_veo_prompt"), null);
+  });
+
+  check("_enforcePromptBudget: under-budget passes through unchanged", () => {
+    const short = "A photographic still of a foreground rubble pile, mid-ground subject, distant background. Documentary tradition.";
+    assert.equal(enforce(short, "new_still_prompt"), short);
+    assert.ok(short.length < BUDGET, "fixture is actually under budget");
+  });
+
+  check("_enforcePromptBudget: at-budget exactly passes through", () => {
+    const at = "x".repeat(BUDGET);
+    assert.equal(enforce(at, "new_still_prompt"), at);
+  });
+
+  check("_enforcePromptBudget: over-budget truncates at last sentence terminator before 1990", () => {
+    // Build a prompt whose first 1989 chars end with a "." then more sentences after.
+    const head = "A".repeat(1900);
+    const sentenceEnd = ". Plenty of room here.";
+    const tail = " ".concat("More content that should be cut. ".repeat(20));
+    const full = head + sentenceEnd + tail;
+    assert.ok(full.length > BUDGET, "fixture exceeds budget");
+    const trimmed = enforce(full, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET, `trimmed length ${trimmed.length} <= ${BUDGET}`);
+    assert.ok(trimmed.endsWith(".") || trimmed.endsWith("?") || trimmed.endsWith("!"), "ends on sentence terminator");
+  });
+
+  check("_enforcePromptBudget: over-budget with no sentence terminators falls back to whitespace cut", () => {
+    // Single very long word-stream (no periods) followed by spaces.
+    const stream = "WordOne WordTwo ".repeat(200);
+    assert.ok(stream.length > BUDGET, "fixture exceeds budget");
+    const trimmed = enforce(stream, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET);
+    assert.ok(!trimmed.endsWith(" "), "trailing whitespace stripped after cut");
+  });
+
+  check("_enforcePromptBudget: hard cut last-resort when no boundaries available in budget", () => {
+    // Pathological input: one giant token, no spaces, no terminators.
+    const blob = "x".repeat(3000);
+    const trimmed = enforce(blob, "new_still_prompt");
+    assert.ok(trimmed !== null);
+    assert.ok(trimmed.length <= BUDGET);
+    assert.ok(trimmed.length >= 1989, "hard cut lands at the soft ceiling");
+  });
+
+  check("_enforcePromptBudget: applies independently to still vs veo (no cross-talk)", () => {
+    // Different lengths, different terminators — verify the helper treats each
+    // call independently (no shared state, no last-call memo).
+    const aOver = "First sentence ends here. " + "B".repeat(1800);
+    const bUnder = "Short prompt.";
+    const aTrimmed = enforce(aOver, "new_still_prompt");
+    const bResult = enforce(bUnder, "new_veo_prompt");
+    assert.ok(aTrimmed !== null && aTrimmed.length <= BUDGET);
+    assert.equal(bResult, bUnder);
+  });
+}
+
 // ─── Run ─────────────────────────────────────────────────────────────────
 
 let passed = 0;

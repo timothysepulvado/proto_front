@@ -4,6 +4,8 @@ interface ActiveClientBadgeProps {
   client: {
     id: string;
     name: string;
+    displayName?: string;
+    entityLabel?: string;
     status?: string;
     featured?: boolean;
   } | null;
@@ -11,6 +13,9 @@ interface ActiveClientBadgeProps {
 
 export default function ActiveClientBadge({ client }: ActiveClientBadgeProps) {
   if (!client) return null;
+
+  const fallbackName = client.name?.trim() || client.id;
+  const displayName = client.displayName?.trim() || fallbackName;
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-cyan-400/20 bg-[#15217C]/35 px-4 py-3 shadow-[0_0_28px_rgba(21,33,124,0.28)]">
@@ -22,10 +27,10 @@ export default function ActiveClientBadge({ client }: ActiveClientBadgeProps) {
           </div>
           <div className="min-w-0">
             <p className="truncate text-[9px] font-mono uppercase tracking-[0.32em] text-cyan-100/55">
-              Active Client
+              Active {client.entityLabel ?? "Brand"}
             </p>
             <p className="truncate text-sm font-black uppercase tracking-tight text-white">
-              {client.name}
+              {displayName}
             </p>
           </div>
         </div>

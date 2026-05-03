@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 import dotenv from "dotenv";
+import { createReadStream } from "fs";
+import path from "path";
 import type { Request, Response } from "express";
 import type { Run, RunCreatePayload, ReviewPayload } from "./types.js";
 import { STAGE_DEFINITIONS } from "./types.js";
@@ -46,14 +48,23 @@ import {
   getEscalation,
   getEscalationByArtifact,
   listEscalationsByRun,
+  updateEscalation,
   getOrchestrationDecisions,
   getOrchestrationDecisionsByRun,
   getShotSummaries,
+  getRecentRunsByCampaign,
+  getRunDetail,
+  getMotionPhaseGateState,
+  getDirectionDriftIndicatorsByCampaign,
+  getArtifactsForDeliverableWithVerdicts,
 } from "./db.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
 import { createProductionsRouter } from "./productions.js";
+import { getTempGenDir } from "./temp-gen-env.js";
+import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
+import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
 
 dotenv.config();
 
@@ -61,12 +72,29 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "75mb" }));
 app.use("/api/productions", createProductionsRouter());
 
 // Helper to extract params safely
 function getParam(req: Request, name: string): string {
   return req.params[name] as string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function artifactLocalPathFromMetadata(value: unknown): string | null {
+  const metadata = isRecord(value) ? value : null;
+  const localPath = metadata && typeof metadata.localPath === "string" ? metadata.localPath : null;
+  return localPath && localPath.trim().length > 0 ? localPath : null;
+}
+
+function imageContentType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  return "image/png";
 }
 
 // ============ Client Routes ============
@@ -103,10 +131,103 @@ app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
 app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const { mode, campaignId } = req.body as RunCreatePayload;
+    const { mode, campaignId, deliverableIds, inputs, auditMode, shotIds } = req.body as RunCreatePayload;
 
     if (!mode || !STAGE_DEFINITIONS[mode]) {
       res.status(400).json({ error: "Invalid mode" });
+      return;
+    }
+    const modeFlag = validateRunModeFeatureFlag(mode);
+    if (!modeFlag.ok) {
+      res.status(modeFlag.status).json({ error: modeFlag.error });
+      return;
+    }
+
+    // ADR-004 Phase B: validate auditMode shape + scope.
+    // - auditMode is opt-in for mode === "stills"; ignored otherwise (logged
+    //   so misconfiguration surfaces in run history).
+    // - auditMode: true requires campaignId — audit fans out across the
+    //   campaign's locked stills, so a scope is mandatory.
+    if (auditMode !== undefined && typeof auditMode !== "boolean") {
+      res.status(400).json({ error: "auditMode must be boolean" });
+      return;
+    }
+    if (mode === "stills" && auditMode === true && !campaignId) {
+      res.status(400).json({ error: "auditMode=true requires campaignId" });
+      return;
+    }
+
+    // Phase B+ targeted-regen (2026-04-30): validate shotIds shape + scope.
+    // - shotIds is opt-in for mode === "stills" + auditMode !== true; rejected
+    //   for other modes / audit-mode runs (audit fans out across the campaign,
+    //   shotIds would be ambiguous there).
+    // - Every entry must be a positive integer in [1, 100] (manifest shot ids
+    //   are 1-based; 100 is a generous upper bound for any future production).
+    let normalizedShotIds: number[] | undefined;
+    if (shotIds !== undefined) {
+      if (!Array.isArray(shotIds) || shotIds.length === 0) {
+        res.status(400).json({ error: "shotIds must be a non-empty array of integers when provided" });
+        return;
+      }
+      if (mode !== "stills" || auditMode === true) {
+        res.status(400).json({
+          error: "shotIds is only valid for mode=stills with auditMode=false (in-loop targeted regen)",
+        });
+        return;
+      }
+      if (!campaignId) {
+        res.status(400).json({ error: "shotIds requires campaignId" });
+        return;
+      }
+      const invalid = shotIds.find(
+        (s) => typeof s !== "number" || !Number.isInteger(s) || s < 1 || s > 100,
+      );
+      if (invalid !== undefined) {
+        res.status(400).json({
+          error: `shotIds entries must be integers in [1, 100]; got ${JSON.stringify(invalid)}`,
+        });
+        return;
+      }
+      // De-dup while preserving order — the runner's iteration matches input
+      // order so operators can prioritize.
+      const seen = new Set<number>();
+      normalizedShotIds = [];
+      for (const s of shotIds) {
+        if (!seen.has(s)) {
+          seen.add(s);
+          normalizedShotIds.push(s);
+        }
+      }
+    }
+
+    let normalizedDeliverableIds: string[] | undefined;
+    if (deliverableIds !== undefined) {
+      if (!Array.isArray(deliverableIds) || deliverableIds.length === 0) {
+        res.status(400).json({ error: "deliverableIds must be a non-empty array of strings when provided" });
+        return;
+      }
+      if (!campaignId) {
+        res.status(400).json({ error: "deliverableIds requires campaignId" });
+        return;
+      }
+      const invalid = deliverableIds.find((id) => typeof id !== "string" || id.trim().length === 0);
+      if (invalid !== undefined) {
+        res.status(400).json({ error: `deliverableIds entries must be non-empty strings; got ${JSON.stringify(invalid)}` });
+        return;
+      }
+      const seen = new Set<string>();
+      normalizedDeliverableIds = [];
+      for (const id of deliverableIds) {
+        const trimmed = id.trim();
+        if (!seen.has(trimmed)) {
+          seen.add(trimmed);
+          normalizedDeliverableIds.push(trimmed);
+        }
+      }
+    }
+
+    if (inputs !== undefined && !isRecord(inputs)) {
+      res.status(400).json({ error: "inputs must be an object when provided" });
       return;
     }
 
@@ -116,11 +237,59 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       return;
     }
 
+    if (campaignId) {
+      const campaign = await getCampaign(campaignId);
+      const campaignScope = validateCampaignClientScope(campaign, clientId);
+      if (!campaignScope.ok) {
+        res.status(campaignScope.status).json({ error: campaignScope.error });
+        return;
+      }
+    }
+
+    if (campaignId && normalizedDeliverableIds && normalizedDeliverableIds.length > 0) {
+      const campaignDeliverables = await getDeliverablesByCampaign(campaignId);
+      const allowedDeliverableIds = new Set(campaignDeliverables.map((deliverable) => deliverable.id));
+      const outOfScope = normalizedDeliverableIds.find((id) => !allowedDeliverableIds.has(id));
+      if (outOfScope) {
+        res.status(400).json({ error: `deliverableId ${outOfScope} does not belong to campaign ${campaignId}` });
+        return;
+      }
+    }
+
     const now = new Date().toISOString();
     const stages = STAGE_DEFINITIONS[mode].map((s) => ({
       ...s,
       status: "pending" as const,
     }));
+
+    // ADR-004 Phase B (revision after migration 011_runs_metadata.sql):
+    // persist auditMode on the run row at creation time. Survives os-api
+    // restart mid-run; the runner reads run.metadata.audit_mode at exec time
+    // and the HUD can show audit-vs-in-loop status without an in-memory
+    // round-trip. Tim authorized migration 011 explicitly 2026-04-29 PM.
+    const runMetadata: Record<string, unknown> = {};
+    if (mode === "stills") {
+      runMetadata.audit_mode = auditMode ?? false;
+      // Phase B+ targeted-regen: persist normalized shotIds so the runner
+      // (which reads run.metadata at exec time) can scope iteration. Survives
+      // os-api restart mid-run, same as audit_mode.
+      if (normalizedShotIds && normalizedShotIds.length > 0) {
+        runMetadata.shot_ids = normalizedShotIds;
+      }
+    }
+    if (normalizedDeliverableIds && normalizedDeliverableIds.length > 0) {
+      runMetadata.deliverable_ids = normalizedDeliverableIds;
+    }
+    if (isRecord(inputs)) {
+      runMetadata.inputs = inputs;
+      const parentRunId = typeof inputs.parentRunId === "string" && inputs.parentRunId.trim().length > 0
+        ? inputs.parentRunId.trim()
+        : undefined;
+      if (parentRunId) runMetadata.parentRunId = parentRunId;
+      if (isRecord(inputs.motionPhaseGate)) {
+        runMetadata.motion_phase_gate = inputs.motionPhaseGate;
+      }
+    }
 
     const run: Run = {
       runId: uuidv4(),
@@ -131,11 +300,13 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
       stages,
       createdAt: now,
       updatedAt: now,
+      metadata: runMetadata,
     };
 
     const created = await createRun(run);
 
-    // Start execution asynchronously
+    // Start execution asynchronously. opts is now optional (kept on
+    // executeRun for any future runtime override that shouldn't persist).
     setImmediate(() => executeRun(created).catch(console.error));
 
     res.status(201).json(created);
@@ -159,6 +330,22 @@ app.get("/api/runs/:runId", async (req: Request, res: Response) => {
     res.json(run);
   } catch (err) {
     console.error("GET /api/runs/:runId error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/detail - Run drawer payload for HUD operators
+app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const detail = await getRunDetail(runId);
+    if (!detail) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+    res.json(detail);
+  } catch (err) {
+    console.error("GET /api/runs/:runId/detail error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -425,6 +612,64 @@ app.get("/api/runs/:runId/artifacts", async (req: Request, res: Response) => {
     res.json(artifacts);
   } catch (err) {
     console.error("GET /api/runs/:runId/artifacts error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/deliverables/:deliverableId/iterations - Regen artifacts + critic verdicts
+app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res: Response) => {
+  try {
+    const deliverableId = getParam(req, "deliverableId");
+    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId);
+    res.json(iterations);
+  } catch (err) {
+    console.error("GET /api/deliverables/:deliverableId/iterations error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) => {
+  try {
+    const artifactId = getParam(req, "artifactId");
+    const artifact = await getArtifactById(artifactId);
+    if (!artifact) {
+      res.status(404).json({ error: "Artifact not found" });
+      return;
+    }
+
+    const tempGenRoot = getTempGenDir();
+    const localPath = artifactLocalPathFromMetadata(artifact.metadata)
+      ?? (artifact.path.startsWith("/") ? artifact.path : null);
+    if (!localPath) {
+      res.status(404).json({ error: "No local artifact file path available" });
+      return;
+    }
+
+    let resolved: string;
+    try {
+      resolved = resolveExistingRealPathInsideAllowedRoots(localPath, [tempGenRoot], {
+        missingMessage: "Artifact file not found on disk",
+        missingRootMessage: "Configured Temp-gen root not found on disk",
+        forbiddenMessage: "Artifact file is outside the configured Temp-gen root",
+      });
+    } catch (err) {
+      if (err instanceof ForbiddenPathError) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
+      if (err instanceof PathNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    res.setHeader("Content-Type", imageContentType(resolved));
+    res.setHeader("Cache-Control", "private, max-age=60");
+    createReadStream(resolved).pipe(res);
+  } catch (err) {
+    console.error("GET /api/artifacts/:artifactId/file error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -703,6 +948,44 @@ app.post("/api/clients/:clientId/campaigns", async (req: Request, res: Response)
 });
 
 // ============ Deliverable Routes ============
+
+// GET /api/campaigns/:campaignId/recent-runs - Last N campaign runs for HUD workspace
+app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 10;
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
+    const runs = await getRecentRunsByCampaign(campaignId, limit);
+    res.json(runs);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/recent-runs error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/motion-phase-gate - Stills → Veo handoff state
+app.get("/api/campaigns/:campaignId/motion-phase-gate", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const state = await getMotionPhaseGateState(campaignId);
+    res.json(state);
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/motion-phase-gate error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/campaigns/:campaignId/direction-drift - Per-shot direction drift badges
+app.get("/api/campaigns/:campaignId/direction-drift", async (req: Request, res: Response) => {
+  try {
+    const campaignId = getParam(req, "campaignId");
+    const indicatorMap = await getDirectionDriftIndicatorsByCampaign(campaignId);
+    res.json(Object.fromEntries(indicatorMap.entries()));
+  } catch (err) {
+    console.error("GET /api/campaigns/:campaignId/direction-drift error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // GET /api/campaigns/:campaignId/deliverables - List deliverables
 app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
@@ -1095,6 +1378,88 @@ app.get("/api/escalations/:id", async (req: Request, res: Response) => {
     res.json({ ...escalation, decisions });
   } catch (err) {
     console.error("GET /api/escalations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/escalations/:id/resolve - Operator resolves an open escalation.
+app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+    const body = req.body as {
+      status?: unknown;
+      resolution_path?: unknown;
+      resolutionPath?: unknown;
+      resolution_notes?: unknown;
+      resolutionNotes?: unknown;
+    };
+
+    const status = body.status;
+    const resolutionPath = body.resolution_path ?? body.resolutionPath;
+    const resolutionNotes = body.resolution_notes ?? body.resolutionNotes;
+
+    if (status !== "accepted") {
+      res.status(400).json({ error: "Only status='accepted' is supported by this Review Gate resolver" });
+      return;
+    }
+    if (resolutionPath !== "accept") {
+      res.status(400).json({ error: "resolution_path must be 'accept'" });
+      return;
+    }
+    if (typeof resolutionNotes !== "string" || resolutionNotes.trim().length === 0) {
+      res.status(400).json({ error: "resolution_notes is required" });
+      return;
+    }
+    if (resolutionNotes.length > 2000) {
+      res.status(400).json({ error: "resolution_notes must be 2000 characters or less" });
+      return;
+    }
+
+    const existing = await getEscalation(id);
+    if (!existing) {
+      res.status(404).json({ error: "Escalation not found" });
+      return;
+    }
+
+    const openStatuses = new Set(["hitl_required", "in_progress"]);
+    if (!openStatuses.has(existing.status)) {
+      if (existing.status === "accepted" && existing.resolutionPath === "accept") {
+        res.json({ escalation: existing, runHitlCleared: false, alreadyResolved: true });
+        return;
+      }
+      res.status(409).json({ error: `Escalation is already terminal (${existing.status})` });
+      return;
+    }
+
+    const resolvedAt = new Date().toISOString();
+    const updated = await updateEscalation(id, {
+      status: "accepted",
+      resolutionPath: "accept",
+      resolutionNotes: resolutionNotes.trim(),
+      resolvedAt,
+    });
+
+    let runHitlCleared = false;
+    if (updated.runId) {
+      const runEscalations = await listEscalationsByRun(updated.runId);
+      const hasOtherOpenEscalations = runEscalations.some(
+        (item) => item.id !== updated.id && openStatuses.has(item.status),
+      );
+
+      if (!hasOtherOpenEscalations) {
+        const run = await getRun(updated.runId);
+        if (run?.hitlRequired) {
+          await updateRun(updated.runId, { hitlRequired: false });
+          runHitlCleared = true;
+        }
+      }
+
+      runEvents.emit(`escalation:${updated.runId}`, updated);
+    }
+
+    res.json({ escalation: updated, runHitlCleared });
+  } catch (err) {
+    console.error("PATCH /api/escalations/:id/resolve error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

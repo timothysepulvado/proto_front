@@ -192,23 +192,49 @@ class Worker:
         except Exception as e:
             print(f"[Worker] Error adding artifact: {e}")
 
+    # ADR-004 Phase B: modes the os-api runner owns end-to-end (in-process via
+    # setImmediate(executeRun)). The worker MUST NOT claim these — doing so
+    # would silently no-op the run since the worker has no executor for them.
+    # Defensive belt-and-suspenders: os-api's setImmediate already drives
+    # execution before the worker's poll cycle picks the row up, but a slow
+    # node loop or restarted process could lose that race.
+    OS_API_OWNED_MODES = ("regrade", "stills")
+
     def _claim_pending_run(self) -> Optional[dict]:
         """
         Find and claim a pending run.
 
         Returns the run data if one was claimed, None otherwise.
+
+        Modes listed in OS_API_OWNED_MODES are skipped — the os-api Express
+        runner handles those in-process and the worker has no executor for
+        them. Skipping is server-side via .not_.in_("mode", ...) so we don't
+        round-trip rows we'll just discard.
         """
         try:
-            # Find a pending run
+            # Find a pending run NOT in any os-api-owned mode.
             result = self.supabase.table("runs").select("*").eq(
                 "status", "pending"
-            ).order("created_at").limit(1).execute()
+            ).not_.in_("mode", list(self.OS_API_OWNED_MODES)).order(
+                "created_at"
+            ).limit(1).execute()
 
             if not result.data:
                 return None
 
             run = result.data[0]
             run_id = run["id"]
+            mode = run["mode"]
+
+            # Defensive: even though the query filters, double-check before
+            # claiming so a future query refactor can't accidentally bypass
+            # the guard.
+            if mode in self.OS_API_OWNED_MODES:
+                print(
+                    f"[Worker] Skipping run {run_id} (mode: {mode}) — "
+                    f"os-api owns this mode; worker has no executor."
+                )
+                return None
 
             # Attempt to claim it by setting status to running
             # This is a simple approach - in production you'd want a proper lock
@@ -218,7 +244,7 @@ class Worker:
             }).eq("id", run_id).eq("status", "pending").execute()
 
             if update_result.data:
-                print(f"[Worker] Claimed run: {run_id} (mode: {run['mode']})")
+                print(f"[Worker] Claimed run: {run_id} (mode: {mode})")
                 return update_result.data[0]
             else:
                 # Another worker claimed it

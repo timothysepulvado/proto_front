@@ -1,9 +1,16 @@
 import { supabase } from "./lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export";
+export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 export type ClientStatus = "active" | "inactive" | "archived";
+
+export interface ClientUiConfig {
+  displayName?: string;
+  entityLabel?: string;
+  featured?: boolean;
+  productionSlug?: string;
+}
 
 export interface RunStage {
   id: string;
@@ -28,6 +35,7 @@ export interface Run {
   error?: string;
   hitlRequired?: boolean;
   hitlNotes?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface RunLog {
@@ -55,10 +63,146 @@ export interface Artifact {
   createdAt: string;
 }
 
+export interface RecentCampaignRun {
+  runId: string;
+  clientId: string;
+  campaignId?: string;
+  mode: RunMode;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationSeconds: number | null;
+  hitlRequired: boolean;
+  hitlNotes?: string;
+  shotIds: number[] | null;
+  auditMode: boolean | null;
+  parentRunId?: string;
+}
+
+export interface RunDetail {
+  run: Run;
+  logs: RunLog[];
+  artifacts: Artifact[];
+  orchestrationDecisionCount: number;
+  totalOrchestrationCost: number;
+  relatedStillsRun?: RecentCampaignRun | null;
+}
+
+export type ArtifactIterationVerdictLabel = "PASS" | "WARN" | "FAIL" | "SHIP";
+
+export interface ArtifactIterationVerdict {
+  verdict: ArtifactIterationVerdictLabel | null;
+  score: number | null;
+  recommendation: string | null;
+  failureClasses: string[];
+  logId?: number;
+  decisionId?: string;
+  timestamp?: string;
+  message?: string;
+}
+
+export interface ArtifactIterationOperatorOverride {
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+}
+
+export interface ArtifactIterationRow {
+  artifact: Artifact;
+  deliverableId: string;
+  shotNumber: number | null;
+  runId: string;
+  runCreatedAt: string | null;
+  runOrdinalForShot: number | null;
+  iter: number | null;
+  label: string;
+  displayUrl: string;
+  localPath: string | null;
+  isSeed: boolean;
+  isCarryForward: boolean;
+  parentArtifactId: string | null;
+  parentLabel: string | null;
+  verdict: ArtifactIterationVerdict | null;
+  operatorOverride: ArtifactIterationOperatorOverride | null;
+}
+
+export interface ArtifactIterationsResponse {
+  deliverableId: string;
+  shotNumber: number | null;
+  rows: ArtifactIterationRow[];
+  generatedAt: string;
+}
+
+export type MotionGateShotState =
+  | "locked"
+  | "operator-override"
+  | "operator-accepted"
+  | "canonical"
+  | "pending";
+
+export interface MotionGateShotOfNote {
+  shotNumber: number;
+  deliverableId?: string;
+  state: MotionGateShotState;
+  summary: string;
+  source: "operator_override" | "asset_escalation" | "canonical_reference" | "manifest" | "run_history";
+  runId?: string;
+  criticScore?: number;
+  criticVerdict?: string;
+  decidedIter?: number;
+  decisionBy?: string;
+  decisionAt?: string;
+}
+
+export interface MotionPhaseGateState {
+  campaignId: string;
+  productionSlug?: string;
+  lockedDeliverableIds: string[];
+  lockedCount: number;
+  operatorConfirmedCount: number;
+  lockedWithoutExplicitApprovalCount: number;
+  openHitlCount: number;
+  blocked: boolean;
+  latestStillsRunId?: string;
+  shotsOfNote: MotionGateShotOfNote[];
+  generatedAt: string;
+}
+
+export type DirectionDriftVerdictSource =
+  | "run_logs"
+  | "audit_report"
+  | "orchestration_decision"
+  | "operator_override"
+  | "asset_escalation"
+  | "manifest_caveat";
+
+export interface DirectionDriftIndicator {
+  deliverableId: string;
+  shotNumber: number | null;
+  directionDrift: boolean;
+  latestVerdictRunId: string | null;
+  latestVerdictTimestamp: string | null;
+  matchedClasses: string[];
+  source: DirectionDriftVerdictSource | null;
+  verdict: "PASS" | "WARN" | "FAIL" | null;
+  score: number | null;
+  latestVerdictLogId?: number;
+  latestVerdictDecisionId?: string;
+  timelineEventId?: string;
+}
+
 export interface Client {
   id: string;
   name: string;
   status: ClientStatus;
+  uiConfig?: ClientUiConfig;
   featured?: boolean;
   lastRunId?: string;
   lastRunAt?: string;
@@ -82,6 +226,7 @@ interface DbRun {
   error: string | null;
   hitl_required: boolean;
   hitl_notes: string | null;
+  metadata: Record<string, unknown> | null;
 }
 
 interface DbRunLog {
@@ -113,11 +258,30 @@ interface DbClient {
   id: string;
   name: string;
   status: ClientStatus;
+  ui_config?: Record<string, unknown> | null;
   last_run_id: string | null;
   last_run_at: string | null;
   last_run_status: RunStatus | null;
   created_at: string;
   updated_at: string;
+}
+
+function readUiConfigString(config: Record<string, unknown>, snakeKey: string, camelKey: string): string | undefined {
+  const value = config[snakeKey] ?? config[camelKey];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function mapDbClientUiConfig(value: Record<string, unknown> | null | undefined): ClientUiConfig | undefined {
+  if (!value) return undefined;
+  const config: ClientUiConfig = {};
+  const displayName = readUiConfigString(value, "display_name", "displayName");
+  const entityLabel = readUiConfigString(value, "entity_label", "entityLabel");
+  const productionSlug = readUiConfigString(value, "production_slug", "productionSlug");
+  if (displayName) config.displayName = displayName;
+  if (entityLabel) config.entityLabel = entityLabel;
+  if (productionSlug) config.productionSlug = productionSlug;
+  if (typeof value.featured === "boolean") config.featured = value.featured;
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 // Mappers
@@ -136,6 +300,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
     error: dbRun.error ?? undefined,
     hitlRequired: dbRun.hitl_required,
     hitlNotes: dbRun.hitl_notes ?? undefined,
+    metadata: dbRun.metadata ?? undefined,
   };
 }
 
@@ -169,10 +334,13 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
 }
 
 function mapDbClientToClient(dbClient: DbClient): Client {
+  const uiConfig = mapDbClientUiConfig(dbClient.ui_config);
   return {
     id: dbClient.id,
     name: dbClient.name,
     status: dbClient.status,
+    uiConfig,
+    featured: uiConfig?.featured,
     lastRunId: dbClient.last_run_id ?? undefined,
     lastRunAt: dbClient.last_run_at ?? undefined,
     lastRunStatus: dbClient.last_run_status ?? undefined,
@@ -268,6 +436,228 @@ export async function getClientRuns(clientId: string): Promise<Run[]> {
   }
 
   return (data as DbRun[]).map(mapDbRunToRun);
+}
+
+export async function getLatestStillsAuditRun(campaignId: string): Promise<Run | null> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .eq("mode", "stills")
+    .contains("metadata", { audit_mode: true })
+    .order("created_at", { ascending: false })
+    .limit(25);
+
+  if (error) {
+    throw new Error(`Failed to get latest stills audit run: ${error.message}`);
+  }
+
+  const auditRuns = (data as DbRun[]).map(mapDbRunToRun);
+
+  return auditRuns.find((run) => run.status === "completed" && Boolean(run.metadata?.audit_report))
+    ?? auditRuns.find((run) => run.status === "running" || run.status === "pending")
+    ?? auditRuns[0]
+    ?? null;
+}
+
+/**
+ * Gap 2 (2026-04-30) — staleness signal for the audit triage panel.
+ *
+ * Counts in-loop stills runs (`mode:'stills'` + `metadata.audit_mode != true`)
+ * created strictly after the provided cutoff. The cutoff is the
+ * `created_at` of the most recent audit-mode run for the campaign. If no
+ * cutoff is provided (no audit ever fired), returns null so the caller
+ * can render an "audit never run" state instead of a misleading zero.
+ *
+ * Used by `<AuditTriageTable>` to render: "Today's in-loop runs: {N} ran
+ * since." — operator knows the triage report is N regens behind reality
+ * and can fire a fresh audit if needed.
+ *
+ * Implementation note: filters via JSONB->>'audit_mode' != 'true'. Both
+ * `audit_mode: false` and missing-key (null) cases match — both are
+ * legitimate in-loop runs (auditMode defaults to false at runner level
+ * pre-Phase B persistence; current rows have explicit `audit_mode: false`).
+ */
+export async function getInLoopRunsSinceAudit(
+  campaignId: string,
+  auditCutoffISO: string | null,
+): Promise<number | null> {
+  if (!auditCutoffISO) return null;
+
+  const { data, error } = await supabase
+    .from("runs")
+    .select("id, metadata")
+    .eq("campaign_id", campaignId)
+    .eq("mode", "stills")
+    .gt("created_at", auditCutoffISO);
+
+  if (error) {
+    // Non-fatal — banner will fall back to "—" rather than blocking the panel.
+    console.warn("[api] getInLoopRunsSinceAudit failed:", error.message);
+    return null;
+  }
+  if (!data) return 0;
+  // Filter out audit-mode runs in JS (JSONB head-count via PostgREST is
+  // version-dependent; this is the reliable path).
+  const inLoopOnly = (data as Array<{ id: string; metadata: Record<string, unknown> | null }>).filter(
+    (row) => {
+      const auditMode = row.metadata && (row.metadata as { audit_mode?: unknown }).audit_mode;
+      return auditMode !== true;
+    },
+  );
+  return inLoopOnly.length;
+}
+
+// ============ Operator Override Audit Trail (Gap 3) ============
+
+export interface OperatorOverrideDecision {
+  runId: string;
+  campaignId: string;
+  runCreatedAt: string;
+  shotKey: string;
+  shotNumber: number;
+  decisionAt: string;
+  decisionBy?: string;
+  decidedArtifactPath?: string;
+  decidedIter?: number;
+  criticVerdict?: string;
+  criticScore?: number;
+  rationale?: string;
+  lockedTo?: string;
+  runOrdinalForShot?: number;
+}
+
+interface DbRunOperatorOverride {
+  id: string;
+  campaign_id: string | null;
+  mode: RunMode;
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+}
+
+const OPERATOR_OVERRIDE_SHOT_KEY = /^shot_(\d+)$/i;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readOptionalString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readOptionalNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function extractShotIds(metadata: Record<string, unknown> | null): number[] {
+  const raw = metadata?.shot_ids;
+  if (!Array.isArray(raw)) return [];
+  const ids = raw
+    .map((item) => {
+      if (typeof item === "number" && Number.isInteger(item)) return item;
+      if (typeof item === "string") {
+        const parsed = Number.parseInt(item, 10);
+        return Number.isInteger(parsed) ? parsed : null;
+      }
+      return null;
+    })
+    .filter((item): item is number => item !== null && item > 0);
+  return [...new Set(ids)];
+}
+
+function isAuditModeRun(metadata: Record<string, unknown> | null): boolean {
+  return metadata?.audit_mode === true;
+}
+
+function eventTimestamp(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Reads `runs.metadata.operator_override` for every run in a campaign and
+ * normalizes the sparse JSONB shape into per-shot audit events.
+ *
+ * The helper intentionally derives a shot-specific in-loop run ordinal
+ * (`v5` for today's shot 20 override) from the same campaign run set so the
+ * HUD can explain operator choices in the language Tim used during review.
+ */
+export async function getOperatorOverridesForCampaign(campaignId: string): Promise<OperatorOverrideDecision[]> {
+  const { data, error } = await supabase
+    .from("runs")
+    .select("id,campaign_id,mode,created_at,metadata")
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: false })
+    .limit(250);
+
+  if (error) throw new Error(`Failed to get operator overrides: ${error.message}`);
+
+  const rows = (data as DbRunOperatorOverride[]) ?? [];
+  const chronologicalRows = [...rows].sort((left, right) => {
+    return eventTimestamp(left.created_at) - eventTimestamp(right.created_at);
+  });
+  const shotCounts = new Map<number, number>();
+  const shotOrdinalByRun = new Map<string, number>();
+
+  for (const row of chronologicalRows) {
+    const metadata = isPlainRecord(row.metadata) ? row.metadata : null;
+    if (row.mode !== "stills" || isAuditModeRun(metadata)) continue;
+
+    for (const shotId of extractShotIds(metadata)) {
+      const nextOrdinal = (shotCounts.get(shotId) ?? 0) + 1;
+      shotCounts.set(shotId, nextOrdinal);
+      shotOrdinalByRun.set(`${row.id}:shot_${shotId}`, nextOrdinal);
+    }
+  }
+
+  const overrides: OperatorOverrideDecision[] = [];
+  for (const row of rows) {
+    const metadata = isPlainRecord(row.metadata) ? row.metadata : null;
+    const operatorOverride = isPlainRecord(metadata?.operator_override)
+      ? metadata.operator_override
+      : null;
+    if (!operatorOverride) continue;
+
+    for (const [shotKey, rawDecision] of Object.entries(operatorOverride)) {
+      const shotMatch = OPERATOR_OVERRIDE_SHOT_KEY.exec(shotKey);
+      const decision = isPlainRecord(rawDecision) ? rawDecision : null;
+      if (!shotMatch || !decision) continue;
+
+      const shotNumber = Number.parseInt(shotMatch[1], 10);
+      if (!Number.isInteger(shotNumber)) continue;
+
+      const normalizedShotKey = `shot_${shotNumber}`;
+      overrides.push({
+        runId: row.id,
+        campaignId: row.campaign_id ?? campaignId,
+        runCreatedAt: row.created_at,
+        shotKey: normalizedShotKey,
+        shotNumber,
+        decisionAt: readOptionalString(decision, "decision_at") ?? row.created_at,
+        decisionBy: readOptionalString(decision, "decision_by"),
+        decidedArtifactPath: readOptionalString(decision, "decided_artifact_path"),
+        decidedIter: readOptionalNumber(decision, "decided_iter"),
+        criticVerdict: readOptionalString(decision, "critic_verdict"),
+        criticScore: readOptionalNumber(decision, "critic_score"),
+        rationale: readOptionalString(decision, "rationale"),
+        lockedTo: readOptionalString(decision, "locked_to"),
+        runOrdinalForShot: shotOrdinalByRun.get(`${row.id}:${normalizedShotKey}`),
+      });
+    }
+  }
+
+  return overrides.sort((left, right) => {
+    const runDelta = eventTimestamp(right.runCreatedAt) - eventTimestamp(left.runCreatedAt);
+    if (runDelta !== 0) return runDelta;
+    return eventTimestamp(right.decisionAt) - eventTimestamp(left.decisionAt);
+  });
 }
 
 // Update run status
@@ -1049,6 +1439,126 @@ export function subscribeToDriftAlerts(
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
+export async function createStillsAuditRun(clientId: string, campaignId: string): Promise<Run> {
+  const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "stills",
+      campaignId,
+      auditMode: true,
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Run;
+}
+
+export async function getCampaignRecentRuns(campaignId: string, limit = 10): Promise<RecentCampaignRun[]> {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const resp = await fetch(
+    `${OS_API_URL}/api/campaigns/${campaignId}/recent-runs?limit=${encodeURIComponent(String(safeLimit))}`,
+  );
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RecentCampaignRun[];
+}
+
+export async function getMotionPhaseGateState(campaignId: string): Promise<MotionPhaseGateState> {
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/motion-phase-gate`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as MotionPhaseGateState;
+}
+
+export async function getDirectionDriftIndicators(
+  campaignId: string,
+): Promise<Record<string, DirectionDriftIndicator>> {
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/direction-drift`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Record<string, DirectionDriftIndicator>;
+}
+
+export async function getArtifactIterationsForDeliverable(
+  deliverableId: string,
+): Promise<ArtifactIterationsResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ArtifactIterationsResponse;
+}
+
+export function resolveArtifactDisplayUrl(displayUrl: string): string {
+  return displayUrl.startsWith("/api/") ? `${OS_API_URL}${displayUrl}` : displayUrl;
+}
+
+export async function createMotionPhaseRun(
+  clientId: string,
+  campaignId: string,
+  gateState: MotionPhaseGateState,
+): Promise<Run> {
+  const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: "video",
+      campaignId,
+      deliverableIds: gateState.lockedDeliverableIds,
+      inputs: {
+        source: "motion_phase_gate",
+        parentRunId: gateState.latestStillsRunId,
+        motionPhaseGate: {
+          lockedStillsCount: gateState.lockedCount,
+          operatorConfirmedCount: gateState.operatorConfirmedCount,
+          lockedWithoutExplicitApprovalCount: gateState.lockedWithoutExplicitApprovalCount,
+          openHitlCount: gateState.openHitlCount,
+          shotsOfNote: gateState.shotsOfNote.map((shot) => ({
+            shotNumber: shot.shotNumber,
+            state: shot.state,
+            source: shot.source,
+            runId: shot.runId,
+          })),
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as Run;
+}
+
+export async function getRunDetail(runId: string): Promise<RunDetail> {
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/detail`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RunDetail;
+}
+
+export function subscribeToRunsByClient(
+  clientId: string,
+  onChange: (run: Run | null) => void,
+): () => void {
+  const channel = supabase
+    .channel(`runs:${clientId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "runs",
+        filter: `client_id=eq.${clientId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onChange(mapDbRunToRun(payload.new as DbRun));
+          return;
+        }
+        onChange(null);
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 export interface PlatformVariant {
   platform: string;
   label: string;
@@ -1226,6 +1736,16 @@ export interface CampaignDeliverable {
   status: DeliverableStatus;
   retryCount: number;
   rejectionReason?: string;
+  format?: "before_after" | "carousel" | "testimonial" | "heritage"
+         | "problem_solution" | "review_ad" | "custom";
+  mediaType?: "image" | "video" | "mixed";
+  durationSeconds?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  platform?: string;
+  qualityTier?: "lite" | "fast" | "standard" | "pro";
+  referenceImages?: string[];
+  estimatedCost?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1239,6 +1759,8 @@ export interface Campaign {
   platforms?: string[];
   mode?: string;
   maxRetries: number;
+  referenceImages?: string[];
+  guardrails?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -1252,7 +1774,17 @@ interface DbCampaignDeliverable {
   original_prompt: string | null;
   status: string;
   retry_count: number;
-  rejection_reason: string | null;
+  rejection_reason?: string | null;
+  custom_rejection_note?: string | null;
+  format: string | null;
+  media_type: string | null;
+  duration_seconds: number | null;
+  aspect_ratio: string | null;
+  resolution: string | null;
+  platform: string | null;
+  quality_tier: string | null;
+  reference_images: string[] | null;
+  estimated_cost: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -1266,6 +1798,8 @@ interface DbCampaign {
   platforms: string[] | null;
   mode: string | null;
   max_retries: number;
+  reference_images?: string[] | null;
+  guardrails?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -1280,7 +1814,16 @@ function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliv
     originalPrompt: db.original_prompt ?? undefined,
     status: db.status as DeliverableStatus,
     retryCount: db.retry_count,
-    rejectionReason: db.rejection_reason ?? undefined,
+    rejectionReason: db.custom_rejection_note ?? db.rejection_reason ?? undefined,
+    format: (db.format as CampaignDeliverable["format"]) ?? undefined,
+    mediaType: (db.media_type as CampaignDeliverable["mediaType"]) ?? undefined,
+    durationSeconds: db.duration_seconds ?? undefined,
+    aspectRatio: db.aspect_ratio ?? undefined,
+    resolution: db.resolution ?? undefined,
+    platform: db.platform ?? undefined,
+    qualityTier: (db.quality_tier as CampaignDeliverable["qualityTier"]) ?? undefined,
+    referenceImages: db.reference_images ?? undefined,
+    estimatedCost: db.estimated_cost != null ? Number(db.estimated_cost) : undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
@@ -1296,9 +1839,23 @@ function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
     platforms: db.platforms ?? undefined,
     mode: db.mode ?? undefined,
     maxRetries: db.max_retries,
+    referenceImages: db.reference_images ?? undefined,
+    guardrails: db.guardrails ?? undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
+}
+
+// Get campaigns for a BrandStudios workspace
+export async function getCampaignsByClient(clientId: string): Promise<Campaign[]> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get campaigns: ${error.message}`);
+  return (data as DbCampaign[]).map(mapDbCampaignToCampaign);
 }
 
 // Get deliverables for a campaign
@@ -1363,6 +1920,8 @@ export function subscribeToCampaignDeliverables(
   };
 }
 
+// ============ Review Gate Escalation Surface (Gap 1) ============
+
 // ============ Shot Summaries (Chunk 2 — HUD observability) ============
 
 export type EscalationLevel = "L1" | "L2" | "L3";
@@ -1373,6 +1932,208 @@ export type EscalationStatus =
   | "redesigned"
   | "replaced"
   | "hitl_required";
+export type EscalationAction =
+  | "prompt_fix"
+  | "approach_change"
+  | "accept"
+  | "redesign"
+  | "replace"
+  | "post_vfx";
+
+export interface AssetEscalation {
+  id: string;
+  artifactId: string;
+  deliverableId?: string;
+  runId?: string;
+  currentLevel: EscalationLevel;
+  status: EscalationStatus;
+  iterationCount: number;
+  failureClass?: string;
+  knownLimitationId?: string;
+  resolutionPath?: EscalationAction;
+  resolutionNotes?: string;
+  finalArtifactId?: string;
+  resolvedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface DbAssetEscalation {
+  id: string;
+  artifact_id: string;
+  deliverable_id: string | null;
+  run_id: string | null;
+  current_level: EscalationLevel;
+  status: EscalationStatus;
+  iteration_count: number;
+  failure_class: string | null;
+  known_limitation_id: string | null;
+  resolution_path: string | null;
+  resolution_notes: string | null;
+  final_artifact_id: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapDbAssetEscalation(db: DbAssetEscalation): AssetEscalation {
+  return {
+    id: db.id,
+    artifactId: db.artifact_id,
+    deliverableId: db.deliverable_id ?? undefined,
+    runId: db.run_id ?? undefined,
+    currentLevel: db.current_level,
+    status: db.status,
+    iterationCount: db.iteration_count,
+    failureClass: db.failure_class ?? undefined,
+    knownLimitationId: db.known_limitation_id ?? undefined,
+    resolutionPath: (db.resolution_path ?? undefined) as EscalationAction | undefined,
+    resolutionNotes: db.resolution_notes ?? undefined,
+    finalArtifactId: db.final_artifact_id ?? undefined,
+    resolvedAt: db.resolved_at ?? undefined,
+    createdAt: db.created_at,
+    updatedAt: db.updated_at,
+  };
+}
+
+export interface ReviewGateEscalation {
+  escalation: AssetEscalation;
+  run?: Run;
+  deliverable?: CampaignDeliverable;
+}
+
+const REVIEW_GATE_OPEN_ESCALATION_STATUSES: EscalationStatus[] = ["hitl_required", "in_progress"];
+
+function reviewGateCutoffIso(days = 30): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+export async function getOpenReviewGateEscalations(
+  clientId?: string,
+  days = 30,
+): Promise<ReviewGateEscalation[]> {
+  const cutoff = reviewGateCutoffIso(days);
+
+  let scopedRunIds: string[] | undefined;
+  if (clientId) {
+    const { data: scopedRunRows, error: scopedRunError } = await supabase
+      .from("runs")
+      .select("id")
+      .eq("client_id", clientId);
+
+    if (scopedRunError) throw new Error(`Failed to scope escalation runs: ${scopedRunError.message}`);
+
+    scopedRunIds = (scopedRunRows ?? []).map((row) => row.id as string);
+    if (scopedRunIds.length === 0) return [];
+  }
+
+  let query = supabase
+    .from("asset_escalations")
+    .select("*")
+    .in("status", REVIEW_GATE_OPEN_ESCALATION_STATUSES)
+    .gte("created_at", cutoff);
+
+  if (scopedRunIds) {
+    query = query.in("run_id", scopedRunIds);
+  }
+
+  const { data, error } = await query.order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get Review Gate escalations: ${error.message}`);
+
+  const escalations = (data as DbAssetEscalation[]).map(mapDbAssetEscalation);
+  const runIds = [...new Set(escalations.map((item) => item.runId).filter(Boolean))] as string[];
+  const deliverableIds = [...new Set(escalations.map((item) => item.deliverableId).filter(Boolean))] as string[];
+
+  const runsById = new Map<string, Run>();
+  if (runIds.length > 0) {
+    const { data: runRows, error: runError } = await supabase
+      .from("runs")
+      .select("*")
+      .in("id", runIds);
+
+    if (runError) throw new Error(`Failed to get escalation runs: ${runError.message}`);
+    for (const row of (runRows as DbRun[])) {
+      const run = mapDbRunToRun(row);
+      runsById.set(run.runId, run);
+    }
+  }
+
+  const deliverablesById = new Map<string, CampaignDeliverable>();
+  if (deliverableIds.length > 0) {
+    const { data: deliverableRows, error: deliverableError } = await supabase
+      .from("campaign_deliverables")
+      .select("*")
+      .in("id", deliverableIds);
+
+    if (deliverableError) throw new Error(`Failed to get escalation deliverables: ${deliverableError.message}`);
+    for (const row of (deliverableRows as DbCampaignDeliverable[])) {
+      const deliverable = mapDbDeliverableToDeliverable(row);
+      deliverablesById.set(deliverable.id, deliverable);
+    }
+  }
+
+  return escalations
+    .map((escalation) => ({
+      escalation,
+      run: escalation.runId ? runsById.get(escalation.runId) : undefined,
+      deliverable: escalation.deliverableId ? deliverablesById.get(escalation.deliverableId) : undefined,
+    }));
+}
+
+export interface ResolveEscalationResponse {
+  escalation: AssetEscalation;
+  runHitlCleared: boolean;
+}
+
+export async function resolveEscalationAccept(
+  escalationId: string,
+  resolutionNotes: string,
+): Promise<ResolveEscalationResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/resolve`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: "accepted",
+      resolution_path: "accept",
+      resolution_notes: resolutionNotes,
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ResolveEscalationResponse;
+}
+
+export function subscribeToAssetEscalations(
+  clientId: string,
+  onChange: () => void,
+): () => void {
+  // NOTE: realtime postgres_changes only filters by columns ON asset_escalations.
+  // The table has run_id not client_id, so we cannot do a server-side client filter
+  // here. Wake-noise is harmless because getOpenReviewGateEscalations is now
+  // client-scoped at the SQL level. TODO: Phase 7 — denormalize client_id onto
+  // asset_escalations and add a filter expression to close realtime wake-noise.
+  // The channel name retains clientId only to keep dev diagnostics readable.
+  const channel = supabase
+    .channel(`asset_escalations:${clientId || "all"}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "asset_escalations",
+      },
+      () => {
+        onChange();
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 export type BeatName =
   | "intro"
   | "hook_1"
@@ -1491,6 +2252,33 @@ export function subscribeToArtifacts(
   };
 }
 
+export function subscribeToArtifactsByDeliverable(
+  deliverableId: string,
+  onInsert: (artifact: Artifact) => void,
+): () => void {
+  const channel = supabase
+    .channel(`artifacts:deliverable:${deliverableId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "artifacts",
+        filter: `deliverable_id=eq.${deliverableId}`,
+      },
+      (payload) => {
+        if (payload.new) {
+          onInsert(mapDbArtifactToArtifact(payload.new as DbArtifact));
+        }
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 // ============ Production Reshoot Operations (Step 11 HITL UI) ============
 
 export type ProductionSlug = "drift-mv";
@@ -1509,6 +2297,7 @@ export interface ProductionShotState {
   durationS: number;
   visualIntent: string;
   charactersNeeded: string[];
+  canonicalReferences: ProductionCanonicalReference[];
   defaultPrompt: string;
   stillPrompt?: string;
   negativePrompt?: string;
@@ -1516,6 +2305,18 @@ export interface ProductionShotState {
   pending: ProductionFileMeta | null;
   stillPath: string | null;
   activeJob?: ProductionJob | null;
+}
+
+export interface ProductionCanonicalReference {
+  characterName: string;
+  stillPath: string;
+  thumb: string;
+  lockedAt?: string;
+  lockedBy?: string;
+  rationale?: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
 }
 
 export interface ProductionRenderArtifact extends ProductionFileMeta {
@@ -1539,13 +2340,43 @@ export interface ProductionShotsResponse {
   renderArtifact?: ProductionRenderArtifact | null;
 }
 
+export interface ProductionAnchorCatalogItem {
+  name: string;
+  path: string;
+  thumb: string;
+  exists: boolean;
+  sizeBytes?: number;
+  mtime?: string;
+  canonicalReference?: ProductionCanonicalReference;
+}
+
+export interface ProductionShotStillCatalogItem {
+  shot: number;
+  currentStillPath: string | null;
+  currentStillThumb: string | null;
+  currentStill?: ProductionFileMeta | null;
+  backupStillPath?: string;
+  backupStill?: ProductionFileMeta | null;
+  anchors: ProductionAnchorCatalogItem[];
+  anchorsSource: "regen_stills_pivot.py" | "manifest";
+}
+
+export interface ProductionShotStillsResponse {
+  productionSlug: ProductionSlug;
+  shots: ProductionShotStillCatalogItem[];
+}
+
 export type ProductionEvent =
   | { type: "connected"; productionSlug: string; timestamp: string }
   | { type: "regen_started"; productionSlug: string; timestamp: string; jobId: string; shotNumber: number; promptSource: "override" | "manifest"; useImageConditioning: boolean }
   | { type: "regen_log"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; line: string; stream: "stdout" | "stderr" }
   | { type: "regen_complete"; productionSlug: string; timestamp: string; jobId: string; shotNumber?: number; exitCode: number | null; durationMs: number; error?: string }
-  | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean }
+  | { type: "shot_promoted"; productionSlug: string; timestamp: string; shotNumber: number; backupCreated: boolean; stillUpdated?: boolean; stillBackupCreated?: boolean; currentStillPath?: string; currentStillMtime?: string; warning?: string }
   | { type: "shot_rejected"; productionSlug: string; timestamp: string; shotNumber: number; pendingDeleted: boolean }
+  | { type: "shot_still_replaced"; productionSlug: string; timestamp: string; shotNumber: number; replaced: boolean; backupCreated: boolean; currentStillPath: string }
+  | { type: "shot_still_snapshot"; productionSlug: string; timestamp: string; shotNumber: number; label: string; snapshotPath: string }
+  | { type: "shot_still_approved"; productionSlug: string; timestamp: string; shotNumber: number; approvedAt: string; deliverableId: string; artifactId: string }
+  | { type: "shot_still_rejected"; productionSlug: string; timestamp: string; shotNumber: number; rejectedAt: string; deliverableId: string; artifactId: string }
   | { type: "shot_manifest_updated"; productionSlug: string; timestamp: string; shotNumber: number; cumulativeDurationDeltaS: number }
   | { type: "render_started"; productionSlug: string; timestamp: string; jobId: string }
   | { type: "render_log"; productionSlug: string; timestamp: string; jobId: string; line: string; stream: "stdout" | "stderr" }
@@ -1561,6 +2392,33 @@ async function parseOsApiError(resp: Response): Promise<Error> {
 
 export function getProductionStillUrl(productionSlug: ProductionSlug, shotNumber: number): string {
   return `${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/still`;
+}
+
+export function getProductionManagedStillUrl(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/still${suffix}`;
+}
+
+export function getProductionAnchorUrl(
+  productionSlug: ProductionSlug,
+  anchorName: string,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/anchor/${encodeURIComponent(anchorName)}${suffix}`;
+}
+
+export function getProductionCanonicalReferenceUrl(
+  productionSlug: ProductionSlug,
+  characterName: string,
+  cacheBust?: string | number,
+): string {
+  const suffix = cacheBust === undefined ? "" : `?v=${encodeURIComponent(String(cacheBust))}`;
+  return `${OS_API_URL}/api/productions/${productionSlug}/canonical-reference/${encodeURIComponent(characterName)}${suffix}`;
 }
 
 export function getProductionShotThumbnailUrl(
@@ -1584,6 +2442,12 @@ export async function getProductionShots(productionSlug: ProductionSlug): Promis
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ProductionShotsResponse;
+}
+
+export async function getProductionShotStills(productionSlug: ProductionSlug): Promise<ProductionShotStillsResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot-stills`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ProductionShotStillsResponse;
 }
 
 
@@ -1634,12 +2498,30 @@ export async function regenerateProductionShot(
 export async function promoteProductionShot(
   productionSlug: ProductionSlug,
   shotNumber: number,
-): Promise<{ shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string }> {
+): Promise<{
+  shotNumber: number;
+  promoted: boolean;
+  backupCreated: boolean;
+  reason?: string;
+  stillUpdated?: boolean;
+  stillBackupCreated?: boolean;
+  currentStill?: ProductionFileMeta | null;
+  warning?: string;
+}> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/promote`, {
     method: "POST",
   });
   if (!resp.ok) throw await parseOsApiError(resp);
-  return (await resp.json()) as { shotNumber: number; promoted: boolean; backupCreated: boolean; reason?: string };
+  return (await resp.json()) as {
+    shotNumber: number;
+    promoted: boolean;
+    backupCreated: boolean;
+    reason?: string;
+    stillUpdated?: boolean;
+    stillBackupCreated?: boolean;
+    currentStill?: ProductionFileMeta | null;
+    warning?: string;
+  };
 }
 
 export async function rejectProductionShot(
@@ -1651,6 +2533,158 @@ export async function rejectProductionShot(
   });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as { shotNumber: number; rejected: boolean; pendingDeleted: boolean };
+}
+
+export async function approveProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body?: { deliverableId?: string },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  approvedAt: string;
+  productionSlug: string;
+  currentStillPath: string;
+  artifactId: string;
+  deliverableId: string;
+  campaignId: string | null;
+  referenceImages: string[];
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/approve-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    approvedAt: string;
+    productionSlug: string;
+    currentStillPath: string;
+    artifactId: string;
+    deliverableId: string;
+    campaignId: string | null;
+    referenceImages: string[];
+  };
+}
+
+export async function rejectProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body: { reason: string; denied_by?: string | null; deliverableId?: string },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  productionSlug: string;
+  still_rejected_at: string;
+  still_rejection_reason: string;
+  still_denied_by: string | null;
+  currentStillPath: string;
+  artifactId: string;
+  deliverableId: string;
+  campaignId: string | null;
+  referenceImages: string[];
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/reject-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    productionSlug: string;
+    still_rejected_at: string;
+    still_rejection_reason: string;
+    still_denied_by: string | null;
+    currentStillPath: string;
+    artifactId: string;
+    deliverableId: string;
+    campaignId: string | null;
+    referenceImages: string[];
+  };
+}
+
+export async function snapshotProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  body?: { label?: string },
+): Promise<{
+  ok: true;
+  existed: false;
+  status: 200;
+  productionSlug: string;
+  shotNumber: number;
+  label: string;
+  snapshot_path: string;
+  snapshot: ProductionFileMeta;
+  source_path: string;
+}> {
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/snapshot-still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    existed: false;
+    status: 200;
+    productionSlug: string;
+    shotNumber: number;
+    label: string;
+    snapshot_path: string;
+    snapshot: ProductionFileMeta;
+    source_path: string;
+  };
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read selected still file"));
+    reader.onload = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      resolve(value.includes(",") ? value.slice(value.indexOf(",") + 1) : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+export async function replaceProductionShotStill(
+  productionSlug: ProductionSlug,
+  shotNumber: number,
+  source: { sourcePath: string } | { file: File },
+): Promise<{
+  ok: true;
+  shotNumber: number;
+  replaced: boolean;
+  backupCreated: boolean;
+  sourcePath: string;
+  currentStill: ProductionFileMeta;
+  backupStill: ProductionFileMeta | null;
+}> {
+  const body = "file" in source
+    ? { fileName: source.file.name, fileBase64: await readFileAsBase64(source.file) }
+    : { sourcePath: source.sourcePath };
+
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/still`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as {
+    ok: true;
+    shotNumber: number;
+    replaced: boolean;
+    backupCreated: boolean;
+    sourcePath: string;
+    currentStill: ProductionFileMeta;
+    backupStill: ProductionFileMeta | null;
+  };
 }
 
 export async function triggerProductionRender(

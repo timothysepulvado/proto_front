@@ -5,7 +5,9 @@ import dotenv from "dotenv";
 let cachedTempGenEnv: Record<string, string> | null = null;
 
 export function getTempGenDir(): string {
-  return process.env.TEMP_GEN_DIR ?? join(process.env.HOME ?? "", "Temp-gen");
+  const configured = process.env.TEMP_GEN_PATH ?? process.env.TEMP_GEN_DIR;
+  if (configured && configured.trim().length > 0) return configured;
+  return join(process.env.HOME ?? process.cwd(), "Temp-gen");
 }
 
 export function loadTempGenEnv(): Record<string, string> {
