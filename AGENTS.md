@@ -180,19 +180,27 @@ Why not the MCP OAuth flow:
 
 The proto_front `.mcp.json` still exists for cases where a Brandy session needs the MCP toolset (advisors, branching, type generation), but for migrations + queries the CLI + PAT path is canonical.
 
-**Tables (18):**
+**Tables (15 — verified via Phase A schema enumeration 2026-05-03):**
 `clients`, `runs`, `run_logs`, `artifacts`, `hitl_decisions`, `rejection_categories`,
 `campaigns`, `campaign_deliverables`, `campaign_memory`, `drift_metrics`, `drift_alerts`,
-`brand_baselines`, `prompt_templates`, `prompt_scores`, `prompt_evolution_log`,
-`known_limitations`, `asset_escalations`, `orchestration_decisions` (last 3 added in migration 007 for autonomous escalation).
+`brand_baselines`, `known_limitations`, `asset_escalations`, `orchestration_decisions`
+(last 3 added in migration 007 for autonomous escalation).
+
+**Note:** `prompt_templates`, `prompt_scores`, `prompt_evolution_log` are referenced in some
+historical docs but **do not exist** in the live DB — Phase 7 schema enum confirmed.
 
 **Realtime subscriptions:** `runs`, `run_logs`, `clients`, `campaigns`, `campaign_deliverables`,
-`hitl_decisions`, `drift_metrics`, `drift_alerts`, `brand_baselines`
+`hitl_decisions`, `drift_metrics`, `drift_alerts`, `brand_baselines`, `asset_escalations`
+(asset_escalations added 2026-04-30 for Gap 1 Review Gate escalation surface)
 
 **Storage:** `artifacts` bucket for generated images/videos. Public URLs in artifacts table.
 Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 
-**Migrations:** `supabase/migrations/001-013` — all applied (007 via Management API 2026-04-17; 013 via `supabase db query --linked < migrations/013_*.sql` with project-scoped PAT 2026-05-02).
+**Migrations:** `supabase/migrations/001-015` — all applied via `supabase db query --linked < migrations/NNN_*.sql` with project-scoped PAT (007 via Management API 2026-04-17; 013 2026-05-02; 014+015 2026-05-03 for Phase 7 multi-tenant RLS — see PR #3).
+
+**Phase 7 RLS (migrations 014 + 015, 2026-05-03):** Multi-tenant data isolation. Migration 014 denormalizes `client_id TEXT NOT NULL` onto every per-client table (artifacts NOT NULL flip + run_logs/hitl_decisions/asset_escalations/orchestration_decisions/campaign_deliverables/campaign_memory + FK + index). Migration 015 drops 31 pre-existing `USING(true)` open policies + creates 13 client-scoped (`client_id = jwt_client_id()`) + 2 global (auth/service-role) policies + `jwt_client_id() RETURNS TEXT` helper. Service-role bypass via `OR auth.role() = 'service_role'` on every policy — os-api uses `SUPABASE_SECRET_KEY` (sb_secret_*). HUD uses HS256 JWT minted via `POST /api/auth/client-token`; `JWT_AUTH_ENABLED` feature flag (default OFF) — code lands but auth path flips per-environment. **Required env vars** (see `os-api/.env.example`): `SUPABASE_SECRET_KEY` (server-side admin, RLS bypass) + `SUPABASE_JWT_SECRET` (legacy HS256 — Dashboard "JWT Secret (legacy)", reveal-once 1h window) + `JWT_AUTH_ENABLED=false` (default). HUD env: `VITE_JWT_AUTH_ENABLED=false` (default). **Verification harness** at `os-api/tests/_phase7-multi-tenant-isolation.ts` (the merge gate — must exit 0). Briefs in `~/agent-vault/briefs/2026-05-03-*phase7*.md`.
+
+**Project-targeting safety (post-Phase-7 process gap closed):** before ANY `supabase db query --linked` write (migrations, ad-hoc DDL), verify all THREE: (1) `cat supabase/.temp/project-ref` = expected, (2) `supabase projects list` shows expected as LINKED ●, (3) live host check via `--linked "SELECT current_database(), inet_server_addr();"`. Match expected region. The `--linked` flag is safe IF the link is correct — `supabase link --project-ref <id>` controls which project `--linked` resolves to.
 
 ---
 
