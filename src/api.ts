@@ -2009,16 +2009,35 @@ function reviewGateCutoffIso(days = 30): string {
 }
 
 export async function getOpenReviewGateEscalations(
-  clientId: string,
+  clientId?: string,
   days = 30,
 ): Promise<ReviewGateEscalation[]> {
   const cutoff = reviewGateCutoffIso(days);
-  const { data, error } = await supabase
+
+  let scopedRunIds: string[] | undefined;
+  if (clientId) {
+    const { data: scopedRunRows, error: scopedRunError } = await supabase
+      .from("runs")
+      .select("id")
+      .eq("client_id", clientId);
+
+    if (scopedRunError) throw new Error(`Failed to scope escalation runs: ${scopedRunError.message}`);
+
+    scopedRunIds = (scopedRunRows ?? []).map((row) => row.id as string);
+    if (scopedRunIds.length === 0) return [];
+  }
+
+  let query = supabase
     .from("asset_escalations")
     .select("*")
     .in("status", REVIEW_GATE_OPEN_ESCALATION_STATUSES)
-    .gte("created_at", cutoff)
-    .order("created_at", { ascending: false });
+    .gte("created_at", cutoff);
+
+  if (scopedRunIds) {
+    query = query.in("run_id", scopedRunIds);
+  }
+
+  const { data, error } = await query.order("created_at", { ascending: false });
 
   if (error) throw new Error(`Failed to get Review Gate escalations: ${error.message}`);
 
@@ -2059,8 +2078,7 @@ export async function getOpenReviewGateEscalations(
       escalation,
       run: escalation.runId ? runsById.get(escalation.runId) : undefined,
       deliverable: escalation.deliverableId ? deliverablesById.get(escalation.deliverableId) : undefined,
-    }))
-    .filter((item) => !clientId || item.run?.clientId === clientId);
+    }));
 }
 
 export interface ResolveEscalationResponse {
@@ -2090,6 +2108,12 @@ export function subscribeToAssetEscalations(
   clientId: string,
   onChange: () => void,
 ): () => void {
+  // NOTE: realtime postgres_changes only filters by columns ON asset_escalations.
+  // The table has run_id not client_id, so we cannot do a server-side client filter
+  // here. Wake-noise is harmless because getOpenReviewGateEscalations is now
+  // client-scoped at the SQL level. TODO: Phase 7 — denormalize client_id onto
+  // asset_escalations and add a filter expression to close realtime wake-noise.
+  // The channel name retains clientId only to keep dev diagnostics readable.
   const channel = supabase
     .channel(`asset_escalations:${clientId || "all"}`)
     .on(
