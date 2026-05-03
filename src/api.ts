@@ -1,6 +1,8 @@
 import { supabase } from "./lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
+const JWT_AUTH_ENABLED = import.meta.env.VITE_JWT_AUTH_ENABLED === "true";
+
 export type RunMode = "full" | "ingest" | "images" | "video" | "drift" | "export" | "regrade" | "stills";
 export type RunStatus = "pending" | "running" | "needs_review" | "blocked" | "completed" | "failed" | "cancelled";
 export type ClientStatus = "active" | "inactive" | "archived";
@@ -351,6 +353,16 @@ function mapDbClientToClient(dbClient: DbClient): Client {
 
 // Get all clients
 export async function getClients(): Promise<Client[]> {
+  // When JWT auth is enabled, bootstrap the client switcher through os-api's
+  // service-role path. A client-scoped JWT cannot list sibling client rows, and
+  // App.tsx must avoid any direct Supabase reads until the active client token is
+  // applied.
+  if (JWT_AUTH_ENABLED) {
+    const resp = await fetch(`${OS_API_URL}/api/clients`);
+    if (!resp.ok) throw await parseOsApiError(resp);
+    return (await resp.json()) as Client[];
+  }
+
   const { data, error } = await supabase
     .from("clients")
     .select("*")

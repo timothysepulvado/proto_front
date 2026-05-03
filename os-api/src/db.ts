@@ -11,6 +11,7 @@ import type {
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
   MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
   DirectionDriftIndicator, DirectionDriftVerdictSource,
+  ClientUiConfig,
   ArtifactIterationRow, ArtifactIterationsResponse, ArtifactIterationOperatorOverride,
   ArtifactIterationVerdict,
 } from "./types.js";
@@ -70,11 +71,26 @@ interface DbClient {
   last_run_id: string | null;
   last_run_at: string | null;
   last_run_status: string | null;
+  ui_config: Record<string, unknown> | null;
   created_at?: string;
   updated_at?: string;
 }
 
 // ============ Mappers (DB → App) ============
+
+function mapDbClientUiConfig(value: Record<string, unknown> | null): ClientUiConfig | undefined {
+  if (!value) return undefined;
+  const displayName = typeof value.display_name === "string" ? value.display_name : undefined;
+  const entityLabel = typeof value.entity_label === "string" ? value.entity_label : undefined;
+  const featured = typeof value.featured === "boolean" ? value.featured : undefined;
+  const productionSlug = typeof value.production_slug === "string" ? value.production_slug : undefined;
+  const uiConfig: ClientUiConfig = {};
+  if (displayName !== undefined) uiConfig.displayName = displayName;
+  if (entityLabel !== undefined) uiConfig.entityLabel = entityLabel;
+  if (featured !== undefined) uiConfig.featured = featured;
+  if (productionSlug !== undefined) uiConfig.productionSlug = productionSlug;
+  return Object.keys(uiConfig).length > 0 ? uiConfig : undefined;
+}
 
 function mapDbRunToRun(dbRun: DbRun): Run {
   return {
@@ -126,10 +142,13 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
 }
 
 function mapDbClientToClient(dbClient: DbClient): Client {
+  const uiConfig = mapDbClientUiConfig(dbClient.ui_config);
   return {
     id: dbClient.id,
     name: dbClient.name,
     status: dbClient.status,
+    uiConfig,
+    featured: uiConfig?.featured,
     lastRunId: dbClient.last_run_id ?? undefined,
     lastRunAt: dbClient.last_run_at ?? undefined,
     lastRunStatus: (dbClient.last_run_status as RunStatus) ?? undefined,

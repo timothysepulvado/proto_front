@@ -121,10 +121,19 @@ export interface RunLog {
   message: string;
 }
 
+export interface ClientUiConfig {
+  displayName?: string;
+  entityLabel?: string;
+  featured?: boolean;
+  productionSlug?: string;
+}
+
 export interface Client {
   id: string;
   name: string;
   status: string;
+  uiConfig?: ClientUiConfig;
+  featured?: boolean;
   lastRunId?: string;
   lastRunAt?: string;
   lastRunStatus?: RunStatus;
