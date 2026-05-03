@@ -178,9 +178,25 @@ const campaignClientIdCache = new Map<string, string>();
 const artifactClientIdCache = new Map<string, string>();
 const escalationClientIdCache = new Map<string, string>();
 
-async function requireClientIdForRun(runId: string): Promise<string> {
+function requireTenantMatch(
+  source: "run" | "campaign" | "artifact" | "escalation",
+  sourceId: string,
+  resolvedClientId: string,
+  providedClientId?: string,
+): string {
+  if (providedClientId === undefined) return resolvedClientId;
+  const normalizedProvidedClientId = providedClientId.trim();
+  if (normalizedProvidedClientId !== resolvedClientId) {
+    throw new Error(
+      `Tenant mismatch: caller provided client_id=${normalizedProvidedClientId} but ${source} ${sourceId} belongs to client_id=${resolvedClientId}`,
+    );
+  }
+  return resolvedClientId;
+}
+
+export async function requireClientIdForRun(runId: string, providedClientId?: string): Promise<string> {
   const cached = runClientIdCache.get(runId);
-  if (cached) return cached;
+  if (cached) return requireTenantMatch("run", runId, cached, providedClientId);
 
   const { data, error } = await supabase
     .from("runs")
@@ -192,12 +208,12 @@ async function requireClientIdForRun(runId: string): Promise<string> {
   const clientId = (data as { client_id?: string } | null)?.client_id;
   if (!clientId) throw new Error(`Run ${runId} is missing client_id`);
   runClientIdCache.set(runId, clientId);
-  return clientId;
+  return requireTenantMatch("run", runId, clientId, providedClientId);
 }
 
-async function requireClientIdForCampaign(campaignId: string): Promise<string> {
+export async function requireClientIdForCampaign(campaignId: string, providedClientId?: string): Promise<string> {
   const cached = campaignClientIdCache.get(campaignId);
-  if (cached) return cached;
+  if (cached) return requireTenantMatch("campaign", campaignId, cached, providedClientId);
 
   const { data, error } = await supabase
     .from("campaigns")
@@ -209,12 +225,12 @@ async function requireClientIdForCampaign(campaignId: string): Promise<string> {
   const clientId = (data as { client_id?: string } | null)?.client_id;
   if (!clientId) throw new Error(`Campaign ${campaignId} is missing client_id`);
   campaignClientIdCache.set(campaignId, clientId);
-  return clientId;
+  return requireTenantMatch("campaign", campaignId, clientId, providedClientId);
 }
 
-async function requireClientIdForArtifact(artifactId: string): Promise<string> {
+export async function requireClientIdForArtifact(artifactId: string, providedClientId?: string): Promise<string> {
   const cached = artifactClientIdCache.get(artifactId);
-  if (cached) return cached;
+  if (cached) return requireTenantMatch("artifact", artifactId, cached, providedClientId);
 
   const { data, error } = await supabase
     .from("artifacts")
@@ -226,12 +242,12 @@ async function requireClientIdForArtifact(artifactId: string): Promise<string> {
   const clientId = (data as { client_id?: string } | null)?.client_id;
   if (!clientId) throw new Error(`Artifact ${artifactId} is missing client_id`);
   artifactClientIdCache.set(artifactId, clientId);
-  return clientId;
+  return requireTenantMatch("artifact", artifactId, clientId, providedClientId);
 }
 
-async function requireClientIdForEscalation(escalationId: string): Promise<string> {
+export async function requireClientIdForEscalation(escalationId: string, providedClientId?: string): Promise<string> {
   const cached = escalationClientIdCache.get(escalationId);
-  if (cached) return cached;
+  if (cached) return requireTenantMatch("escalation", escalationId, cached, providedClientId);
 
   const { data, error } = await supabase
     .from("asset_escalations")
@@ -243,7 +259,7 @@ async function requireClientIdForEscalation(escalationId: string): Promise<strin
   const clientId = (data as { client_id?: string } | null)?.client_id;
   if (!clientId) throw new Error(`Escalation ${escalationId} is missing client_id`);
   escalationClientIdCache.set(escalationId, clientId);
-  return clientId;
+  return requireTenantMatch("escalation", escalationId, clientId, providedClientId);
 }
 
 // ============ Run Operations ============
@@ -1382,7 +1398,7 @@ export async function getDirectionDriftIndicatorsByCampaign(
 // ============ Log Operations ============
 
 export async function addLog(log: Omit<RunLog, "id">): Promise<RunLog> {
-  const clientId = log.clientId ?? await requireClientIdForRun(log.runId);
+  const clientId = await requireClientIdForRun(log.runId, log.clientId);
   const { data, error } = await supabase
     .from("run_logs")
     .insert({
@@ -1426,7 +1442,7 @@ export async function getLogsByRun(runId: string, since?: number): Promise<RunLo
 // ============ Artifact Operations ============
 
 export async function addArtifact(artifact: Artifact): Promise<Artifact> {
-  const clientId = artifact.clientId ?? await requireClientIdForRun(artifact.runId);
+  const clientId = await requireClientIdForRun(artifact.runId, artifact.clientId);
   const { data, error } = await supabase
     .from("artifacts")
     .insert({
@@ -1946,7 +1962,7 @@ function mapDbHitlDecisionToHitlDecision(db: DbHitlDecision): HitlDecision {
 }
 
 export async function addHitlDecision(decision: HitlDecision): Promise<HitlDecision> {
-  const clientId = decision.clientId ?? await requireClientIdForRun(decision.runId);
+  const clientId = await requireClientIdForRun(decision.runId, decision.clientId);
   const { data, error } = await supabase
     .from("hitl_decisions")
     .insert({
@@ -2051,7 +2067,7 @@ function mapDbDriftAlertToDriftAlert(row: DbDriftAlert): DriftAlert {
 // ============ Drift Metric Operations ============
 
 export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> {
-  const clientId = metric.clientId ?? await requireClientIdForRun(metric.runId);
+  const clientId = await requireClientIdForRun(metric.runId, metric.clientId);
   const { data, error } = await supabase
     .from("drift_metrics")
     .insert({
@@ -2379,7 +2395,7 @@ export async function createDeliverable(deliverable: {
   referenceImages?: string[];
   estimatedCost?: number;
 }): Promise<CampaignDeliverable> {
-  const clientId = deliverable.clientId ?? await requireClientIdForCampaign(deliverable.campaignId);
+  const clientId = await requireClientIdForCampaign(deliverable.campaignId, deliverable.clientId);
   const { data, error } = await supabase
     .from("campaign_deliverables")
     .insert({
@@ -3014,9 +3030,10 @@ export async function createEscalation(params: {
   failureClass?: string;
   knownLimitationId?: string;
 }): Promise<AssetEscalation> {
-  const clientId =
-    params.clientId
-    ?? (params.runId ? await requireClientIdForRun(params.runId) : await requireClientIdForArtifact(params.artifactId));
+  const clientId = params.runId
+    ? await requireClientIdForRun(params.runId, params.clientId)
+    : await requireClientIdForArtifact(params.artifactId, params.clientId);
+  await requireClientIdForArtifact(params.artifactId, clientId);
   const { data, error } = await supabase
     .from("asset_escalations")
     .insert({
@@ -3096,9 +3113,10 @@ export async function recordOrchestrationDecision(params: {
   cost?: number;
   latencyMs?: number;
 }): Promise<OrchestrationDecisionRecord> {
-  const clientId =
-    params.clientId
-    ?? (params.runId ? await requireClientIdForRun(params.runId) : await requireClientIdForEscalation(params.escalationId));
+  const clientId = params.runId
+    ? await requireClientIdForRun(params.runId, params.clientId)
+    : await requireClientIdForEscalation(params.escalationId, params.clientId);
+  await requireClientIdForEscalation(params.escalationId, clientId);
   const { data, error } = await supabase
     .from("orchestration_decisions")
     .insert({

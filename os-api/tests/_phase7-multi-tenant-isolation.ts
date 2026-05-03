@@ -11,6 +11,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient as createAnonClient } from "@supabase/supabase-js";
 import { mintClientJwt } from "../src/auth.js";
+import {
+  requireClientIdForArtifact,
+  requireClientIdForCampaign,
+  requireClientIdForEscalation,
+  requireClientIdForRun,
+} from "../src/db.js";
 import { supabase as serviceClient } from "../src/supabase.js";
 
 const RUN_ID_SUFFIX = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -289,6 +295,25 @@ async function assertSeesBoth(client: SupabaseClient): Promise<void> {
   console.log(`✓ service role sees both clients (A=${totalA} rows, B=${totalB} rows)`);
 }
 
+async function expectTenantMismatch(label: string, action: () => Promise<unknown>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    const message = describeError(error);
+    if (message.includes("Tenant mismatch")) return;
+    throw new Error(`[tenant-mismatch] ${label} threw unexpected error: ${message}`);
+  }
+  throw new Error(`[tenant-mismatch] ${label} accepted a wrong client_id`);
+}
+
+async function assertTenantMismatchValidation(rows: SeededClientRows): Promise<void> {
+  await expectTenantMismatch("run", () => requireClientIdForRun(rows.runId, CLIENT_B_ID));
+  await expectTenantMismatch("campaign", () => requireClientIdForCampaign(rows.campaignId, CLIENT_B_ID));
+  await expectTenantMismatch("artifact", () => requireClientIdForArtifact(rows.artifactId, CLIENT_B_ID));
+  await expectTenantMismatch("escalation", () => requireClientIdForEscalation(rows.escalationId, CLIENT_B_ID));
+  console.log("✓ requireClientIdFor* helpers reject mismatched tenant IDs");
+}
+
 async function assertAnonBlocked(client: SupabaseClient): Promise<void> {
   for (const tbl of PER_CLIENT_TABLES) {
     const { data, error } = await client.from(tbl).select("id, client_id");
@@ -358,6 +383,7 @@ async function main(): Promise<void> {
     await assertOnlyClient(authedA, CLIENT_A_ID, "JWT-A");
     await assertOnlyClient(authedB, CLIENT_B_ID, "JWT-B");
     await assertSeesBoth(serviceClient);
+    await assertTenantMismatchValidation(seededA);
     await assertAnonBlocked(anon);
     await assertGlobalReadable(authedA, "JWT-A-global");
     await assertGlobalReadable(authedB, "JWT-B-global");
