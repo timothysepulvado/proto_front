@@ -24,6 +24,8 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let currentSession: ClientAuthSession | null = null;
 let visibilityHandlerBound = false;
 const listeners = new Set<ClientAuthListener>();
+let applyGen = 0;
+let lastAppliedGen = 0;
 
 export function isJwtAuthEnabled(): boolean {
   return JWT_AUTH_ENABLED;
@@ -116,6 +118,7 @@ export async function applyClientJwt(
   osApiUrl: string,
 ): Promise<void> {
   if (!JWT_AUTH_ENABLED) return;
+  const gen = ++applyGen;
 
   const normalizedClientId = clientId.trim();
   if (!normalizedClientId) {
@@ -144,6 +147,11 @@ export async function applyClientJwt(
       "Failed to mint client JWT: expiresIn missing from response",
     );
   }
+
+  if (gen !== applyGen || gen <= lastAppliedGen) {
+    return;
+  }
+  lastAppliedGen = gen;
 
   setSupabaseClientAccessToken(token);
   const { error } = await supabase.auth.setSession({
