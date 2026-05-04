@@ -10,10 +10,14 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient as createAnonClient } from "@supabase/supabase-js";
+import { randomUUID } from "crypto";
 import { mintClientJwt } from "../src/auth.js";
 import {
+  addArtifact,
+  createEscalation,
   requireClientIdForArtifact,
   requireClientIdForCampaign,
+  requireClientIdForDeliverable,
   requireClientIdForEscalation,
   requireClientIdForRun,
 } from "../src/db.js";
@@ -309,9 +313,41 @@ async function expectTenantMismatch(label: string, action: () => Promise<unknown
 async function assertTenantMismatchValidation(rows: SeededClientRows): Promise<void> {
   await expectTenantMismatch("run", () => requireClientIdForRun(rows.runId, CLIENT_B_ID));
   await expectTenantMismatch("campaign", () => requireClientIdForCampaign(rows.campaignId, CLIENT_B_ID));
+  await expectTenantMismatch("deliverable", () => requireClientIdForDeliverable(rows.deliverableId, CLIENT_B_ID));
   await expectTenantMismatch("artifact", () => requireClientIdForArtifact(rows.artifactId, CLIENT_B_ID));
   await expectTenantMismatch("escalation", () => requireClientIdForEscalation(rows.escalationId, CLIENT_B_ID));
   console.log("✓ requireClientIdFor* helpers reject mismatched tenant IDs");
+}
+
+async function assertInsertHelpersValidateTenantFks(rowsA: SeededClientRows, rowsB: SeededClientRows): Promise<void> {
+  await expectTenantMismatch("addArtifact campaign_id", () => addArtifact({
+    id: randomUUID(),
+    clientId: CLIENT_A_ID,
+    runId: rowsA.runId,
+    campaignId: rowsB.campaignId,
+    type: "image",
+    name: "mismatch-campaign.png",
+    path: `/phase7-test/${CLIENT_A_ID}/mismatch-campaign.png`,
+    createdAt: new Date().toISOString(),
+  }));
+  await expectTenantMismatch("addArtifact deliverable_id", () => addArtifact({
+    id: randomUUID(),
+    clientId: CLIENT_A_ID,
+    runId: rowsA.runId,
+    campaignId: rowsA.campaignId,
+    deliverableId: rowsB.deliverableId,
+    type: "image",
+    name: "mismatch-deliverable.png",
+    path: `/phase7-test/${CLIENT_A_ID}/mismatch-deliverable.png`,
+    createdAt: new Date().toISOString(),
+  }));
+  await expectTenantMismatch("createEscalation deliverable_id", () => createEscalation({
+    clientId: CLIENT_A_ID,
+    artifactId: rowsA.artifactId,
+    runId: rowsA.runId,
+    deliverableId: rowsB.deliverableId,
+  }));
+  console.log("✓ INSERT helpers validate every tenant-bearing FK before write");
 }
 
 async function assertAnonBlocked(client: SupabaseClient): Promise<void> {
@@ -396,6 +432,7 @@ async function main(): Promise<void> {
     await assertOnlyClient(authedB, CLIENT_B_ID, "JWT-B");
     await assertSeesBoth(serviceClient);
     await assertTenantMismatchValidation(seededA);
+    await assertInsertHelpersValidateTenantFks(seededA, seededB);
     await assertAnonBlocked(anon);
     await assertGlobalReadable(authedA, "JWT-A-global");
     await assertGlobalReadable(authedB, "JWT-B-global");

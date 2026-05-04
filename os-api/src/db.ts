@@ -177,9 +177,10 @@ const runClientIdCache = new Map<string, string>();
 const campaignClientIdCache = new Map<string, string>();
 const artifactClientIdCache = new Map<string, string>();
 const escalationClientIdCache = new Map<string, string>();
+const deliverableClientIdCache = new Map<string, string>();
 
 function requireTenantMatch(
-  source: "run" | "campaign" | "artifact" | "escalation",
+  source: "run" | "campaign" | "artifact" | "escalation" | "deliverable",
   sourceId: string,
   resolvedClientId: string,
   providedClientId?: string,
@@ -260,6 +261,23 @@ export async function requireClientIdForEscalation(escalationId: string, provide
   if (!clientId) throw new Error(`Escalation ${escalationId} is missing client_id`);
   escalationClientIdCache.set(escalationId, clientId);
   return requireTenantMatch("escalation", escalationId, clientId, providedClientId);
+}
+
+export async function requireClientIdForDeliverable(deliverableId: string, providedClientId?: string): Promise<string> {
+  const cached = deliverableClientIdCache.get(deliverableId);
+  if (cached) return requireTenantMatch("deliverable", deliverableId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("client_id")
+    .eq("id", deliverableId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for deliverable ${deliverableId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Deliverable ${deliverableId} is missing client_id`);
+  deliverableClientIdCache.set(deliverableId, clientId);
+  return requireTenantMatch("deliverable", deliverableId, clientId, providedClientId);
 }
 
 // ============ Run Operations ============
@@ -1443,6 +1461,12 @@ export async function getLogsByRun(runId: string, since?: number): Promise<RunLo
 
 export async function addArtifact(artifact: Artifact): Promise<Artifact> {
   const clientId = await requireClientIdForRun(artifact.runId, artifact.clientId);
+  if (artifact.campaignId) {
+    await requireClientIdForCampaign(artifact.campaignId, clientId);
+  }
+  if (artifact.deliverableId) {
+    await requireClientIdForDeliverable(artifact.deliverableId, clientId);
+  }
   const { data, error } = await supabase
     .from("artifacts")
     .insert({
@@ -3034,6 +3058,9 @@ export async function createEscalation(params: {
     ? await requireClientIdForRun(params.runId, params.clientId)
     : await requireClientIdForArtifact(params.artifactId, params.clientId);
   await requireClientIdForArtifact(params.artifactId, clientId);
+  if (params.deliverableId) {
+    await requireClientIdForDeliverable(params.deliverableId, clientId);
+  }
   const { data, error } = await supabase
     .from("asset_escalations")
     .insert({
