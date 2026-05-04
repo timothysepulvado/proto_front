@@ -156,6 +156,12 @@ async function main(): Promise<void> {
   let seededA: { runId: string; storageObject: string; ledgerId: string } | undefined;
   let seededB: { runId: string; storageObject: string; ledgerId: string } | undefined;
 
+  // Error accumulators — primary (assertion / setup) is preserved separately
+  // from cleanup errors so a finally-throw never masks the actual test failure.
+  // Aggregation + non-zero exit happens AFTER the try/finally completes (CR R4).
+  let primaryError: unknown = undefined;
+  const cleanupErrors: string[] = [];
+
   try {
     seededA = await seedClient(CLIENT_A_ID);
     seededB = await seedClient(CLIENT_B_ID);
@@ -176,8 +182,11 @@ async function main(): Promise<void> {
     }
     console.log(`✓ Assertion 1 — client A uploaded to own prefix`);
 
-    // Cleanup own upload to avoid noise
-    await serviceClient.storage.from(BUCKET).remove([ownPath]);
+    // Cleanup own upload to avoid noise — fail loudly so orphans don't accumulate (CR R4).
+    const rmOwn = await serviceClient.storage.from(BUCKET).remove([ownPath]);
+    if (rmOwn.error) {
+      throw new Error(`mid-test own-upload cleanup failed: ${rmOwn.error.message}`);
+    }
 
     // ===== Assertion 2: Storage UPLOAD CROSS-TENANT — must be BLOCKED =====
     const crossPath = `${CLIENT_B_ID}/${sB.runId}/upload-cross-${RUN_ID_SUFFIX}.png`;
@@ -196,6 +205,10 @@ async function main(): Promise<void> {
     const stillExists = await serviceClient.storage.from(BUCKET).list(`${CLIENT_B_ID}/${sB.runId}`, {
       search: sB.storageObject.split("/").pop() ?? "",
     });
+    // Surface list errors loudly — otherwise an API hiccup looks like "file deleted" and the assertion lies (CR R4).
+    if (stillExists.error) {
+      throw new Error(`✗ Assertion 3 verification list failed: ${stillExists.error.message}`);
+    }
     const found = (stillExists.data ?? []).some((f: { name: string }) => sB.storageObject.endsWith(f.name));
     if (!found) {
       throw new Error(`✗ Assertion 3 FAILED — client A delete REMOVED client B file ${sB.storageObject}`);
@@ -241,25 +254,37 @@ async function main(): Promise<void> {
     console.log(`✓ Assertion 5 — ledger APPEND-ONLY (UPDATE blocked; cost still 0.0123)`);
 
     console.log(`\n✓✓✓ ALL 5 ASSERTIONS PASS — PR #4 Storage write-side RLS + ledger isolation verified`);
+  } catch (err) {
+    primaryError = err;
   } finally {
-    // Always attempt BOTH cleanups, then re-throw if any failed so the harness
-    // exits non-zero on orphan-state risk (CR R2 fix — no false-green runs).
-    const cleanupErrors: string[] = [];
-    try {
-      await cleanup(CLIENT_A_ID, seededA);
-    } catch (err) {
-      cleanupErrors.push(err instanceof Error ? err.message : String(err));
+    // Always attempt BOTH cleanups; never throw FROM finally (Biome no-unsafe-finally).
+    // Cleanup errors accumulate into cleanupErrors; aggregation after finally.
+    for (const [cid, seeded] of [
+      [CLIENT_A_ID, seededA] as const,
+      [CLIENT_B_ID, seededB] as const,
+    ]) {
+      try {
+        await cleanup(cid, seeded);
+      } catch (err) {
+        cleanupErrors.push(err instanceof Error ? err.message : String(err));
+      }
     }
-    try {
-      await cleanup(CLIENT_B_ID, seededB);
-    } catch (err) {
-      cleanupErrors.push(err instanceof Error ? err.message : String(err));
+    console.log(cleanupErrors.length > 0 ? `cleanup INCOMPLETE — ${cleanupErrors.length} step(s) failed` : `cleanup complete`);
+  }
+
+  // Post-finally aggregation (preserves primary error + surfaces cleanup
+  // failures even when assertions pass).
+  if (primaryError !== undefined && cleanupErrors.length > 0) {
+    const detail = `\n  cleanup also failed:\n    - ${cleanupErrors.join("\n    - ")}`;
+    if (primaryError instanceof Error) {
+      primaryError.message += detail;
+      throw primaryError;
     }
-    if (cleanupErrors.length > 0) {
-      console.error(`cleanup INCOMPLETE — ${cleanupErrors.length} failure(s):\n${cleanupErrors.join("\n")}`);
-      throw new Error("cleanup failed — see errors above");
-    }
-    console.log(`cleanup complete`);
+    throw new Error(`${String(primaryError)}${detail}`);
+  }
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupErrors.length > 0) {
+    throw new Error(`cleanup failures:\n  - ${cleanupErrors.join("\n  - ")}`);
   }
 }
 
