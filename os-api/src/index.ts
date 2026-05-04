@@ -65,6 +65,7 @@ import { createProductionsRouter } from "./productions.js";
 import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
+import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt } from "./auth.js";
 
 dotenv.config();
 
@@ -96,6 +97,25 @@ function imageContentType(filePath: string): string {
   if (ext === ".webp") return "image/webp";
   return "image/png";
 }
+
+// ============ Auth Routes ============
+
+// POST /api/auth/client-token - Mint a client-scoped Supabase JWT for direct HUD reads
+app.post("/api/auth/client-token", async (req: Request, res: Response) => {
+  try {
+    const { clientId } = (req.body ?? {}) as { clientId?: unknown };
+    if (typeof clientId !== "string" || clientId.trim().length === 0) {
+      res.status(400).json({ error: "clientId required" });
+      return;
+    }
+
+    const token = await mintClientJwt(clientId);
+    res.json({ token, expiresIn: CLIENT_JWT_EXPIRES_IN_SECONDS });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: message });
+  }
+});
 
 // ============ Client Routes ============
 
@@ -494,6 +514,7 @@ app.post("/api/runs/:runId/review/approve", async (req: Request, res: Response) 
 
     // Record the HITL decision in hitl_decisions table
     const decision = await addHitlDecision({
+      clientId: run.clientId,
       runId,
       artifactId,
       decision: "approved",
@@ -548,6 +569,7 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
 
     // Record the HITL decision in hitl_decisions table
     const decision = await addHitlDecision({
+      clientId: run.clientId,
       runId,
       artifactId,
       decision: "rejected",
@@ -1025,12 +1047,18 @@ app.get("/api/campaigns/:campaignId/shot-summaries", async (req: Request, res: R
 app.post("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+    const campaign = await getCampaign(campaignId);
+    if (!campaign) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
     const {
       description, aiModel, originalPrompt,
       format, mediaType, durationSeconds, aspectRatio,
       resolution, platform, qualityTier, referenceImages, estimatedCost,
     } = req.body;
     const deliverable = await createDeliverable({
+      clientId: campaign.clientId,
       campaignId,
       description,
       aiModel,

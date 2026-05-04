@@ -1017,6 +1017,7 @@ async function recordDriftMetrics(
     // Record drift metric — map new dual-fusion fields to existing table columns.
     // Old columns (clipZ, e5Z) are repurposed: clipZ → gemini, e5Z → unused.
     const metric = await addDriftMetric({
+      clientId: run.clientId,
       runId: run.runId,
       clipZ: fusion.gemini_score.z_score,     // gemini z-score (was CLIP)
       cohereZ: fusion.cohere_score.z_score,

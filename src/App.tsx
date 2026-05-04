@@ -38,6 +38,7 @@ import CampaignDashboard from "./components/CampaignDashboard";
 import AuditTriageTable from "./components/AuditTriageTable";
 import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
 import type { AuditReportShot } from "./lib/auditReport";
+import { applyClientJwt, isJwtAuthEnabled, subscribeToClientAuthEvents } from "./lib/clientAuth";
 import {
   createRun,
   cancelRun,
@@ -112,6 +113,8 @@ const typeByName: Record<string, string> = {
 const DEFAULT_PRODUCTION_SLUG = (
   (import.meta.env.VITE_DEFAULT_PRODUCTION_SLUG as string | undefined)?.trim() || "drift-mv"
 ) as ProductionSlug;
+
+const OS_API_URL = (import.meta.env.VITE_OS_API_URL as string | undefined)?.trim() || "http://localhost:3001";
 
 const seedLogs: LogEntry[] = [
   { time: "12:04:22", msg: "BRAND_MEMORY_LOADED", status: "OK" },
@@ -331,6 +334,10 @@ export default function App() {
 
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeClient, setActiveClient] = useState<string>("");
+  const [isAuthReady, setIsAuthReady] = useState(!isJwtAuthEnabled());
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authRetryNonce, setAuthRetryNonce] = useState(0);
+  const [authEpoch, setAuthEpoch] = useState(0);
   const [showIntake, setShowIntake] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>(seedLogs);
   const [isClientDetailOpen, setIsClientDetailOpen] = useState(false);
@@ -367,6 +374,52 @@ export default function App() {
     }
   }, []);
 
+  const jwtAuthEnabled = isJwtAuthEnabled();
+  const canReadSupabase = !jwtAuthEnabled || isAuthReady;
+
+  useEffect(() => {
+    if (!jwtAuthEnabled) return undefined;
+    return subscribeToClientAuthEvents({
+      onApplied: () => setAuthEpoch((previous) => previous + 1),
+      onError: (error) => {
+        setAuthError(error.message);
+        setIsAuthReady(false);
+      },
+    });
+  }, [jwtAuthEnabled]);
+
+  useEffect(() => {
+    if (!jwtAuthEnabled) {
+      setIsAuthReady(true);
+      setAuthError(null);
+      return undefined;
+    }
+    if (!activeClient) {
+      setIsAuthReady(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setIsAuthReady(false);
+    setAuthError(null);
+
+    applyClientJwt(activeClient, OS_API_URL)
+      .then(() => {
+        if (!cancelled) setIsAuthReady(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[clientAuth] failed to authenticate client session", error);
+        setAuthError(message);
+        setIsAuthReady(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeClient, authRetryNonce, jwtAuthEnabled]);
+
   // Fetch clients from Supabase on mount
   useEffect(() => {
     async function loadClients() {
@@ -394,6 +447,7 @@ export default function App() {
 
   // Subscribe to client updates
   useEffect(() => {
+    if (!canReadSupabase) return undefined;
     const unsubscribe = subscribeToClients((updatedClient) => {
       setClients((prev) => {
         const index = prev.findIndex((c) => c.id === updatedClient.id);
@@ -408,10 +462,10 @@ export default function App() {
       });
     });
     return unsubscribe;
-  }, []);
+  }, [authEpoch, canReadSupabase]);
 
   useEffect(() => {
-    if (!activeClient) return;
+    if (!activeClient || !canReadSupabase) return;
     let cancelled = false;
 
     async function hydrateCampaignRun() {
@@ -434,7 +488,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeClient]);
+  }, [activeClient, authEpoch, canReadSupabase]);
 
 
   useEffect(() => {
@@ -452,7 +506,7 @@ export default function App() {
 
   // Fetch pending HITL reviews for the active client + global count
   useEffect(() => {
-    if (!activeClient) return;
+    if (!activeClient || !canReadSupabase) return;
     let cancelled = false;
     setPendingReviewRuns([]);
     async function loadPendingReviews() {
@@ -472,11 +526,11 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeClient]);
+  }, [activeClient, authEpoch, canReadSupabase]);
 
   // Track escalation-level HITL independently from legacy run.status review queue.
   useEffect(() => {
-    if (!activeClient) {
+    if (!activeClient || !canReadSupabase) {
       setOpenEscalationCount(0);
       return undefined;
     }
@@ -500,7 +554,7 @@ export default function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, [activeClient]);
+  }, [activeClient, authEpoch, canReadSupabase]);
 
   const runMenuOptions = [
     { id: "full", label: "Full Pipeline", mode: "full" },
@@ -532,6 +586,7 @@ export default function App() {
   const selectedCampaignSubtitle = selectedCampaign && selectedCampaignName !== selectedCampaign.name
     ? selectedCampaign.name
     : null;
+  const showAuthGate = jwtAuthEnabled && Boolean(activeClient) && (!isAuthReady || authError);
 
   const intakeModules = [
     { label: "LLM", value: hud.intake.initial_configuration.llm },
@@ -719,7 +774,7 @@ export default function App() {
   }, []);
 
   const handleStartRun = useCallback(async (mode: RunMode) => {
-    if (!activeClient) return;
+    if (!activeClient || !canReadSupabase) return;
     // Cleanup previous subscription
     teardownRunSubscriptions();
 
@@ -799,7 +854,7 @@ export default function App() {
         { time: now, msg: `RUN_FAILED: ${err instanceof Error ? err.message : "Unknown error"}`, status: "WAIT" },
       ]);
     }
-  }, [activeClient, teardownRunSubscriptions]);
+  }, [activeClient, canReadSupabase, teardownRunSubscriptions]);
 
   const handleReviewComplete = useCallback(async () => {
     setShowReviewPanel(false);
@@ -1012,7 +1067,7 @@ export default function App() {
           </div>
 
           <main className="flex-1 p-4 md:p-10 flex flex-col items-start justify-start relative overflow-y-auto min-h-0 min-w-0">
-            {selectedCampaign && currentRun?.runId && (
+            {canReadSupabase && selectedCampaign && currentRun?.runId && (
               <div className="pointer-events-auto absolute right-6 top-6 z-30">
                 <WatcherSignalsPanel
                   key={currentRun.runId}
@@ -1035,8 +1090,45 @@ export default function App() {
               <div className="absolute top-0 left-1/2 w-px h-full bg-cyan-500/5" />
             </div>
 
-            {currentClient && isClientDetailOpen && (
-              <div className={`w-full min-w-0 z-10 space-y-4 ml-0 md:ml-4 ${workspaceMaxClass}`}>
+            {showAuthGate && (
+              <div className="relative z-10 ml-0 w-full max-w-2xl rounded-[2rem] border border-red-400/25 bg-red-500/10 p-6 text-left shadow-[0_0_60px_rgba(239,68,68,0.12)] backdrop-blur-xl md:ml-4">
+                <p className="text-[9px] font-mono uppercase tracking-[0.3em] text-red-200/70">
+                  Client Session Auth
+                </p>
+                <h2 className="mt-2 text-2xl font-black uppercase italic tracking-tight text-white">
+                  {authError ? "Authentication blocked" : "Authenticating client session"}
+                </h2>
+                <p className="mt-3 text-[11px] leading-relaxed text-white/55">
+                  {authError
+                    ? "Failed to authenticate the selected client session. Direct Supabase reads are blocked until a client-scoped JWT is applied."
+                    : "Applying a client-scoped JWT before loading tenant data."}
+                </p>
+                {authError && (
+                  <p className="mt-3 rounded-xl border border-red-400/20 bg-black/25 px-3 py-2 font-mono text-[10px] text-red-100/80">
+                    {authError}
+                  </p>
+                )}
+                <div className="mt-5 flex items-center gap-3">
+                  {authError ? (
+                    <button
+                      type="button"
+                      onClick={() => setAuthRetryNonce((previous) => previous + 1)}
+                      className="rounded-xl border border-cyan-300/30 bg-cyan-300/15 px-4 py-2 text-[9px] font-mono uppercase tracking-[0.22em] text-cyan-100 transition hover:bg-cyan-300 hover:text-black"
+                    >
+                      Retry
+                    </button>
+                  ) : (
+                    <Loader2 size={18} className="text-cyan-300 animate-spin" />
+                  )}
+                  <span className="text-[9px] font-mono uppercase tracking-[0.22em] text-white/35">
+                    {activeClient}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {currentClient && isClientDetailOpen && canReadSupabase && (
+              <div key={`${currentClient.id}:${authEpoch}`} className={`w-full min-w-0 z-10 space-y-4 ml-0 md:ml-4 ${workspaceMaxClass}`}>
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
                   <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
                   <div className="space-y-2">
@@ -1530,27 +1622,31 @@ export default function App() {
         </aside>
       </div>
 
-      <ShotDetailDrawer
-        key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}:${selectedShot.pinnedTimelineEventId ?? "no-pin"}`}
-        shotNumber={selectedShot.n}
-        deliverableId={selectedShot.id}
-        campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
-        productionSlug={currentClient?.productionSlug}
-        runId={selectedShot.runId ?? currentRun?.runId}
-        initialTab={selectedShot.initialTab}
-        pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}
-        auditShot={selectedShot.auditShot}
-        onClose={() => setSelectedShot({ n: null, id: null })}
-        onRunSelect={setSelectedRunDetailId}
-      />
+      {canReadSupabase && (
+        <ShotDetailDrawer
+          key={`${activeClient}:${selectedShot.runId ?? currentRun?.runId ?? "no-run"}:${selectedShot.id ?? "closed"}:${selectedShot.initialTab ?? "narrative"}:${selectedShot.pinnedTimelineEventId ?? "no-pin"}`}
+          shotNumber={selectedShot.n}
+          deliverableId={selectedShot.id}
+          campaignId={selectedCampaign?.id ?? currentRun?.campaignId}
+          productionSlug={currentClient?.productionSlug}
+          runId={selectedShot.runId ?? currentRun?.runId}
+          initialTab={selectedShot.initialTab}
+          pinnedTimelineEventId={selectedShot.pinnedTimelineEventId}
+          auditShot={selectedShot.auditShot}
+          onClose={() => setSelectedShot({ n: null, id: null })}
+          onRunSelect={setSelectedRunDetailId}
+        />
+      )}
 
-      <RunDetailDrawer
-        runId={selectedRunDetailId}
-        onClose={() => setSelectedRunDetailId(null)}
-        onRunSelect={setSelectedRunDetailId}
-      />
+      {canReadSupabase && (
+        <RunDetailDrawer
+          runId={selectedRunDetailId}
+          onClose={() => setSelectedRunDetailId(null)}
+          onRunSelect={setSelectedRunDetailId}
+        />
+      )}
 
-      {showReviewPanel && currentRun && currentClient && (
+      {canReadSupabase && showReviewPanel && currentRun && currentClient && (
         <ReviewPanel
           key={`${activeClient}:${currentRun.runId}`}
           runId={currentRun.runId}

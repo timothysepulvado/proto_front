@@ -11,6 +11,7 @@ import type {
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
   MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
   DirectionDriftIndicator, DirectionDriftVerdictSource,
+  ClientUiConfig,
   ArtifactIterationRow, ArtifactIterationsResponse, ArtifactIterationOperatorOverride,
   ArtifactIterationVerdict,
 } from "./types.js";
@@ -39,6 +40,7 @@ interface DbRun {
 
 interface DbRunLog {
   id: number;
+  client_id: string;
   run_id: string;
   timestamp: string;
   stage: string;
@@ -69,11 +71,26 @@ interface DbClient {
   last_run_id: string | null;
   last_run_at: string | null;
   last_run_status: string | null;
+  ui_config: Record<string, unknown> | null;
   created_at?: string;
   updated_at?: string;
 }
 
 // ============ Mappers (DB → App) ============
+
+function mapDbClientUiConfig(value: Record<string, unknown> | null): ClientUiConfig | undefined {
+  if (!value) return undefined;
+  const displayName = typeof value.display_name === "string" ? value.display_name : undefined;
+  const entityLabel = typeof value.entity_label === "string" ? value.entity_label : undefined;
+  const featured = typeof value.featured === "boolean" ? value.featured : undefined;
+  const productionSlug = typeof value.production_slug === "string" ? value.production_slug : undefined;
+  const uiConfig: ClientUiConfig = {};
+  if (displayName !== undefined) uiConfig.displayName = displayName;
+  if (entityLabel !== undefined) uiConfig.entityLabel = entityLabel;
+  if (featured !== undefined) uiConfig.featured = featured;
+  if (productionSlug !== undefined) uiConfig.productionSlug = productionSlug;
+  return Object.keys(uiConfig).length > 0 ? uiConfig : undefined;
+}
 
 function mapDbRunToRun(dbRun: DbRun): Run {
   return {
@@ -97,6 +114,7 @@ function mapDbRunToRun(dbRun: DbRun): Run {
 function mapDbLogToRunLog(dbLog: DbRunLog): RunLog {
   return {
     id: dbLog.id,
+    clientId: dbLog.client_id,
     runId: dbLog.run_id,
     timestamp: dbLog.timestamp,
     stage: dbLog.stage,
@@ -124,10 +142,13 @@ function mapDbArtifactToArtifact(dbArtifact: DbArtifact): Artifact {
 }
 
 function mapDbClientToClient(dbClient: DbClient): Client {
+  const uiConfig = mapDbClientUiConfig(dbClient.ui_config);
   return {
     id: dbClient.id,
     name: dbClient.name,
     status: dbClient.status,
+    uiConfig,
+    featured: uiConfig?.featured,
     lastRunId: dbClient.last_run_id ?? undefined,
     lastRunAt: dbClient.last_run_at ?? undefined,
     lastRunStatus: (dbClient.last_run_status as RunStatus) ?? undefined,
@@ -150,6 +171,113 @@ function mapRunUpdatesToDb(updates: Partial<Run>): Record<string, unknown> {
   // (callers typically read-modify-write to avoid clobbering peer keys).
   if (updates.metadata !== undefined) mapped.metadata = updates.metadata;
   return mapped;
+}
+
+const runClientIdCache = new Map<string, string>();
+const campaignClientIdCache = new Map<string, string>();
+const artifactClientIdCache = new Map<string, string>();
+const escalationClientIdCache = new Map<string, string>();
+const deliverableClientIdCache = new Map<string, string>();
+
+function requireTenantMatch(
+  source: "run" | "campaign" | "artifact" | "escalation" | "deliverable",
+  sourceId: string,
+  resolvedClientId: string,
+  providedClientId?: string,
+): string {
+  if (providedClientId === undefined) return resolvedClientId;
+  const normalizedProvidedClientId = providedClientId.trim();
+  if (normalizedProvidedClientId !== resolvedClientId) {
+    throw new Error(
+      `Tenant mismatch: caller provided client_id=${normalizedProvidedClientId} but ${source} ${sourceId} belongs to client_id=${resolvedClientId}`,
+    );
+  }
+  return resolvedClientId;
+}
+
+export async function requireClientIdForRun(runId: string, providedClientId?: string): Promise<string> {
+  const cached = runClientIdCache.get(runId);
+  if (cached) return requireTenantMatch("run", runId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("runs")
+    .select("client_id")
+    .eq("id", runId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for run ${runId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Run ${runId} is missing client_id`);
+  runClientIdCache.set(runId, clientId);
+  return requireTenantMatch("run", runId, clientId, providedClientId);
+}
+
+export async function requireClientIdForCampaign(campaignId: string, providedClientId?: string): Promise<string> {
+  const cached = campaignClientIdCache.get(campaignId);
+  if (cached) return requireTenantMatch("campaign", campaignId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("campaigns")
+    .select("client_id")
+    .eq("id", campaignId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for campaign ${campaignId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Campaign ${campaignId} is missing client_id`);
+  campaignClientIdCache.set(campaignId, clientId);
+  return requireTenantMatch("campaign", campaignId, clientId, providedClientId);
+}
+
+export async function requireClientIdForArtifact(artifactId: string, providedClientId?: string): Promise<string> {
+  const cached = artifactClientIdCache.get(artifactId);
+  if (cached) return requireTenantMatch("artifact", artifactId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("client_id")
+    .eq("id", artifactId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for artifact ${artifactId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Artifact ${artifactId} is missing client_id`);
+  artifactClientIdCache.set(artifactId, clientId);
+  return requireTenantMatch("artifact", artifactId, clientId, providedClientId);
+}
+
+export async function requireClientIdForEscalation(escalationId: string, providedClientId?: string): Promise<string> {
+  const cached = escalationClientIdCache.get(escalationId);
+  if (cached) return requireTenantMatch("escalation", escalationId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("client_id")
+    .eq("id", escalationId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for escalation ${escalationId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Escalation ${escalationId} is missing client_id`);
+  escalationClientIdCache.set(escalationId, clientId);
+  return requireTenantMatch("escalation", escalationId, clientId, providedClientId);
+}
+
+export async function requireClientIdForDeliverable(deliverableId: string, providedClientId?: string): Promise<string> {
+  const cached = deliverableClientIdCache.get(deliverableId);
+  if (cached) return requireTenantMatch("deliverable", deliverableId, cached, providedClientId);
+
+  const { data, error } = await supabase
+    .from("campaign_deliverables")
+    .select("client_id")
+    .eq("id", deliverableId)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to resolve client_id for deliverable ${deliverableId}: ${error.message}`);
+  const clientId = (data as { client_id?: string } | null)?.client_id;
+  if (!clientId) throw new Error(`Deliverable ${deliverableId} is missing client_id`);
+  deliverableClientIdCache.set(deliverableId, clientId);
+  return requireTenantMatch("deliverable", deliverableId, clientId, providedClientId);
 }
 
 // ============ Run Operations ============
@@ -1288,9 +1416,11 @@ export async function getDirectionDriftIndicatorsByCampaign(
 // ============ Log Operations ============
 
 export async function addLog(log: Omit<RunLog, "id">): Promise<RunLog> {
+  const clientId = await requireClientIdForRun(log.runId, log.clientId);
   const { data, error } = await supabase
     .from("run_logs")
     .insert({
+      client_id: clientId,
       run_id: log.runId,
       timestamp: log.timestamp,
       stage: log.stage,
@@ -1330,12 +1460,19 @@ export async function getLogsByRun(runId: string, since?: number): Promise<RunLo
 // ============ Artifact Operations ============
 
 export async function addArtifact(artifact: Artifact): Promise<Artifact> {
+  const clientId = await requireClientIdForRun(artifact.runId, artifact.clientId);
+  if (artifact.campaignId) {
+    await requireClientIdForCampaign(artifact.campaignId, clientId);
+  }
+  if (artifact.deliverableId) {
+    await requireClientIdForDeliverable(artifact.deliverableId, clientId);
+  }
   const { data, error } = await supabase
     .from("artifacts")
     .insert({
       id: artifact.id,
       run_id: artifact.runId,
-      client_id: artifact.clientId ?? null,
+      client_id: clientId,
       campaign_id: artifact.campaignId ?? null,
       deliverable_id: artifact.deliverableId ?? null,
       type: artifact.type,
@@ -1824,6 +1961,7 @@ export async function updateClientLastRun(clientId: string, runId: string, statu
 
 interface DbHitlDecision {
   id: string;
+  client_id: string;
   run_id: string;
   artifact_id: string | null;
   decision: string;
@@ -1836,6 +1974,7 @@ interface DbHitlDecision {
 function mapDbHitlDecisionToHitlDecision(db: DbHitlDecision): HitlDecision {
   return {
     id: db.id,
+    clientId: db.client_id,
     runId: db.run_id,
     artifactId: db.artifact_id ?? undefined,
     decision: db.decision as HitlDecision["decision"],
@@ -1847,9 +1986,11 @@ function mapDbHitlDecisionToHitlDecision(db: DbHitlDecision): HitlDecision {
 }
 
 export async function addHitlDecision(decision: HitlDecision): Promise<HitlDecision> {
+  const clientId = await requireClientIdForRun(decision.runId, decision.clientId);
   const { data, error } = await supabase
     .from("hitl_decisions")
     .insert({
+      client_id: clientId,
       run_id: decision.runId,
       artifact_id: decision.artifactId ?? null,
       decision: decision.decision,
@@ -1885,6 +2026,7 @@ export async function getHitlDecisionsByRun(runId: string): Promise<HitlDecision
 
 interface DbDriftMetric {
   id: string;
+  client_id: string;
   run_id: string;
   artifact_id: string | null;
   clip_z: number | null;
@@ -1916,6 +2058,7 @@ interface DbDriftAlert {
 function mapDbDriftMetricToDriftMetric(row: DbDriftMetric): DriftMetric {
   return {
     id: row.id,
+    clientId: row.client_id,
     runId: row.run_id,
     artifactId: row.artifact_id ?? undefined,
     clipZ: row.clip_z ?? undefined,
@@ -1948,9 +2091,11 @@ function mapDbDriftAlertToDriftAlert(row: DbDriftAlert): DriftAlert {
 // ============ Drift Metric Operations ============
 
 export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> {
+  const clientId = await requireClientIdForRun(metric.runId, metric.clientId);
   const { data, error } = await supabase
     .from("drift_metrics")
     .insert({
+      client_id: clientId,
       run_id: metric.runId,
       artifact_id: metric.artifactId ?? null,
       clip_z: metric.clipZ ?? null,
@@ -2084,6 +2229,7 @@ interface DbCampaign {
 
 interface DbCampaignDeliverable {
   id: string;
+  client_id: string;
   campaign_id: string;
   description: string | null;
   ai_model: string | null;
@@ -2127,6 +2273,7 @@ function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
 function mapDbDeliverableToDeliverable(db: DbCampaignDeliverable): CampaignDeliverable {
   return {
     id: db.id,
+    clientId: db.client_id,
     campaignId: db.campaign_id,
     description: db.description ?? undefined,
     aiModel: db.ai_model ?? undefined,
@@ -2256,6 +2403,7 @@ export async function getDeliverable(deliverableId: string): Promise<CampaignDel
 }
 
 export async function createDeliverable(deliverable: {
+  clientId?: string;
   campaignId: string;
   description?: string;
   aiModel?: string;
@@ -2271,9 +2419,11 @@ export async function createDeliverable(deliverable: {
   referenceImages?: string[];
   estimatedCost?: number;
 }): Promise<CampaignDeliverable> {
+  const clientId = await requireClientIdForCampaign(deliverable.campaignId, deliverable.clientId);
   const { data, error } = await supabase
     .from("campaign_deliverables")
     .insert({
+      client_id: clientId,
       campaign_id: deliverable.campaignId,
       description: deliverable.description ?? null,
       ai_model: deliverable.aiModel ?? null,
@@ -2626,6 +2776,7 @@ interface DbKnownLimitation {
 
 interface DbAssetEscalation {
   id: string;
+  client_id: string;
   artifact_id: string;
   deliverable_id: string | null;
   run_id: string | null;
@@ -2644,6 +2795,7 @@ interface DbAssetEscalation {
 
 interface DbOrchestrationDecision {
   id: string;
+  client_id: string;
   escalation_id: string;
   run_id: string | null;
   iteration: number;
@@ -2679,6 +2831,7 @@ function mapKnownLimitation(d: DbKnownLimitation): KnownLimitation {
 function mapAssetEscalation(d: DbAssetEscalation): AssetEscalation {
   return {
     id: d.id,
+    clientId: d.client_id,
     artifactId: d.artifact_id,
     deliverableId: d.deliverable_id ?? undefined,
     runId: d.run_id ?? undefined,
@@ -2699,6 +2852,7 @@ function mapAssetEscalation(d: DbAssetEscalation): AssetEscalation {
 function mapOrchestrationDecision(d: DbOrchestrationDecision): OrchestrationDecisionRecord {
   return {
     id: d.id,
+    clientId: d.client_id,
     escalationId: d.escalation_id,
     runId: d.run_id ?? undefined,
     iteration: d.iteration,
@@ -2891,6 +3045,7 @@ export async function listEscalationsByRun(runId: string): Promise<AssetEscalati
 }
 
 export async function createEscalation(params: {
+  clientId?: string;
   artifactId: string;
   deliverableId?: string;
   runId?: string;
@@ -2899,9 +3054,17 @@ export async function createEscalation(params: {
   failureClass?: string;
   knownLimitationId?: string;
 }): Promise<AssetEscalation> {
+  const clientId = params.runId
+    ? await requireClientIdForRun(params.runId, params.clientId)
+    : await requireClientIdForArtifact(params.artifactId, params.clientId);
+  await requireClientIdForArtifact(params.artifactId, clientId);
+  if (params.deliverableId) {
+    await requireClientIdForDeliverable(params.deliverableId, clientId);
+  }
   const { data, error } = await supabase
     .from("asset_escalations")
     .insert({
+      client_id: clientId,
       artifact_id: params.artifactId,
       deliverable_id: params.deliverableId ?? null,
       run_id: params.runId ?? null,
@@ -2965,6 +3128,7 @@ export async function resolveEscalation(
 // ── orchestration_decisions CRUD ────────────────────────────────────────────
 
 export async function recordOrchestrationDecision(params: {
+  clientId?: string;
   escalationId: string;
   runId?: string;
   iteration: number;
@@ -2976,9 +3140,14 @@ export async function recordOrchestrationDecision(params: {
   cost?: number;
   latencyMs?: number;
 }): Promise<OrchestrationDecisionRecord> {
+  const clientId = params.runId
+    ? await requireClientIdForRun(params.runId, params.clientId)
+    : await requireClientIdForEscalation(params.escalationId, params.clientId);
+  await requireClientIdForEscalation(params.escalationId, clientId);
   const { data, error } = await supabase
     .from("orchestration_decisions")
     .insert({
+      client_id: clientId,
       escalation_id: params.escalationId,
       run_id: params.runId ?? null,
       iteration: params.iteration,

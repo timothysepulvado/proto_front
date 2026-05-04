@@ -602,6 +602,7 @@ const fixtureDeliverables: CampaignDeliverableFixture[] = [
     image_path: "/tmp/shot_07.png",
   };
   const record = buildAuditDecisionRecordInput({
+    clientId: "client_drift-mv",
     escalationId: "esc_1",
     artifactId: "art_1",
     runId: "run_1",
@@ -637,6 +638,7 @@ const fixtureDeliverables: CampaignDeliverableFixture[] = [
     image_path: "/tmp/shot_07.png",
   };
   const plan = buildHardCapHitlPlan({
+    clientId: "client_drift-mv",
     runId: "run_1",
     shotId: 7,
     iter: 8,

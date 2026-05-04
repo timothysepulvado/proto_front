@@ -7,4 +7,22 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase environment variables')
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey)
+let clientAccessToken: string | null = null
+
+export function setSupabaseClientAccessToken(token: string | null) {
+  clientAccessToken = token
+}
+
+const fetchWithClientAuth: typeof fetch = (input, init) => {
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+  if (clientAccessToken) {
+    headers.set('Authorization', `Bearer ${clientAccessToken}`)
+  }
+  return fetch(input, { ...init, headers })
+}
+
+export const supabase = createClient(supabaseUrl, supabaseKey, {
+  global: {
+    fetch: fetchWithClientAuth,
+  },
+})
