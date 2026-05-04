@@ -34,13 +34,28 @@ export function finiteNonNegative(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+/**
+ * Stable identifiers safe for application logs. Excludes prompts, file paths,
+ * trace IDs, and any metadata payload that runner paths attach for provenance —
+ * those can carry client content (PII / proprietary). (CR R3 fix.)
+ */
+function logIdentifiers(input: CostLedgerInput): Record<string, unknown> {
+  return {
+    clientId: input.clientId,
+    runId: input.runId,
+    eventType: input.eventType,
+    source: input.source,
+    costUsd: input.costUsd,
+  };
+}
+
 export async function recordCost(input: CostLedgerInput): Promise<void> {
   if (!input.clientId) {
     console.error("[cost_ledger] MISSING client_id, dropping ledger entry", { source: input.source });
     return;
   }
   if (input.costUsd < 0 || !Number.isFinite(input.costUsd)) {
-    console.warn("[cost_ledger] invalid costUsd, dropping", { input });
+    console.warn("[cost_ledger] invalid costUsd, dropping", logIdentifiers(input));
     return;
   }
 
@@ -63,12 +78,15 @@ export async function recordCost(input: CostLedgerInput): Promise<void> {
       rate_card_version: input.rateCardVersion ?? RATE_CARD_VERSION,
     });
     if (error) {
-      console.error("[cost_ledger] insert failed", { error: error.message, input });
+      console.error("[cost_ledger] insert failed", {
+        error: error.message,
+        ...logIdentifiers(input),
+      });
     }
   } catch (err) {
     console.error("[cost_ledger] insert threw", {
       error: err instanceof Error ? err.message : String(err),
-      input,
+      ...logIdentifiers(input),
     });
   }
 }
