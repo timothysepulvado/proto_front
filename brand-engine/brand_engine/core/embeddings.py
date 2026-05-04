@@ -176,6 +176,9 @@ class EmbeddingClient:
         """Embed an image using Gemini Embedding 2 with MRL at 768D."""
         img = Image.open(image_path)
 
+        # TODO(PR #5 cost ledger): emit an embedding ledger row from the os-api
+        # caller once client_id/run_id context is threaded through brand-engine.
+        # This low-level client intentionally has no tenant context.
         result = self._genai_client.models.embed_content(
             model=self.GEMINI_MODEL,
             contents=img,
@@ -187,6 +190,8 @@ class EmbeddingClient:
 
     def _embed_text_gemini(self, text: str) -> list[float]:
         """Embed text using Gemini Embedding 2 with MRL at 768D."""
+        # TODO(PR #5 cost ledger): emit Gemini Embedding 2 spend from the
+        # os-api caller once tenant/run context is available.
         result = self._genai_client.models.embed_content(
             model=self.GEMINI_MODEL,
             contents=text,
@@ -198,6 +203,8 @@ class EmbeddingClient:
 
     def _embed_text_cohere(self, text: str, input_type: str) -> list[float]:
         """Embed text using Cohere v4 at 1536D."""
+        # TODO(PR #5 cost ledger): emit Cohere v4 spend from the os-api caller
+        # once tenant/run context is available.
         result = self._cohere_client.embed(
             texts=[text],
             model=self._cohere_model,

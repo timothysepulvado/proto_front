@@ -729,7 +729,9 @@ class VideoGrader:
         severity_order = {"PASS": 0, "WARN": 1, "FAIL": 2}
         verdict_final = verdict_server if severity_order[verdict_server] > severity_order[verdict_model] else verdict_model
 
-        # Best-effort cost (google-genai doesn't return cost; leave 0.0 for caller to fill)
+        # Best-effort cost (google-genai doesn't return usage/cost yet). Keep 0
+        # and let os-api ledger mark metadata.cost_unknown=true until provider
+        # billing export/token accounting is plumbed.
         latency_ms = int((time.time() - t0) * 1000)
 
         # Clean up AI Studio File API uploads (no-op for Vertex inline path).
@@ -750,6 +752,7 @@ class VideoGrader:
             recommendation=str(parsed.get("recommendation", "ship")),
             model=self.model,
             cost=0.0,  # TODO: wire Google Cloud Billing export if needed
+            cost_usd=0.0,
             latency_ms=latency_ms,
         )
 
@@ -1036,6 +1039,7 @@ class VideoGrader:
             recommendation=str(parsed.get("recommendation", "ship")),
             model=self.model,
             cost=0.0,
+            cost_usd=0.0,
             latency_ms=latency_ms,
             consensus_note=note,
         )

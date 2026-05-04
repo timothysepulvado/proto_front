@@ -16,6 +16,7 @@ import type {
   ArtifactIterationVerdict,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
+import { recordCost, type CostEvent } from "./cost_ledger.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -3162,7 +3163,26 @@ export async function recordOrchestrationDecision(params: {
     .select()
     .single();
   if (error) throw new Error(`Failed to record orchestration decision: ${error.message}`);
-  return mapOrchestrationDecision(data as DbOrchestrationDecision);
+  const decision = mapOrchestrationDecision(data as DbOrchestrationDecision);
+  const decisionType = params.inputContext?.decision_type;
+  if (decisionType !== "audit_verdict") {
+    await recordCost({
+      clientId,
+      runId: params.runId,
+      escalationId: params.escalationId,
+      eventType: "orchestrator_decision",
+      source: params.model,
+      costUsd: params.cost ?? 0,
+      tokensInput: params.tokensIn,
+      tokensOutput: params.tokensOut,
+      metadata: {
+        orchestrationDecisionId: decision.id,
+        iteration: params.iteration,
+        decision_type: decisionType ?? "orchestrator_decision",
+      },
+    });
+  }
+  return decision;
 }
 
 /**
@@ -3249,6 +3269,46 @@ export async function getRunCostEstimate(runId: string): Promise<RunCostEstimate
     orchDecisionCount: (decsRes.data ?? []).length,
     veoArtifactCount,
     imageArtifactCount,
+  };
+}
+
+export interface RunLedgerCostSummary {
+  totalUsd: number;
+  byEventType: Record<CostEvent, number>;
+  bySource: Record<string, number>;
+  entryCount: number;
+}
+
+export async function getRunCostFromLedger(runId: string): Promise<RunLedgerCostSummary> {
+  const { data, error } = await supabase
+    .from("cost_ledger_entries")
+    .select("event_type, source, cost_usd")
+    .eq("run_id", runId);
+
+  if (error) {
+    throw new Error(`getRunCostFromLedger: cost_ledger_entries read failed: ${error.message}`);
+  }
+
+  const byEventType = {} as Record<CostEvent, number>;
+  const bySource: Record<string, number> = {};
+  let totalUsd = 0;
+
+  for (const row of data ?? []) {
+    const eventType = String(row.event_type ?? "") as CostEvent;
+    const source = String(row.source ?? "unknown");
+    const costUsd = Number(row.cost_usd ?? 0);
+    const safeCost = Number.isFinite(costUsd) ? costUsd : 0;
+
+    totalUsd += safeCost;
+    byEventType[eventType] = (byEventType[eventType] ?? 0) + safeCost;
+    bySource[source] = (bySource[source] ?? 0) + safeCost;
+  }
+
+  return {
+    totalUsd,
+    byEventType,
+    bySource,
+    entryCount: (data ?? []).length,
   };
 }
 

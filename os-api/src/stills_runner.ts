@@ -63,6 +63,7 @@ import {
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
 import { getTempGenDir } from "./temp-gen-env.js";
+import { recordCost } from "./cost_ledger.js";
 import type {
   Run,
   ImageGradeResult,
@@ -102,6 +103,75 @@ export const STILLS_AUDIT_CONCURRENCY = Number.parseInt(
  */
 export const STILLS_MODE_ENABLED =
   (process.env.STILLS_MODE_ENABLED ?? "false").toLowerCase() === "true";
+
+function finiteNonNegative(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+async function recordImageCriticCost(args: {
+  run: Run;
+  verdict: ImageGradeResult;
+  mode: "audit" | "in_loop";
+  shotId: number;
+  traceId: string;
+  imagePath: string;
+  deliverableId?: string;
+  artifactId?: string;
+}): Promise<void> {
+  const explicitCost = finiteNonNegative(args.verdict.cost_usd ?? args.verdict.cost);
+  const hasRealCost = explicitCost !== null && explicitCost > 0;
+  await recordCost({
+    clientId: args.run.clientId,
+    runId: args.run.runId,
+    deliverableId: args.deliverableId,
+    artifactId: args.artifactId,
+    eventType: "image_critic",
+    source: args.verdict.model,
+    costUsd: hasRealCost ? explicitCost : 0,
+    metadata: {
+      endpoint: "/grade_image_v2",
+      mode: args.mode,
+      shot_id: args.shotId,
+      trace_id: args.traceId,
+      image_path: args.imagePath,
+      verdict: args.verdict.verdict,
+      aggregate_score: args.verdict.aggregate_score,
+      recommendation: args.verdict.recommendation,
+      latency_ms: args.verdict.latency_ms,
+      cost_unknown: !hasRealCost,
+      todo: !hasRealCost
+        ? "brand-engine image critic returns cost=0 until provider usage/cost is plumbed."
+        : undefined,
+    },
+  });
+}
+
+async function recordStillsImageGenerationCost(args: {
+  run: Run;
+  artifactId: string;
+  deliverableId?: string;
+  source: string;
+  responseCost?: unknown;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const cost = finiteNonNegative(args.responseCost);
+  await recordCost({
+    clientId: args.run.clientId,
+    runId: args.run.runId,
+    deliverableId: args.deliverableId,
+    artifactId: args.artifactId,
+    eventType: "image_generate",
+    source: args.source,
+    costUsd: cost ?? 0,
+    units: 1,
+    unitsKind: "images",
+    metadata: {
+      ...(args.metadata ?? {}),
+      ...(cost === null ? { cost_unknown: true, todo: "Temp-gen image response did not provide a finite cost." } : {}),
+    },
+  });
+}
 
 // ─── Manifest types ────────────────────────────────────────────────────────
 
@@ -484,6 +554,16 @@ async function persistAuditVerdictDecision(
     verdict: result.verdict,
     traceId,
   }));
+  await recordImageCriticCost({
+    run,
+    verdict: result.verdict,
+    mode: "audit",
+    shotId: result.shotId,
+    traceId,
+    imagePath: result.imagePath,
+    deliverableId: deliverable?.id,
+    artifactId: persistedArtifact.id,
+  });
 }
 
 /**
@@ -980,6 +1060,16 @@ async function runInLoopMode(
         break;
       }
       lastVerdict = verdict;
+      await recordImageCriticCost({
+        run,
+        verdict,
+        mode: "in_loop",
+        shotId: shot.id,
+        traceId,
+        imagePath,
+        deliverableId: deliverable.id,
+        artifactId: candidate?.id,
+      });
 
       await emitLog(
         run.runId,
@@ -1228,6 +1318,20 @@ async function runInLoopMode(
               orchestratorLevel: result.decision?.level ?? null,
               orchestratorFailureClass: result.decision?.failure_class ?? null,
               tempGenCost: tempGenRes.data.cost ?? null,
+            },
+          });
+          await recordStillsImageGenerationCost({
+            run,
+            artifactId: newArtifact.id,
+            deliverableId: deliverable.id,
+            source: "gemini-3-pro-image-preview",
+            responseCost: tempGenRes.data.cost,
+            metadata: {
+              source: "stills_runner_in_loop_regen",
+              shot_id: shot.id,
+              iter: iter + 1,
+              parentArtifactId: candidate.id,
+              prompt: newPrompt,
             },
           });
           await emitLog(

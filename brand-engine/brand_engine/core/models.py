@@ -319,6 +319,10 @@ class VideoGradeResult(BaseModel):
     )
     model: str = Field(description="Gemini model id used")
     cost: float = Field(default=0.0, description="USD cost of the grade call")
+    cost_usd: float = Field(
+        default=0.0,
+        description="USD cost alias for ledger consumers; 0.0 means cost_unknown until provider usage is plumbed",
+    )
     latency_ms: int = Field(default=0, description="Wall-clock latency of the grade call")
     consensus_note: Optional[str] = Field(
         default=None,
@@ -469,6 +473,10 @@ class ImageGradeResult(BaseModel):
     )
     model: str = Field(description="Gemini model id used")
     cost: float = Field(default=0.0, description="USD cost of the grade call")
+    cost_usd: float = Field(
+        default=0.0,
+        description="USD cost alias for ledger consumers; 0.0 means cost_unknown until provider usage is plumbed",
+    )
     latency_ms: int = Field(default=0, description="Wall-clock latency of the grade call")
     shot_number: Optional[int] = Field(
         default=None,
