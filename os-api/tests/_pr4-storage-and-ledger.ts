@@ -122,16 +122,17 @@ async function seedClient(clientId: string): Promise<{ runId: string; storageObj
 
 async function cleanup(clientId: string, seeded: { runId: string; storageObject: string; ledgerId: string } | undefined): Promise<void> {
   // Reverse-order FK-aware delete. All via service-role, all soft-fail logged.
+  // NOTE: cost_ledger_entries is append-only by RLS design (no UPDATE/DELETE
+  // policies). Cleanup of the seeded ledger row happens automatically via
+  // ON DELETE CASCADE on cost_ledger_entries.run_id when we delete the run
+  // below — no explicit ledger DELETE required, which respects the invariant
+  // even if BYPASSRLS is ever revoked from service_role in the future.
   if (seeded) {
     // Storage object first (no FK to client but cleanup courtesy)
     const rmObj = await serviceClient.storage.from(BUCKET).remove([seeded.storageObject]);
     if (rmObj.error) console.warn(`[cleanup ${clientId}] storage remove: ${rmObj.error.message}`);
 
-    // Ledger row
-    const rmLedger = await serviceClient.from("cost_ledger_entries").delete().eq("id", seeded.ledgerId);
-    if (rmLedger.error) console.warn(`[cleanup ${clientId}] ledger: ${rmLedger.error.message}`);
-
-    // Run row (CASCADE will delete artifacts/run_logs but we didn't seed any)
+    // Run row — CASCADE deletes the seeded ledger row + any artifacts/run_logs.
     const rmRun = await serviceClient.from("runs").delete().eq("id", seeded.runId);
     if (rmRun.error) console.warn(`[cleanup ${clientId}] run: ${rmRun.error.message}`);
   }
