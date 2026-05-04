@@ -17,6 +17,7 @@ import {
   updateDeliverableStatus,
   listKnownLimitations,
   getRunCostEstimate,
+  VEO_COST_PER_SECOND_BY_MODEL,
 } from "./db.js";
 import { uploadArtifact, getFileSize } from "./storage.js";
 import {
@@ -25,6 +26,7 @@ import {
   markEscalationResolved,
 } from "./escalation_loop.js";
 import { supabase } from "./supabase.js";
+import { finiteNonNegative, recordCost } from "./cost_ledger.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation (legacy non-regrade modes that spawn
@@ -71,6 +73,112 @@ const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulv
 
 // Brand asset base directory (where per-brand asset folders live)
 const BRAND_ASSETS_BASE = process.env.BRAND_ASSETS_BASE || path.join(BRAND_LINTER_PATH, "data");
+
+async function recordImageGenerationCost(args: {
+  run: Run;
+  artifactId: string;
+  deliverableId?: string;
+  source: string;
+  responseCost?: unknown;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const cost = finiteNonNegative(args.responseCost);
+  await recordCost({
+    clientId: args.run.clientId,
+    runId: args.run.runId,
+    deliverableId: args.deliverableId,
+    artifactId: args.artifactId,
+    eventType: "image_generate",
+    source: args.source,
+    costUsd: cost ?? 0,
+    units: 1,
+    unitsKind: "images",
+    metadata: {
+      ...(args.metadata ?? {}),
+      ...(cost === null ? { cost_unknown: true, todo: "Temp-gen image response did not provide a finite cost." } : {}),
+    },
+  });
+}
+
+async function recordVideoGenerationCost(args: {
+  run: Run;
+  artifactId: string;
+  deliverableId?: string;
+  source: string;
+  durationSeconds: number;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const perSecond =
+    VEO_COST_PER_SECOND_BY_MODEL[args.source] ??
+    VEO_COST_PER_SECOND_BY_MODEL["veo-3.1-lite-generate-001"];
+  await recordCost({
+    clientId: args.run.clientId,
+    runId: args.run.runId,
+    deliverableId: args.deliverableId,
+    artifactId: args.artifactId,
+    eventType: "video_generate",
+    source: args.source,
+    costUsd: perSecond * args.durationSeconds,
+    units: args.durationSeconds,
+    unitsKind: "seconds",
+    metadata: {
+      ...(args.metadata ?? {}),
+      duration_seconds: args.durationSeconds,
+      rate_source: "VEO_COST_PER_SECOND_BY_MODEL",
+      cost_estimated: true,
+    },
+  });
+}
+
+async function recordVideoCriticCost(args: {
+  run: Run;
+  artifactId: string;
+  deliverableId?: string;
+  verdict: VideoGradeResult;
+  endpoint: "/grade_video";
+}): Promise<void> {
+  const cost = finiteNonNegative(args.verdict.cost_usd ?? args.verdict.cost);
+  const isConsensus = Boolean(args.verdict.consensus_note);
+  await recordCost({
+    clientId: args.run.clientId,
+    runId: args.run.runId,
+    deliverableId: args.deliverableId,
+    artifactId: args.artifactId,
+    eventType: isConsensus ? "consensus_critic" : "video_critic",
+    source: args.verdict.model,
+    costUsd: cost && cost > 0 ? cost : 0,
+    metadata: {
+      endpoint: args.endpoint,
+      verdict: args.verdict.verdict,
+      aggregate_score: args.verdict.aggregate_score,
+      recommendation: args.verdict.recommendation,
+      consensus_note: args.verdict.consensus_note ?? null,
+      latency_ms: args.verdict.latency_ms,
+      cost_unknown: !(cost && cost > 0),
+      todo: !(cost && cost > 0)
+        ? "brand-engine video critic returns cost=0 until provider usage/cost is plumbed."
+        : undefined,
+    },
+  });
+
+  if (args.verdict.consensus_note?.includes("frame extraction")) {
+    await recordCost({
+      clientId: args.run.clientId,
+      runId: args.run.runId,
+      deliverableId: args.deliverableId,
+      artifactId: args.artifactId,
+      eventType: "consensus_critic",
+      source: "ffmpeg-frame-strip",
+      costUsd: 0,
+      metadata: {
+        endpoint: args.endpoint,
+        compute_only: true,
+        cost_unknown: false,
+        consensus_note: args.verdict.consensus_note,
+      },
+    });
+  }
+}
 
 export async function emitLog(runId: string, stage: string, level: "info" | "warn" | "error" | "debug", message: string) {
   const log = {
@@ -527,7 +635,7 @@ async function executeDeliverableGeneration(
     );
 
     if (imgResult.ok && imgResult.data.status === "success") {
-      await createArtifactWithUpload({
+      const imageArtifact = await createArtifactWithUpload({
         runId: run.runId,
         clientId: run.clientId,
         campaignId: run.campaignId,
@@ -537,6 +645,14 @@ async function executeDeliverableGeneration(
         localPath: imgResult.data.local_path ?? path.join(outputDir, imgFileName),
         stage: stageId,
         metadata: { model: imgResult.data.model, prompt, cost: imgResult.data.cost },
+      });
+      await recordImageGenerationCost({
+        run,
+        artifactId: imageArtifact.id,
+        deliverableId: deliverable.id,
+        source: imgResult.data.model,
+        responseCost: imgResult.data.cost,
+        metadata: { prompt, media_type: "deliverable_image" },
       });
       artifactCreated = true;
     } else if (!isVideo) {
@@ -570,6 +686,8 @@ async function executeDeliverableGeneration(
         const resultPath = await pollTempGenJob(
           vidResult.data.job_id, run.runId, stageId,
         );
+        const videoModel = deliverable.aiModel ?? "veo-3.1-lite-generate-001";
+        const durationSeconds = deliverable.durationSeconds ?? 8;
         const videoArtifact = await createArtifactWithUpload({
           runId: run.runId,
           clientId: run.clientId,
@@ -580,11 +698,24 @@ async function executeDeliverableGeneration(
           localPath: resultPath || path.join(outputDir, vidFileName),
           stage: stageId,
           metadata: {
-            model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
+            model: videoModel,
             prompt,
-            duration_seconds: deliverable.durationSeconds ?? 8,
+            duration_seconds: durationSeconds,
             quality_tier: deliverable.qualityTier ?? "standard",
             referenceImagePath: deliverable.referenceImages?.[0],
+          },
+        });
+        await recordVideoGenerationCost({
+          run,
+          artifactId: videoArtifact.id,
+          deliverableId: deliverable.id,
+          source: videoModel,
+          durationSeconds,
+          metadata: {
+            prompt,
+            quality_tier: deliverable.qualityTier ?? "standard",
+            resolution: deliverable.resolution ?? "720p",
+            media_type: "deliverable_video",
           },
         });
         artifactCreated = true;
@@ -742,7 +873,7 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
   );
 
   if (result.ok && result.data.status === "success") {
-    await createArtifactWithUpload({
+    const imageArtifact = await createArtifactWithUpload({
       runId: run.runId,
       clientId: run.clientId,
       campaignId: run.campaignId,
@@ -751,6 +882,13 @@ async function executeGenerateImagesStage(run: Run): Promise<boolean> {
       localPath: result.data.local_path ?? path.join(outputDir, "generated.png"),
       stage: stageId,
       metadata: { model: result.data.model, prompt, cost: result.data.cost },
+    });
+    await recordImageGenerationCost({
+      run,
+      artifactId: imageArtifact.id,
+      source: result.data.model,
+      responseCost: result.data.cost,
+      metadata: { prompt, media_type: "run_image" },
     });
     run = await updateStageStatus(run, stageId, "completed");
     return true;
@@ -840,7 +978,9 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
       const resultPath = await pollTempGenJob(
         result.data.job_id, run.runId, stageId,
       );
-      await createArtifactWithUpload({
+      const videoModel = "veo-3.1-lite-generate-001";
+      const durationSeconds = 8;
+      const videoArtifact = await createArtifactWithUpload({
         runId: run.runId,
         clientId: run.clientId,
         campaignId: run.campaignId,
@@ -848,7 +988,14 @@ async function executeGenerateVideoStage(run: Run): Promise<boolean> {
         name: "generated.mp4",
         localPath: resultPath || path.join(outputDir, "generated.mp4"),
         stage: stageId,
-        metadata: { model: "veo-3.1-lite-generate-001", prompt: videoPrompt },
+        metadata: { model: videoModel, prompt: videoPrompt, duration_seconds: durationSeconds },
+      });
+      await recordVideoGenerationCost({
+        run,
+        artifactId: videoArtifact.id,
+        source: videoModel,
+        durationSeconds,
+        metadata: { prompt: videoPrompt, resolution: "720p", quality_tier: "standard", media_type: "run_video" },
       });
       run = await updateStageStatus(run, stageId, "completed");
       return true;
@@ -1233,6 +1380,13 @@ async function gradeAndEscalateVideo(params: {
     }
 
     const verdict = gradeResult.data;
+    await recordVideoCriticCost({
+      run,
+      artifactId: currentArtifact.id,
+      deliverableId: deliverable.id,
+      verdict,
+      endpoint: "/grade_video",
+    });
     await emitLog(
       run.runId,
       stageId,
@@ -1318,7 +1472,7 @@ async function gradeAndEscalateVideo(params: {
         stageId,
       );
       if (stillResult.ok && stillResult.data.status === "success") {
-        await createArtifactWithUpload({
+        const stillArtifact = await createArtifactWithUpload({
           runId: run.runId,
           clientId: run.clientId,
           campaignId: run.campaignId,
@@ -1333,6 +1487,18 @@ async function gradeAndEscalateVideo(params: {
             cost: stillResult.data.cost,
             escalationId: escalationResult.escalation.id,
             role: "redesigned_hero_still",
+          },
+        });
+        await recordImageGenerationCost({
+          run,
+          artifactId: stillArtifact.id,
+          deliverableId: deliverable.id,
+          source: stillResult.data.model,
+          responseCost: stillResult.data.cost,
+          metadata: {
+            prompt: newPrompts.stillPrompt,
+            escalationId: escalationResult.escalation.id,
+            media_type: "video_escalation_hero_still",
           },
         });
         refImagePath = stillResult.data.local_path ?? undefined;
@@ -1390,6 +1556,8 @@ async function gradeAndEscalateVideo(params: {
     }
 
     // Create successor artifact and loop back to grading
+    const successorModel = deliverable.aiModel ?? "veo-3.1-lite-generate-001";
+    const successorDuration = deliverable.durationSeconds ?? 8;
     const successorArtifact = await createArtifactWithUpload({
       runId: run.runId,
       clientId: run.clientId,
@@ -1400,13 +1568,27 @@ async function gradeAndEscalateVideo(params: {
       localPath: newVidPath || path.join(vidOutputDir, newVidFileName),
       stage: stageId,
       metadata: {
-        model: deliverable.aiModel ?? "veo-3.1-lite-generate-001",
+        model: successorModel,
         prompt: newPrompts.veoPrompt,
         negativePrompt: newPrompts.negativePrompt,
         referenceImagePath: refImagePath,
+        duration_seconds: successorDuration,
         escalationId: escalationResult.escalation.id,
         orchestrationIteration: escalationResult.escalation.iterationCount,
         predecessorArtifactId: currentArtifact.id,
+        role: "escalation_regen",
+      },
+    });
+    await recordVideoGenerationCost({
+      run,
+      artifactId: successorArtifact.id,
+      deliverableId: deliverable.id,
+      source: successorModel,
+      durationSeconds: successorDuration,
+      metadata: {
+        prompt: veoPrompt,
+        negative_prompt: newPrompts.negativePrompt,
+        escalationId: escalationResult.escalation.id,
         role: "escalation_regen",
       },
     });

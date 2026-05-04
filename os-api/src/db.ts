@@ -16,6 +16,7 @@ import type {
   ArtifactIterationVerdict,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
+import { recordCost, type CostEvent } from "./cost_ledger.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -61,6 +62,26 @@ interface DbArtifact {
   stage: string | null;
   size: number | null;
   metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+interface DbCostLedgerEntry {
+  id: string;
+  client_id: string;
+  run_id: string | null;
+  deliverable_id: string | null;
+  artifact_id: string | null;
+  escalation_id: string | null;
+  event_type: string;
+  source: string;
+  cost_usd: number | string;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_cached: number | null;
+  units: number | string | null;
+  units_kind: string | null;
+  metadata: Record<string, unknown> | null;
+  rate_card_version: string | null;
   created_at: string;
 }
 
@@ -3162,7 +3183,26 @@ export async function recordOrchestrationDecision(params: {
     .select()
     .single();
   if (error) throw new Error(`Failed to record orchestration decision: ${error.message}`);
-  return mapOrchestrationDecision(data as DbOrchestrationDecision);
+  const decision = mapOrchestrationDecision(data as DbOrchestrationDecision);
+  const decisionType = params.inputContext?.decision_type;
+  if (decisionType !== "audit_verdict") {
+    await recordCost({
+      clientId,
+      runId: params.runId,
+      escalationId: params.escalationId,
+      eventType: "orchestrator_decision",
+      source: params.model,
+      costUsd: params.cost ?? 0,
+      tokensInput: params.tokensIn,
+      tokensOutput: params.tokensOut,
+      metadata: {
+        orchestrationDecisionId: decision.id,
+        iteration: params.iteration,
+        decision_type: decisionType ?? "orchestrator_decision",
+      },
+    });
+  }
+  return decision;
 }
 
 /**
@@ -3250,6 +3290,102 @@ export async function getRunCostEstimate(runId: string): Promise<RunCostEstimate
     veoArtifactCount,
     imageArtifactCount,
   };
+}
+
+export interface RunLedgerCostSummary {
+  totalUsd: number;
+  byEventType: Record<CostEvent, number>;
+  bySource: Record<string, number>;
+  entryCount: number;
+}
+
+export interface CostLedgerEntryRow {
+  id: string;
+  client_id: string;
+  run_id: string | null;
+  deliverable_id: string | null;
+  artifact_id: string | null;
+  escalation_id: string | null;
+  event_type: string;
+  source: string;
+  cost_usd: number;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_cached: number | null;
+  units: number | null;
+  units_kind: string | null;
+  metadata: Record<string, unknown>;
+  rate_card_version: string;
+  created_at: string;
+}
+
+function mapDbCostLedgerEntry(row: DbCostLedgerEntry): CostLedgerEntryRow {
+  return {
+    id: row.id,
+    client_id: row.client_id,
+    run_id: row.run_id,
+    deliverable_id: row.deliverable_id,
+    artifact_id: row.artifact_id,
+    escalation_id: row.escalation_id,
+    event_type: row.event_type,
+    source: row.source,
+    cost_usd: readNumber(row.cost_usd) ?? 0,
+    tokens_input: row.tokens_input,
+    tokens_output: row.tokens_output,
+    tokens_cached: row.tokens_cached,
+    units: readNumber(row.units) ?? null,
+    units_kind: row.units_kind,
+    metadata: row.metadata ?? {},
+    rate_card_version: row.rate_card_version ?? "v1",
+    created_at: row.created_at,
+  };
+}
+
+export async function getRunCostFromLedger(runId: string): Promise<RunLedgerCostSummary> {
+  const { data, error } = await supabase
+    .from("cost_ledger_entries")
+    .select("event_type, source, cost_usd")
+    .eq("run_id", runId);
+
+  if (error) {
+    throw new Error(`getRunCostFromLedger: cost_ledger_entries read failed: ${error.message}`);
+  }
+
+  const byEventType = {} as Record<CostEvent, number>;
+  const bySource: Record<string, number> = {};
+  let totalUsd = 0;
+
+  for (const row of data ?? []) {
+    const eventType = String(row.event_type ?? "") as CostEvent;
+    const source = String(row.source ?? "unknown");
+    const costUsd = Number(row.cost_usd ?? 0);
+    const safeCost = Number.isFinite(costUsd) ? costUsd : 0;
+
+    totalUsd += safeCost;
+    byEventType[eventType] = (byEventType[eventType] ?? 0) + safeCost;
+    bySource[source] = (bySource[source] ?? 0) + safeCost;
+  }
+
+  return {
+    totalUsd,
+    byEventType,
+    bySource,
+    entryCount: (data ?? []).length,
+  };
+}
+
+export async function listCostLedgerEntriesByRun(runId: string): Promise<CostLedgerEntryRow[]> {
+  const { data, error } = await supabase
+    .from("cost_ledger_entries")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`listCostLedgerEntriesByRun: cost_ledger_entries read failed: ${error.message}`);
+  }
+
+  return ((data ?? []) as DbCostLedgerEntry[]).map(mapDbCostLedgerEntry);
 }
 
 export async function getOrchestrationDecisions(escalationId: string): Promise<OrchestrationDecisionRecord[]> {

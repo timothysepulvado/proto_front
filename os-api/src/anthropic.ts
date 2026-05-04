@@ -316,6 +316,10 @@ export async function callClaude(
           + cacheWriteTokens * INPUT_COST_PER_M * CACHE_WRITE_MULT
           + cacheReadTokens * INPUT_COST_PER_M * CACHE_READ_MULT
           + tokensOut * OUTPUT_COST_PER_M) / 1_000_000;
+      // Cost ledger note: do NOT write cost_ledger_entries here. This wrapper has
+      // no tenant/run/escalation context, so PR #4 Phase E records the
+      // orchestrator_decision ledger row in db.ts::recordOrchestrationDecision
+      // after client_id has been resolved and the canonical audit row exists.
 
       return {
         text,

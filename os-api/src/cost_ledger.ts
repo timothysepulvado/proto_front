@@ -1,0 +1,107 @@
+import { supabase } from "./supabase.js";
+
+export type CostEvent =
+  | "orchestrator_decision"
+  | "video_generate"
+  | "image_generate"
+  | "video_critic"
+  | "image_critic"
+  | "consensus_critic"
+  | "embedding";
+
+export interface CostLedgerInput {
+  clientId: string;
+  runId?: string;
+  deliverableId?: string;
+  artifactId?: string;
+  escalationId?: string;
+  eventType: CostEvent;
+  source: string;
+  costUsd: number;
+  tokensInput?: number;
+  tokensOutput?: number;
+  tokensCached?: number;
+  units?: number;
+  unitsKind?: "seconds" | "frames" | "images";
+  metadata?: Record<string, unknown>;
+  rateCardVersion?: string;
+}
+
+const RATE_CARD_VERSION = "v1";
+
+/**
+ * Validates a cost-emit value as a finite, non-negative number.
+ * Strict input shape (CR R5): only accepts actual numbers or non-empty
+ * numeric strings. Rejects booleans, null/undefined, empty strings, NaN,
+ * and Infinity — `Number()` coerces those to 0/1 silently, which would
+ * under-report or misclassify ledger costs.
+ */
+export function finiteNonNegative(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * Stable identifiers safe for application logs. Excludes prompts, file paths,
+ * trace IDs, and any metadata payload that runner paths attach for provenance —
+ * those can carry client content (PII / proprietary). (CR R3 fix.)
+ */
+function logIdentifiers(input: CostLedgerInput): Record<string, unknown> {
+  return {
+    clientId: input.clientId,
+    runId: input.runId,
+    eventType: input.eventType,
+    source: input.source,
+    costUsd: input.costUsd,
+  };
+}
+
+export async function recordCost(input: CostLedgerInput): Promise<void> {
+  if (!input.clientId) {
+    console.error("[cost_ledger] MISSING client_id, dropping ledger entry", { source: input.source });
+    return;
+  }
+  if (input.costUsd < 0 || !Number.isFinite(input.costUsd)) {
+    console.warn("[cost_ledger] invalid costUsd, dropping", logIdentifiers(input));
+    return;
+  }
+
+  try {
+    const { error } = await supabase.from("cost_ledger_entries").insert({
+      client_id: input.clientId,
+      run_id: input.runId ?? null,
+      deliverable_id: input.deliverableId ?? null,
+      artifact_id: input.artifactId ?? null,
+      escalation_id: input.escalationId ?? null,
+      event_type: input.eventType,
+      source: input.source,
+      cost_usd: input.costUsd,
+      tokens_input: input.tokensInput ?? null,
+      tokens_output: input.tokensOutput ?? null,
+      tokens_cached: input.tokensCached ?? null,
+      units: input.units ?? null,
+      units_kind: input.unitsKind ?? null,
+      metadata: input.metadata ?? {},
+      rate_card_version: input.rateCardVersion ?? RATE_CARD_VERSION,
+    });
+    if (error) {
+      console.error("[cost_ledger] insert failed", {
+        error: error.message,
+        ...logIdentifiers(input),
+      });
+    }
+  } catch (err) {
+    console.error("[cost_ledger] insert threw", {
+      error: err instanceof Error ? err.message : String(err),
+      ...logIdentifiers(input),
+    });
+  }
+}

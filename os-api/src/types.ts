@@ -390,6 +390,7 @@ export interface VideoGradeResult {
     | "L3_accept_with_trim";
   model: string;
   cost: number;
+  cost_usd?: number;
   latency_ms: number;
   /**
    * Non-null iff the /grade_video call used the Rule-1 consensus path
@@ -446,6 +447,7 @@ export interface ImageGradeResult {
   recommendation: ImageGradeRecommendation;
   model: string;
   cost: number;
+  cost_usd?: number;
   latency_ms: number;
   shot_number?: number | null;
   image_path: string;

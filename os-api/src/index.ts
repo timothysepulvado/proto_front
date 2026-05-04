@@ -54,10 +54,12 @@ import {
   getShotSummaries,
   getRecentRunsByCampaign,
   getRunDetail,
+  listCostLedgerEntriesByRun,
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
   getArtifactsForDeliverableWithVerdicts,
 } from "./db.js";
+import { finiteNonNegative } from "./cost_ledger.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
@@ -79,6 +81,22 @@ app.use("/api/productions", createProductionsRouter());
 // Helper to extract params safely
 function getParam(req: Request, name: string): string {
   return req.params[name] as string;
+}
+
+function getQueryString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return undefined;
+}
+
+type CostLedgerBreakdownMode = "event_type" | "source" | "none";
+
+const COST_LEDGER_BREAKDOWN_MODES = new Set<CostLedgerBreakdownMode>(["event_type", "source", "none"]);
+
+function parseCostLedgerLimit(value: unknown): number {
+  const raw = Number.parseInt(getQueryString(value) ?? "", 10);
+  if (!Number.isFinite(raw)) return 500;
+  return Math.max(1, Math.min(1000, raw));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -366,6 +384,67 @@ app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
     res.json(detail);
   } catch (err) {
     console.error("GET /api/runs/:runId/detail error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/cost-ledger - Per-event ledger payload for RunDetailDrawer
+app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const run = await getRun(runId);
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    const requestedBreakdown = getQueryString(req.query.breakdown) ?? "event_type";
+    if (!COST_LEDGER_BREAKDOWN_MODES.has(requestedBreakdown as CostLedgerBreakdownMode)) {
+      res.status(400).json({ error: "Invalid breakdown; expected event_type, source, or none" });
+      return;
+    }
+    const breakdownMode = requestedBreakdown as CostLedgerBreakdownMode;
+    const limit = parseCostLedgerLimit(req.query.limit);
+
+    const allEntries = await listCostLedgerEntriesByRun(runId);
+
+    const breakdown: Record<string, { usd: number; count: number }> = {};
+    const rateCardCounts = new Map<string, number>();
+    let totalUsd = 0;
+    for (const entry of allEntries) {
+      const safeCost = finiteNonNegative(entry.cost_usd) ?? 0;
+      totalUsd += safeCost;
+      const version = entry.rate_card_version || "v1";
+      rateCardCounts.set(version, (rateCardCounts.get(version) ?? 0) + 1);
+      if (breakdownMode !== "none") {
+        const key = breakdownMode === "event_type" ? entry.event_type : entry.source;
+        const safeKey = key.trim().length > 0 ? key : "unknown";
+        const current = breakdown[safeKey] ?? { usd: 0, count: 0 };
+        current.usd += safeCost;
+        current.count += 1;
+        breakdown[safeKey] = current;
+      }
+    }
+
+    let rateCardVersion = "v1";
+    let highestVersionCount = 0;
+    for (const [version, count] of rateCardCounts) {
+      if (count > highestVersionCount) {
+        rateCardVersion = version;
+        highestVersionCount = count;
+      }
+    }
+
+    res.json({
+      runId,
+      totalUsd,
+      entryCount: allEntries.length,
+      rateCardVersion,
+      breakdown,
+      entries: allEntries.slice(0, limit),
+    });
+  } catch (err) {
+    console.error("GET /api/runs/:runId/cost-ledger error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
