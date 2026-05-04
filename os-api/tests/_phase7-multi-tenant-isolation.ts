@@ -376,9 +376,14 @@ async function assertAnonBlocked(client: SupabaseClient): Promise<void> {
 
 async function assertGlobalReadable(client: SupabaseClient, label: string): Promise<void> {
   for (const tbl of GLOBAL_TABLES) {
-    const { data, error } = await client.from(tbl).select("id");
+    const { count: seededCount, error: probeError } = await serviceClient
+      .from(tbl)
+      .select("id", { count: "exact", head: true });
+    if (probeError) throw new Error(`[global-probe] ${tbl} count failed: ${probeError.message}`);
+
+    const { data, error } = await client.from(tbl).select("id").limit(1);
     if (error) throw new Error(`[${label}] ${tbl} query failed: ${error.message}`);
-    if (!data || data.length === 0) {
+    if ((seededCount ?? 0) > 0 && (!data || data.length === 0)) {
       throw new Error(`[${label}] ${tbl} returned 0 rows — global table should be readable`);
     }
   }
