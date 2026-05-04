@@ -121,25 +121,33 @@ async function seedClient(clientId: string): Promise<{ runId: string; storageObj
 }
 
 async function cleanup(clientId: string, seeded: { runId: string; storageObject: string; ledgerId: string } | undefined): Promise<void> {
-  // Reverse-order FK-aware delete. All via service-role, all soft-fail logged.
+  // Reverse-order FK-aware delete. All via service-role.
+  // Best-effort sequence: attempt every step, collect errors, then THROW after
+  // the full pass so an orphan row never produces a false-green run. (CR R2.)
   // NOTE: cost_ledger_entries is append-only by RLS design (no UPDATE/DELETE
   // policies). Cleanup of the seeded ledger row happens automatically via
   // ON DELETE CASCADE on cost_ledger_entries.run_id when we delete the run
   // below — no explicit ledger DELETE required, which respects the invariant
   // even if BYPASSRLS is ever revoked from service_role in the future.
+  const errors: string[] = [];
+
   if (seeded) {
     // Storage object first (no FK to client but cleanup courtesy)
     const rmObj = await serviceClient.storage.from(BUCKET).remove([seeded.storageObject]);
-    if (rmObj.error) console.warn(`[cleanup ${clientId}] storage remove: ${rmObj.error.message}`);
+    if (rmObj.error) errors.push(`storage remove: ${rmObj.error.message}`);
 
     // Run row — CASCADE deletes the seeded ledger row + any artifacts/run_logs.
     const rmRun = await serviceClient.from("runs").delete().eq("id", seeded.runId);
-    if (rmRun.error) console.warn(`[cleanup ${clientId}] run: ${rmRun.error.message}`);
+    if (rmRun.error) errors.push(`run delete: ${rmRun.error.message}`);
   }
 
   // Client last
   const rmClient = await serviceClient.from("clients").delete().eq("id", clientId);
-  if (rmClient.error) console.warn(`[cleanup ${clientId}] client: ${rmClient.error.message}`);
+  if (rmClient.error) errors.push(`client delete: ${rmClient.error.message}`);
+
+  if (errors.length > 0) {
+    throw new Error(`[cleanup ${clientId}] ${errors.length} step(s) failed — orphans likely:\n  - ${errors.join("\n  - ")}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -234,8 +242,23 @@ async function main(): Promise<void> {
 
     console.log(`\n✓✓✓ ALL 5 ASSERTIONS PASS — PR #4 Storage write-side RLS + ledger isolation verified`);
   } finally {
-    await cleanup(CLIENT_A_ID, seededA);
-    await cleanup(CLIENT_B_ID, seededB);
+    // Always attempt BOTH cleanups, then re-throw if any failed so the harness
+    // exits non-zero on orphan-state risk (CR R2 fix — no false-green runs).
+    const cleanupErrors: string[] = [];
+    try {
+      await cleanup(CLIENT_A_ID, seededA);
+    } catch (err) {
+      cleanupErrors.push(err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await cleanup(CLIENT_B_ID, seededB);
+    } catch (err) {
+      cleanupErrors.push(err instanceof Error ? err.message : String(err));
+    }
+    if (cleanupErrors.length > 0) {
+      console.error(`cleanup INCOMPLETE — ${cleanupErrors.length} failure(s):\n${cleanupErrors.join("\n")}`);
+      throw new Error("cleanup failed — see errors above");
+    }
     console.log(`cleanup complete`);
   }
 }
