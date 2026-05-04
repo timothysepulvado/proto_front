@@ -164,6 +164,7 @@ export async function applyClientJwt(
   // and Realtime accept the token. Keep the required setSession call, but route
   // direct reads through the mutable Authorization header set above.
   if (error && !error.message.includes("sub claim must be a UUID")) {
+    setSupabaseClientAccessToken(null);
     throw new Error(`Failed to apply client JWT session: ${error.message}`);
   }
 
