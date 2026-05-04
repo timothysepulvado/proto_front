@@ -54,6 +54,8 @@ import {
   getShotSummaries,
   getRecentRunsByCampaign,
   getRunDetail,
+  getRunCostFromLedger,
+  listCostLedgerEntriesByRun,
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
   getArtifactsForDeliverableWithVerdicts,
@@ -79,6 +81,22 @@ app.use("/api/productions", createProductionsRouter());
 // Helper to extract params safely
 function getParam(req: Request, name: string): string {
   return req.params[name] as string;
+}
+
+function getQueryString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return undefined;
+}
+
+type CostLedgerBreakdownMode = "event_type" | "source" | "none";
+
+const COST_LEDGER_BREAKDOWN_MODES = new Set<CostLedgerBreakdownMode>(["event_type", "source", "none"]);
+
+function parseCostLedgerLimit(value: unknown): number {
+  const raw = Number.parseInt(getQueryString(value) ?? "", 10);
+  if (!Number.isFinite(raw)) return 500;
+  return Math.max(1, Math.min(1000, raw));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -366,6 +384,61 @@ app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
     res.json(detail);
   } catch (err) {
     console.error("GET /api/runs/:runId/detail error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/runs/:runId/cost-ledger - Per-event ledger payload for RunDetailDrawer
+app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
+  try {
+    const runId = getParam(req, "runId");
+    const run = await getRun(runId);
+    if (!run) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    const requestedBreakdown = getQueryString(req.query.breakdown) ?? "event_type";
+    if (!COST_LEDGER_BREAKDOWN_MODES.has(requestedBreakdown as CostLedgerBreakdownMode)) {
+      res.status(400).json({ error: "Invalid breakdown; expected event_type, source, or none" });
+      return;
+    }
+    const breakdownMode = requestedBreakdown as CostLedgerBreakdownMode;
+    const limit = parseCostLedgerLimit(req.query.limit);
+
+    const [summary, allEntries] = await Promise.all([
+      getRunCostFromLedger(runId),
+      listCostLedgerEntriesByRun(runId),
+    ]);
+
+    const breakdown: Record<string, { usd: number; count: number }> = {};
+    if (breakdownMode !== "none") {
+      for (const entry of allEntries) {
+        const key = breakdownMode === "event_type" ? entry.event_type : entry.source;
+        const safeKey = key.trim().length > 0 ? key : "unknown";
+        const safeCost = Number.isFinite(entry.cost_usd) ? entry.cost_usd : 0;
+        const current = breakdown[safeKey] ?? { usd: 0, count: 0 };
+        current.usd += safeCost;
+        current.count += 1;
+        breakdown[safeKey] = current;
+      }
+    }
+
+    const rateCardVersions = new Set(allEntries.map((entry) => entry.rate_card_version || "v1"));
+    const rateCardVersion = rateCardVersions.size <= 1
+      ? (Array.from(rateCardVersions)[0] ?? "v1")
+      : "mixed";
+
+    res.json({
+      runId,
+      totalUsd: summary.totalUsd,
+      entryCount: summary.entryCount,
+      rateCardVersion,
+      breakdown,
+      entries: allEntries.slice(0, limit),
+    });
+  } catch (err) {
+    console.error("GET /api/runs/:runId/cost-ledger error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

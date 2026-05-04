@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "../api";
-import type { Artifact, RunDetail, RunLog, RunStatus } from "../api";
+import type { Artifact, RunCostLedgerResponse, RunDetail, RunLog, RunStatus } from "../api";
 
 interface RunDetailDrawerProps {
   runId: string | null;
@@ -20,6 +20,8 @@ interface RunDetailDrawerProps {
 }
 
 const terminalStatuses = new Set<RunStatus>(["blocked", "cancelled", "completed", "failed"]);
+
+type LedgerBreakdownMode = "event_type" | "source";
 
 const logStyles: Record<RunLog["level"], string> = {
   info: "border-cyan-400/15 text-cyan-100/80",
@@ -67,6 +69,10 @@ function formatDuration(start: string | undefined, end: string | undefined) {
 
 function formatMoney(value: number) {
   return `$${value.toFixed(4)}`;
+}
+
+function formatLedgerKey(value: string) {
+  return value.trim().length > 0 ? value : "unknown";
 }
 
 function statusLabel(status: RunStatus) {
@@ -158,9 +164,15 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledgerBreakdown, setLedgerBreakdown] = useState<LedgerBreakdownMode>("event_type");
+  const [ledger, setLedger] = useState<RunCostLedgerResponse | null>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const loadRequestIdRef = useRef(0);
+  const ledgerRequestIdRef = useRef(0);
   const activeRunIdRef = useRef<string | null>(null);
 
   const loadDetail = useCallback(async (id: string) => {
@@ -183,13 +195,39 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
     }
   }, []);
 
+  const loadLedger = useCallback(async (id: string, breakdown: LedgerBreakdownMode) => {
+    const requestId = ++ledgerRequestIdRef.current;
+    try {
+      setLedgerLoading(true);
+      setLedgerError(null);
+      setLedger(null);
+      const payload = await api.getRunCostLedger(id, { breakdown, limit: 50 });
+      if (requestId !== ledgerRequestIdRef.current || activeRunIdRef.current !== id) return;
+      setLedger(payload);
+    } catch {
+      if (requestId !== ledgerRequestIdRef.current || activeRunIdRef.current !== id) return;
+      setLedgerError("Ledger unavailable");
+      setLedger(null);
+    } finally {
+      if (requestId === ledgerRequestIdRef.current && activeRunIdRef.current === id) {
+        setLedgerLoading(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!runId) {
       loadRequestIdRef.current += 1;
+      ledgerRequestIdRef.current += 1;
       activeRunIdRef.current = null;
       setDetail(null);
       setError(null);
       setIsLoading(false);
+      setLedgerOpen(false);
+      setLedgerBreakdown("event_type");
+      setLedger(null);
+      setLedgerError(null);
+      setLedgerLoading(false);
       return undefined;
     }
 
@@ -197,6 +235,21 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
     window.setTimeout(() => closeButtonRef.current?.focus(), 0);
     return undefined;
   }, [loadDetail, runId]);
+
+  useEffect(() => {
+    ledgerRequestIdRef.current += 1;
+    setLedgerOpen(false);
+    setLedgerBreakdown("event_type");
+    setLedger(null);
+    setLedgerError(null);
+    setLedgerLoading(false);
+  }, [runId]);
+
+  useEffect(() => {
+    if (!runId || !ledgerOpen) return undefined;
+    void loadLedger(runId, ledgerBreakdown);
+    return undefined;
+  }, [ledgerBreakdown, ledgerOpen, loadLedger, runId]);
 
   const runStatus = detail?.run.status;
   const shouldSubscribe = Boolean(runId && runStatus && !terminalStatuses.has(runStatus));
@@ -240,6 +293,16 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
   const auditMode = asRecord(detail?.run.metadata)?.audit_mode === true;
   const artifacts = detail?.artifacts ?? [];
   const logs = detail?.logs ?? [];
+  const ledgerBreakdownRows = useMemo(
+    () => Object.entries(ledger?.breakdown ?? {})
+      .map(([key, value]) => ({
+        key: formatLedgerKey(key),
+        usd: value.usd,
+        count: value.count,
+      }))
+      .sort((a, b) => b.usd - a.usd),
+    [ledger?.breakdown],
+  );
 
   if (!runId) return null;
 
@@ -373,30 +436,126 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
                 </div>
               </section>
 
-              <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-4">
-                  <div className="flex items-center gap-2 text-cyan-100/70">
-                    <Workflow size={14} />
-                    <h3 className="text-[9px] font-mono uppercase tracking-[0.24em]">Orchestration</h3>
+              <section className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-4">
+                    <div className="flex items-center gap-2 text-cyan-100/70">
+                      <Workflow size={14} />
+                      <h3 className="text-[9px] font-mono uppercase tracking-[0.24em]">Orchestration</h3>
+                    </div>
+                    <p className="mt-4 text-3xl font-semibold tracking-tight text-white">
+                      {detail.orchestrationDecisionCount}
+                    </p>
+                    <p className="mt-1 text-[8px] font-mono uppercase tracking-widest text-white/35">
+                      decisions · {formatMoney(detail.totalOrchestrationCost)} total cost
+                    </p>
                   </div>
-                  <p className="mt-4 text-3xl font-semibold tracking-tight text-white">
-                    {detail.orchestrationDecisionCount}
-                  </p>
-                  <p className="mt-1 text-[8px] font-mono uppercase tracking-widest text-white/35">
-                    decisions · {formatMoney(detail.totalOrchestrationCost)} total cost
-                  </p>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-4">
+                    <div className="flex items-center gap-2 text-cyan-100/70">
+                      <Archive size={14} />
+                      <h3 className="text-[9px] font-mono uppercase tracking-[0.24em]">Artifacts</h3>
+                    </div>
+                    <p className="mt-4 text-3xl font-semibold tracking-tight text-white">
+                      {artifacts.length}
+                    </p>
+                    <p className="mt-1 text-[8px] font-mono uppercase tracking-widest text-white/35">
+                      produced in this run
+                    </p>
+                  </div>
                 </div>
-                <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-4">
-                  <div className="flex items-center gap-2 text-cyan-100/70">
-                    <Archive size={14} />
-                    <h3 className="text-[9px] font-mono uppercase tracking-[0.24em]">Artifacts</h3>
-                  </div>
-                  <p className="mt-4 text-3xl font-semibold tracking-tight text-white">
-                    {artifacts.length}
-                  </p>
-                  <p className="mt-1 text-[8px] font-mono uppercase tracking-widest text-white/35">
-                    produced in this run
-                  </p>
+
+                <div className="rounded-2xl border border-[#15217C]/55 bg-[#15217C]/20 p-3 shadow-[0_0_24px_rgba(21,33,124,0.16)]">
+                  <button
+                    type="button"
+                    aria-expanded={ledgerOpen}
+                    onClick={() => setLedgerOpen((value) => !value)}
+                    className="flex w-full items-center justify-between gap-3 rounded-xl px-1 py-1 text-left focus:outline-none focus:ring-2 focus:ring-[#ED4C14]/45"
+                  >
+                    <span>
+                      <span className="block text-[9px] font-mono uppercase tracking-[0.24em] text-[#EFECEB]/80">
+                        Per-event ledger
+                      </span>
+                      <span className="mt-1 block text-[7px] font-mono uppercase tracking-widest text-[#EFECEB]/35">
+                        {ledger?.entryCount ?? "—"} append-only entries
+                      </span>
+                    </span>
+                    <ChevronRight
+                      size={15}
+                      className={`shrink-0 text-[#ED4C14]/80 transition-transform ${ledgerOpen ? "rotate-90" : ""}`}
+                    />
+                  </button>
+
+                  {ledgerOpen && (
+                    <div className="mt-3 border-t border-white/10 pt-3">
+                      <div className="mb-3 inline-flex rounded-full border border-white/10 bg-black/25 p-1">
+                        {([
+                          ["event_type", "By event type"],
+                          ["source", "By source"],
+                        ] as const).map(([mode, label]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setLedgerBreakdown(mode)}
+                            className={`rounded-full px-3 py-1 text-[7px] font-mono uppercase tracking-widest transition-all ${
+                              ledgerBreakdown === mode
+                                ? "border border-[#ED4C14]/45 bg-[#ED4C14]/15 text-[#EFECEB]"
+                                : "text-[#EFECEB]/40 hover:text-[#EFECEB]/75"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {ledgerLoading ? (
+                        <div className="space-y-2 rounded-xl border border-white/10 bg-black/25 p-3">
+                          {[0, 1, 2].map((item) => (
+                            <div key={item} className="grid grid-cols-[1fr_56px_72px] gap-3">
+                              <div className="h-3 animate-pulse rounded bg-white/10" />
+                              <div className="h-3 animate-pulse rounded bg-white/10" />
+                              <div className="h-3 animate-pulse rounded bg-white/10" />
+                            </div>
+                          ))}
+                        </div>
+                      ) : ledgerError ? (
+                        <div className="rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-4 text-[8px] font-mono uppercase tracking-widest text-amber-100/75">
+                          Ledger unavailable
+                        </div>
+                      ) : ledger && ledgerBreakdownRows.length === 0 ? (
+                        <div className="rounded-xl border border-white/10 bg-black/25 px-3 py-5 text-center text-[8px] font-mono uppercase tracking-widest text-[#EFECEB]/35">
+                          No ledger entries yet — older runs use derived cost estimates
+                        </div>
+                      ) : ledger ? (
+                        <>
+                          <div className="overflow-hidden rounded-xl border border-white/10 bg-black/25">
+                            <table className="w-full border-collapse text-left font-mono">
+                              <thead className="border-b border-white/10 text-[7px] uppercase tracking-widest text-[#EFECEB]/35">
+                                <tr>
+                                  <th className="px-3 py-2 font-medium">
+                                    {ledgerBreakdown === "event_type" ? "event_type" : "source"}
+                                  </th>
+                                  <th className="px-3 py-2 text-right font-medium">count</th>
+                                  <th className="px-3 py-2 text-right font-medium">usd</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-white/5 text-[8px]">
+                                {ledgerBreakdownRows.map((row) => (
+                                  <tr key={row.key} className="text-[#EFECEB]/75">
+                                    <td className="max-w-[260px] truncate px-3 py-2">{row.key}</td>
+                                    <td className="px-3 py-2 text-right text-[#EFECEB]/55">{row.count}</td>
+                                    <td className="px-3 py-2 text-right text-[#ED4C14]">{formatMoney(row.usd)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <p className="mt-2 text-[7px] font-mono uppercase tracking-widest text-[#EFECEB]/35">
+                            Showing {ledger.entries.length} of {ledger.entryCount} entries · rate card {ledger.rateCardVersion}
+                          </p>
+                        </>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
               </section>
 

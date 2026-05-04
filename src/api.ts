@@ -92,6 +92,42 @@ export interface RunDetail {
   relatedStillsRun?: RecentCampaignRun | null;
 }
 
+export type RunCostLedgerBreakdownMode = "event_type" | "source" | "none";
+
+export interface RunCostLedgerBreakdownItem {
+  usd: number;
+  count: number;
+}
+
+export interface RunCostLedgerEntry {
+  id: string;
+  client_id: string;
+  run_id: string | null;
+  deliverable_id: string | null;
+  artifact_id: string | null;
+  escalation_id: string | null;
+  event_type: string;
+  source: string;
+  cost_usd: number;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_cached: number | null;
+  units: number | null;
+  units_kind: string | null;
+  metadata: Record<string, unknown>;
+  rate_card_version: string;
+  created_at: string;
+}
+
+export interface RunCostLedgerResponse {
+  runId: string;
+  totalUsd: number;
+  entryCount: number;
+  rateCardVersion: string;
+  breakdown: Record<string, RunCostLedgerBreakdownItem>;
+  entries: RunCostLedgerEntry[];
+}
+
 export type ArtifactIterationVerdictLabel = "PASS" | "WARN" | "FAIL" | "SHIP";
 
 export interface ArtifactIterationVerdict {
@@ -1525,6 +1561,21 @@ export async function getRunDetail(runId: string): Promise<RunDetail> {
   const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/detail`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as RunDetail;
+}
+
+export async function getRunCostLedger(
+  runId: string,
+  opts?: { breakdown?: RunCostLedgerBreakdownMode; limit?: number },
+): Promise<RunCostLedgerResponse> {
+  const params = new URLSearchParams();
+  if (opts?.breakdown) params.set("breakdown", opts.breakdown);
+  if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
+    params.set("limit", String(Math.floor(opts.limit)));
+  }
+  const query = params.toString();
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/cost-ledger${query ? `?${query}` : ""}`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RunCostLedgerResponse;
 }
 
 export function subscribeToRunsByClient(

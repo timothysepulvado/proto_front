@@ -65,6 +65,26 @@ interface DbArtifact {
   created_at: string;
 }
 
+interface DbCostLedgerEntry {
+  id: string;
+  client_id: string;
+  run_id: string | null;
+  deliverable_id: string | null;
+  artifact_id: string | null;
+  escalation_id: string | null;
+  event_type: string;
+  source: string;
+  cost_usd: number | string;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_cached: number | null;
+  units: number | string | null;
+  units_kind: string | null;
+  metadata: Record<string, unknown> | null;
+  rate_card_version: string | null;
+  created_at: string;
+}
+
 interface DbClient {
   id: string;
   name: string;
@@ -3279,6 +3299,48 @@ export interface RunLedgerCostSummary {
   entryCount: number;
 }
 
+export interface CostLedgerEntryRow {
+  id: string;
+  client_id: string;
+  run_id: string | null;
+  deliverable_id: string | null;
+  artifact_id: string | null;
+  escalation_id: string | null;
+  event_type: string;
+  source: string;
+  cost_usd: number;
+  tokens_input: number | null;
+  tokens_output: number | null;
+  tokens_cached: number | null;
+  units: number | null;
+  units_kind: string | null;
+  metadata: Record<string, unknown>;
+  rate_card_version: string;
+  created_at: string;
+}
+
+function mapDbCostLedgerEntry(row: DbCostLedgerEntry): CostLedgerEntryRow {
+  return {
+    id: row.id,
+    client_id: row.client_id,
+    run_id: row.run_id,
+    deliverable_id: row.deliverable_id,
+    artifact_id: row.artifact_id,
+    escalation_id: row.escalation_id,
+    event_type: row.event_type,
+    source: row.source,
+    cost_usd: readNumber(row.cost_usd) ?? 0,
+    tokens_input: row.tokens_input,
+    tokens_output: row.tokens_output,
+    tokens_cached: row.tokens_cached,
+    units: readNumber(row.units) ?? null,
+    units_kind: row.units_kind,
+    metadata: row.metadata ?? {},
+    rate_card_version: row.rate_card_version ?? "v1",
+    created_at: row.created_at,
+  };
+}
+
 export async function getRunCostFromLedger(runId: string): Promise<RunLedgerCostSummary> {
   const { data, error } = await supabase
     .from("cost_ledger_entries")
@@ -3310,6 +3372,20 @@ export async function getRunCostFromLedger(runId: string): Promise<RunLedgerCost
     bySource,
     entryCount: (data ?? []).length,
   };
+}
+
+export async function listCostLedgerEntriesByRun(runId: string): Promise<CostLedgerEntryRow[]> {
+  const { data, error } = await supabase
+    .from("cost_ledger_entries")
+    .select("*")
+    .eq("run_id", runId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`listCostLedgerEntriesByRun: cost_ledger_entries read failed: ${error.message}`);
+  }
+
+  return ((data ?? []) as DbCostLedgerEntry[]).map(mapDbCostLedgerEntry);
 }
 
 export async function getOrchestrationDecisions(escalationId: string): Promise<OrchestrationDecisionRecord[]> {
