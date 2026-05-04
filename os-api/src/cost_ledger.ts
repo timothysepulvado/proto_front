@@ -29,9 +29,24 @@ export interface CostLedgerInput {
 
 const RATE_CARD_VERSION = "v1";
 
+/**
+ * Validates a cost-emit value as a finite, non-negative number.
+ * Strict input shape (CR R5): only accepts actual numbers or non-empty
+ * numeric strings. Rejects booleans, null/undefined, empty strings, NaN,
+ * and Infinity — `Number()` coerces those to 0/1 silently, which would
+ * under-report or misclassify ledger costs.
+ */
 export function finiteNonNegative(value: unknown): number | null {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  return null;
 }
 
 /**
