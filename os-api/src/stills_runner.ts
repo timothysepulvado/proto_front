@@ -63,7 +63,7 @@ import {
 } from "./db.js";
 import { handleQAFailure } from "./escalation_loop.js";
 import { getTempGenDir } from "./temp-gen-env.js";
-import { recordCost } from "./cost_ledger.js";
+import { finiteNonNegative, recordCost } from "./cost_ledger.js";
 import type {
   Run,
   ImageGradeResult,
@@ -103,11 +103,6 @@ export const STILLS_AUDIT_CONCURRENCY = Number.parseInt(
  */
 export const STILLS_MODE_ENABLED =
   (process.env.STILLS_MODE_ENABLED ?? "false").toLowerCase() === "true";
-
-function finiteNonNegative(value: unknown): number | null {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
 
 async function recordImageCriticCost(args: {
   run: Run;

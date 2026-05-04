@@ -216,18 +216,19 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
   }, []);
 
   useEffect(() => {
+    ledgerRequestIdRef.current += 1;
+    setLedgerOpen(false);
+    setLedgerBreakdown("event_type");
+    setLedger(null);
+    setLedgerError(null);
+    setLedgerLoading(false);
+
     if (!runId) {
       loadRequestIdRef.current += 1;
-      ledgerRequestIdRef.current += 1;
       activeRunIdRef.current = null;
       setDetail(null);
       setError(null);
       setIsLoading(false);
-      setLedgerOpen(false);
-      setLedgerBreakdown("event_type");
-      setLedger(null);
-      setLedgerError(null);
-      setLedgerLoading(false);
       return undefined;
     }
 
@@ -235,15 +236,6 @@ export default function RunDetailDrawer({ runId, onClose, onRunSelect }: RunDeta
     window.setTimeout(() => closeButtonRef.current?.focus(), 0);
     return undefined;
   }, [loadDetail, runId]);
-
-  useEffect(() => {
-    ledgerRequestIdRef.current += 1;
-    setLedgerOpen(false);
-    setLedgerBreakdown("event_type");
-    setLedger(null);
-    setLedgerError(null);
-    setLedgerLoading(false);
-  }, [runId]);
 
   useEffect(() => {
     if (!runId || !ledgerOpen) return undefined;

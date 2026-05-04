@@ -29,6 +29,11 @@ export interface CostLedgerInput {
 
 const RATE_CARD_VERSION = "v1";
 
+export function finiteNonNegative(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
 export async function recordCost(input: CostLedgerInput): Promise<void> {
   if (!input.clientId) {
     console.error("[cost_ledger] MISSING client_id, dropping ledger entry", { source: input.source });

@@ -54,12 +54,12 @@ import {
   getShotSummaries,
   getRecentRunsByCampaign,
   getRunDetail,
-  getRunCostFromLedger,
   listCostLedgerEntriesByRun,
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
   getArtifactsForDeliverableWithVerdicts,
 } from "./db.js";
+import { finiteNonNegative } from "./cost_ledger.js";
 import { decideEscalation } from "./orchestrator.js";
 import { getPlatformVariants, PLATFORM_SPECS } from "./cloudinary.js";
 import { executeRun, cancelRun, runEvents } from "./runner.js";
@@ -406,17 +406,19 @@ app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
     const breakdownMode = requestedBreakdown as CostLedgerBreakdownMode;
     const limit = parseCostLedgerLimit(req.query.limit);
 
-    const [summary, allEntries] = await Promise.all([
-      getRunCostFromLedger(runId),
-      listCostLedgerEntriesByRun(runId),
-    ]);
+    const allEntries = await listCostLedgerEntriesByRun(runId);
 
     const breakdown: Record<string, { usd: number; count: number }> = {};
-    if (breakdownMode !== "none") {
-      for (const entry of allEntries) {
+    const rateCardCounts = new Map<string, number>();
+    let totalUsd = 0;
+    for (const entry of allEntries) {
+      const safeCost = finiteNonNegative(entry.cost_usd) ?? 0;
+      totalUsd += safeCost;
+      const version = entry.rate_card_version || "v1";
+      rateCardCounts.set(version, (rateCardCounts.get(version) ?? 0) + 1);
+      if (breakdownMode !== "none") {
         const key = breakdownMode === "event_type" ? entry.event_type : entry.source;
         const safeKey = key.trim().length > 0 ? key : "unknown";
-        const safeCost = Number.isFinite(entry.cost_usd) ? entry.cost_usd : 0;
         const current = breakdown[safeKey] ?? { usd: 0, count: 0 };
         current.usd += safeCost;
         current.count += 1;
@@ -424,15 +426,19 @@ app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
       }
     }
 
-    const rateCardVersions = new Set(allEntries.map((entry) => entry.rate_card_version || "v1"));
-    const rateCardVersion = rateCardVersions.size <= 1
-      ? (Array.from(rateCardVersions)[0] ?? "v1")
-      : "mixed";
+    let rateCardVersion = "v1";
+    let highestVersionCount = 0;
+    for (const [version, count] of rateCardCounts) {
+      if (count > highestVersionCount) {
+        rateCardVersion = version;
+        highestVersionCount = count;
+      }
+    }
 
     res.json({
       runId,
-      totalUsd: summary.totalUsd,
-      entryCount: summary.entryCount,
+      totalUsd,
+      entryCount: allEntries.length,
       rateCardVersion,
       breakdown,
       entries: allEntries.slice(0, limit),

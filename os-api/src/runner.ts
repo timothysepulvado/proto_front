@@ -26,7 +26,7 @@ import {
   markEscalationResolved,
 } from "./escalation_loop.js";
 import { supabase } from "./supabase.js";
-import { recordCost } from "./cost_ledger.js";
+import { finiteNonNegative, recordCost } from "./cost_ledger.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Active processes map for cancellation (legacy non-regrade modes that spawn
@@ -73,11 +73,6 @@ const BRAND_LINTER_PATH = process.env.BRAND_LINTER_PATH || "/Users/timothysepulv
 
 // Brand asset base directory (where per-brand asset folders live)
 const BRAND_ASSETS_BASE = process.env.BRAND_ASSETS_BASE || path.join(BRAND_LINTER_PATH, "data");
-
-function finiteNonNegative(value: unknown): number | null {
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
 
 async function recordImageGenerationCost(args: {
   run: Run;
