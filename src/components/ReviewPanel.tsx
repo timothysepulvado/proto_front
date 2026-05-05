@@ -571,8 +571,11 @@ export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNum
                     </div>
                   </button>
 
-                  {/* Artifact Preview */}
-                  {isExpanded && artifact.path.startsWith("http") && (
+                  {/* Artifact Preview — render when either an http path is present
+                      (legacy artifacts) OR a Storage object exists (post-PR-#5 path).
+                      SignedArtifactPreview handles both: http → fetch via os-api hook,
+                      storagePath-only → ditto; missing-Storage shows "Image unavailable". */}
+                  {isExpanded && (artifact.path?.startsWith("http") || artifact.storagePath) && (
                     <div className="px-4 pt-3">
                       <SignedArtifactPreview artifact={artifact} />
                       {artifact.metadata && typeof (artifact.metadata as Record<string, unknown>).prompt === "string" && (

@@ -817,10 +817,13 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
     }
 
     // TTL: 1h default; tunable via SIGNED_URL_TTL_SECONDS env (1s..24h cap).
+    // Floor BEFORE clamping so fractional inputs (e.g. 0.5) round down then snap
+    // to min=1 instead of producing an invalid 0 TTL after Math.floor.
     const ttlEnvRaw = Number(process.env.SIGNED_URL_TTL_SECONDS ?? "");
-    const ttlSeconds = Number.isFinite(ttlEnvRaw) && ttlEnvRaw > 0
-      ? Math.min(Math.floor(ttlEnvRaw), 86400)
+    const ttlFloored = Number.isFinite(ttlEnvRaw) && ttlEnvRaw > 0
+      ? Math.floor(ttlEnvRaw)
       : 3600;
+    const ttlSeconds = Math.max(1, Math.min(ttlFloored, 86400));
 
     const signedUrl = await createArtifactSignedUrl(artifact.storagePath, ttlSeconds);
     if (!signedUrl) {

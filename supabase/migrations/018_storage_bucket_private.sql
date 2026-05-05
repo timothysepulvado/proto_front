@@ -27,9 +27,24 @@
 -- not HUD functionality.
 BEGIN;
 
-UPDATE storage.buckets
-   SET public = false
- WHERE id = 'artifacts';
+-- Wrap in a DO block so a missing bucket becomes a hard failure rather than a
+-- silent 0-row UPDATE. CR R1-7: defensive guard for fresh-DB applies — the live
+-- bucket is already private (idempotent re-apply harmless), but a fresh DB
+-- without the artifacts bucket configured would otherwise pass without flipping
+-- anything and leave the leak surface open.
+DO $$
+DECLARE
+  rows_affected INT;
+BEGIN
+  UPDATE storage.buckets
+     SET public = false
+   WHERE id = 'artifacts';
+  GET DIAGNOSTICS rows_affected = ROW_COUNT;
+  IF rows_affected = 0 THEN
+    RAISE EXCEPTION
+      'Migration 018: artifacts bucket not found in storage.buckets — refusing to apply silently. Create the bucket first (see migration 004) or fix the bucket id.';
+  END IF;
+END $$;
 
 -- Verification (commented; run via separate db query --linked after migration applies):
 -- SELECT id, public FROM storage.buckets WHERE id = 'artifacts';

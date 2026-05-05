@@ -66,7 +66,7 @@ proto_front/
 │   ├── api/server.py       ← FastAPI sidecar on :8100 (X-Trace-Id passthrough on /grade_image_v2)
 │   └── cli/main.py         ← CLI interface
 │
-├── supabase/migrations/    ← 13 migrations (001-013). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection; 013 clients.ui_config JSONB (multi-tenant presentation overrides — display_name/entity_label/featured + future UI flags, matches storage_config pattern)
+├── supabase/migrations/    ← 18 migrations (001-018). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection; 013 clients.ui_config JSONB (multi-tenant presentation overrides — display_name/entity_label/featured + future UI flags, matches storage_config pattern); 014 client_id denormalization on per-client tables; 015 multi-tenant RLS + jwt_client_id() helper; 016 storage.objects client-scoped RLS; 017 cost_ledger_entries; 018 storage.buckets.public=false flip for artifacts
 ├── output/playwright/      ← Visual QA captures — 28 post-direction-fix-pass-gap{1..8}-{1440,768,375}.png + variants (compare/enabled/blocked/collapsed)
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements, runbooks/stills-mode.md
