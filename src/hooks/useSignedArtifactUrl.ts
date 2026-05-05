@@ -24,12 +24,20 @@ function readFreshCacheEntry(artifactId: string, now = Date.now()): CachedSigned
 }
 
 export function useSignedArtifactUrl(artifactId: string | undefined): UseSignedArtifactUrlResult {
+  const [originId, setOriginId] = useState<string | undefined>(artifactId);
   const [url, setUrl] = useState<string | null>(() => {
     if (!artifactId) return null;
     return readFreshCacheEntry(artifactId)?.url ?? null;
   });
   const [loading, setLoading] = useState<boolean>(() => !url && !!artifactId);
   const [error, setError] = useState<string | null>(null);
+
+  if (originId !== artifactId) {
+    setOriginId(artifactId);
+    setUrl(null);
+    setLoading(!!artifactId);
+    setError(null);
+  }
 
   useEffect(() => {
     if (!artifactId) {
