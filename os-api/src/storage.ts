@@ -122,3 +122,39 @@ export async function uploadArtifact(
     return null;
   }
 }
+
+/**
+ * Mint a time-limited signed URL for a Storage object in the artifacts bucket.
+ *
+ * The signed URL respects bucket-level + object-level RLS at fetch time. When
+ * the bucket is private (post PR #5 Migration 018), the signed URL is the only
+ * way to read the bytes; when the bucket is public, signed URLs continue to
+ * work alongside the public URL pattern.
+ *
+ * @param storagePath in-bucket path (e.g. "client_drift-mv/<run>/<artifact>.png")
+ * @param ttlSeconds expiry in seconds; caller is responsible for validating range
+ * @returns the signed URL on success, or null on any failure (logged).
+ */
+export async function createArtifactSignedUrl(
+  storagePath: string,
+  ttlSeconds: number,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase.storage
+      .from(BUCKET)
+      .createSignedUrl(storagePath, ttlSeconds);
+
+    if (error) {
+      console.error(`[storage] createSignedUrl failed for ${storagePath}:`, error.message);
+      return null;
+    }
+    if (!data?.signedUrl) {
+      console.error(`[storage] createSignedUrl returned no URL for ${storagePath}`);
+      return null;
+    }
+    return data.signedUrl;
+  } catch (err) {
+    console.error(`[storage] Unexpected error signing ${storagePath}:`, err);
+    return null;
+  }
+}

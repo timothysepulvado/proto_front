@@ -67,7 +67,8 @@ import { createProductionsRouter } from "./productions.js";
 import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
-import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt } from "./auth.js";
+import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest } from "./auth.js";
+import { createArtifactSignedUrl } from "./storage.js";
 
 dotenv.config();
 
@@ -771,6 +772,70 @@ app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) =
     createReadStream(resolved).pipe(res);
   } catch (err) {
     console.error("GET /api/artifacts/:artifactId/file error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/artifacts/:artifactId/signed-url - Mint a 1h signed URL for the artifact's Storage object
+//
+// PR #5 / Phase A — closes the URL-as-secret read-side gap from PR #4.
+// The artifacts bucket flips private in PR #5 / Phase D (Migration 018);
+// this endpoint becomes the only path for HUD readers to fetch object bytes.
+//
+// Tenant gate behaviour:
+//   • JWT_AUTH_ENABLED=true  → the caller's JWT client_id MUST match the
+//     artifact's client_id, else 403. This is the production posture.
+//   • JWT_AUTH_ENABLED=false → no enforcement (caller is treated as anonymous).
+//     This matches the cost-ledger endpoint's known-limitation pattern;
+//     PR #6 unifies caller-auth-gate work across operator endpoints.
+//
+// Response shape is brief-spec-exact so the HUD `useSignedArtifactUrl` hook
+// can rely on `signedUrl` + `expiresAt` for cache invalidation.
+app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Response) => {
+  try {
+    const artifactId = getParam(req, "artifactId");
+
+    const artifact = await getArtifactById(artifactId);
+    if (!artifact) {
+      res.status(404).json({ error: "Artifact not found" });
+      return;
+    }
+    if (!artifact.storagePath) {
+      // Local-filesystem-path artifacts (e.g. legacy NULL-storage_path entries
+      // from PR #4 Phase A audit). HUD callers should gate on storagePath
+      // truthy before requesting; treating as 404 keeps the contract simple.
+      res.status(404).json({ error: "Artifact has no Storage object" });
+      return;
+    }
+
+    // Tenant gate (no-op when JWT_AUTH_ENABLED=false). When the flag flips on,
+    // any cross-tenant request returns 403 here before we ever mint a URL.
+    const caller = verifyClientJwtFromRequest(req);
+    if (caller && artifact.clientId && caller.clientId !== artifact.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    // TTL: 1h default; tunable via SIGNED_URL_TTL_SECONDS env (1s..24h cap).
+    const ttlEnvRaw = Number(process.env.SIGNED_URL_TTL_SECONDS ?? "");
+    const ttlSeconds = Number.isFinite(ttlEnvRaw) && ttlEnvRaw > 0
+      ? Math.min(Math.floor(ttlEnvRaw), 86400)
+      : 3600;
+
+    const signedUrl = await createArtifactSignedUrl(artifact.storagePath, ttlSeconds);
+    if (!signedUrl) {
+      res.status(500).json({ error: "Failed to mint signed URL" });
+      return;
+    }
+
+    res.json({
+      artifactId: artifact.id,
+      signedUrl,
+      expiresInSeconds: ttlSeconds,
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+    });
+  } catch (err) {
+    console.error("GET /api/artifacts/:artifactId/signed-url error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
