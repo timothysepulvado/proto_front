@@ -28,6 +28,7 @@ import {
 } from "../api";
 import noiseTexture from "../assets/noise.svg";
 import FinalHITLPanel from "./FinalHITLPanel";
+import { useSignedArtifactUrl } from "../hooks/useSignedArtifactUrl";
 
 // -- Overlay (matches HUD)
 const OverlayEffects = ({ className = "" }: { className?: string }) => (
@@ -123,6 +124,51 @@ interface ReviewPanelProps {
   initialFinalHitlShotNumber?: number | null;
   onClose: () => void;
   onComplete: () => void;
+}
+
+function SignedArtifactPreview({ artifact }: { artifact: Artifact }) {
+  const canResolveFromStorage = Boolean(artifact.storagePath);
+  const { url, loading, error } = useSignedArtifactUrl(canResolveFromStorage ? artifact.id : undefined);
+
+  if (artifact.type !== "image" && artifact.type !== "video") return null;
+
+  if (!canResolveFromStorage) {
+    return (
+      <div className="flex h-36 w-full items-center justify-center rounded-lg border border-rose-500/20 bg-rose-500/10 text-[9px] font-mono uppercase tracking-widest text-rose-100/70">
+        Image unavailable
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="h-40 w-full animate-pulse rounded-lg border border-white/10 bg-white/10" />
+    );
+  }
+
+  if (!url) {
+    return (
+      <div className="flex h-36 w-full items-center justify-center rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 text-center text-[9px] font-mono uppercase tracking-widest text-rose-100/70">
+        {error ?? "Image unavailable"}
+      </div>
+    );
+  }
+
+  return artifact.type === "image" ? (
+    <img
+      src={url}
+      alt={artifact.name}
+      className="w-full max-h-64 object-contain rounded-lg border border-white/10 bg-black/30"
+      loading="lazy"
+    />
+  ) : (
+    <video
+      src={url}
+      controls
+      className="w-full max-h-64 rounded-lg border border-white/10 bg-black/30"
+      preload="metadata"
+    />
+  );
 }
 
 export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNumber = null, onClose, onComplete }: ReviewPanelProps) {
@@ -528,21 +574,7 @@ export default function ReviewPanel({ runId, clientName, initialFinalHitlShotNum
                   {/* Artifact Preview */}
                   {isExpanded && artifact.path.startsWith("http") && (
                     <div className="px-4 pt-3">
-                      {artifact.type === "image" ? (
-                        <img
-                          src={artifact.path}
-                          alt={artifact.name}
-                          className="w-full max-h-64 object-contain rounded-lg border border-white/10 bg-black/30"
-                          loading="lazy"
-                        />
-                      ) : artifact.type === "video" ? (
-                        <video
-                          src={artifact.path}
-                          controls
-                          className="w-full max-h-64 rounded-lg border border-white/10 bg-black/30"
-                          preload="metadata"
-                        />
-                      ) : null}
+                      <SignedArtifactPreview artifact={artifact} />
                       {artifact.metadata && typeof (artifact.metadata as Record<string, unknown>).prompt === "string" && (
                         <p className="mt-2 text-[9px] font-mono text-white/30 leading-relaxed line-clamp-2">
                           Prompt: {(artifact.metadata as Record<string, string>).prompt}
