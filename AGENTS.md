@@ -180,11 +180,12 @@ Why not the MCP OAuth flow:
 
 The proto_front `.mcp.json` still exists for cases where a Brandy session needs the MCP toolset (advisors, branching, type generation), but for migrations + queries the CLI + PAT path is canonical.
 
-**Tables (15 — verified via Phase A schema enumeration 2026-05-03):**
+**Tables (16 — verified via PR #4 Migration 017 add):**
 `clients`, `runs`, `run_logs`, `artifacts`, `hitl_decisions`, `rejection_categories`,
 `campaigns`, `campaign_deliverables`, `campaign_memory`, `drift_metrics`, `drift_alerts`,
-`brand_baselines`, `known_limitations`, `asset_escalations`, `orchestration_decisions`
-(last 3 added in migration 007 for autonomous escalation).
+`brand_baselines`, `known_limitations`, `asset_escalations`, `orchestration_decisions`,
+`cost_ledger_entries` (PR #4 Migration 017 — append-only per-event cost audit;
+last 3 of the prior 15 added in migration 007 for autonomous escalation).
 
 **Note:** `prompt_templates`, `prompt_scores`, `prompt_evolution_log` are referenced in some
 historical docs but **do not exist** in the live DB — Phase 7 schema enum confirmed.
@@ -193,10 +194,16 @@ historical docs but **do not exist** in the live DB — Phase 7 schema enum conf
 `hitl_decisions`, `drift_metrics`, `drift_alerts`, `brand_baselines`, `asset_escalations`
 (asset_escalations added 2026-04-30 for Gap 1 Review Gate escalation surface)
 
-**Storage:** `artifacts` bucket for generated images/videos. Public URLs in artifacts table.
+**Storage:** `artifacts` bucket for generated images/videos. Bucket currently `public = true`
+(PR #5 will flip to private + migrate HUD readers to signed URLs). Write-side governed by
+client-scoped RLS policies on `storage.objects` since PR #4 Migration 016 — INSERT/UPDATE/DELETE
+require `(storage.foldername(name))[1] = jwt_client_id() OR auth.role() = 'service_role'`.
+SELECT policy created (dormant while bucket public; activates when PR #5 flips bucket private).
 Optional Cloudinary CDN dual-write for platform-specific variants (10 presets).
 
-**Migrations:** `supabase/migrations/001-015` — all applied via `supabase db query --linked < migrations/NNN_*.sql` with project-scoped PAT (007 via Management API 2026-04-17; 013 2026-05-02; 014+015 2026-05-03 for Phase 7 multi-tenant RLS — see PR #3).
+**Migrations:** `supabase/migrations/001-017` — all applied via `supabase db query --linked < migrations/NNN_*.sql` with project-scoped PAT (007 via Management API 2026-04-17; 013 2026-05-02; 014+015 2026-05-03 for Phase 7 multi-tenant RLS — see PR #3; 016+017 2026-05-04 for PR #4 Storage write-side RLS + cost ledger).
+
+**PR #4 Storage RLS + Cost Ledger (migrations 016 + 017, 2026-05-04):** Multi-tenant write-side hardening. Migration 016 drops 4 wide-open `storage.objects` policies from migration 004 (`Public read on artifacts bucket`, etc.) + creates 4 client-scoped (`artifacts_client_{read,insert,update,delete}` using `(storage.foldername(name))[1] = jwt_client_id() OR auth.role() = 'service_role'`). Bucket stays `public = true` in this PR — PR #5 flips private + migrates HUD readers (`ReviewPanel.tsx`, `ShotDetailDrawer.tsx::artifactImageUrl`, etc.) to signed URLs in lockstep. Migration 017 creates `cost_ledger_entries` (12-col: PK + tenant FKs + event_type + source + cost_usd + token/unit accounting + metadata + rate_card_version) with append-only RLS (`cost_ledger_client_read` SELECT + `cost_ledger_service_write` INSERT only — no UPDATE/DELETE policies). Code instrumentation via `os-api/src/cost_ledger.ts::recordCost` (soft-fail; never throws on insert failure) at 10 cost-emit sites: orchestrator decisions (canonical chokepoint in `db.ts::recordOrchestrationDecision`); Veo standard/lite + image gen via runner; brand-engine `/grade_video`, `/grade_video_with_consensus`, `/grade_image_v2` (Python responses now include `cost_usd` alias); ffmpeg tiebreak marker; stills in-loop. `getRunCostFromLedger` additive helper alongside legacy `getRunCostEstimate` (both coexist for backwards compat). HUD surface: new `GET /api/runs/:runId/cost-ledger?breakdown=event_type|source` + `RunDetailDrawer` per-event ledger panel. Verification harness `os-api/tests/_pr4-storage-and-ledger.ts` (5 assertions, merge gate). Briefs in `~/agent-vault/briefs/2026-05-03-pr4-storage-rls-cost-ledger.md` + `~/agent-vault/briefs/2026-05-04-pr4-post-merge-followups.md`.
 
 **Phase 7 RLS (migrations 014 + 015, 2026-05-03):** Multi-tenant data isolation. Migration 014 denormalizes `client_id TEXT NOT NULL` onto every per-client table (artifacts NOT NULL flip + run_logs/hitl_decisions/asset_escalations/orchestration_decisions/campaign_deliverables/campaign_memory + FK + index). Migration 015 drops 31 pre-existing `USING(true)` open policies + creates 13 client-scoped (`client_id = jwt_client_id()`) + 2 global (auth/service-role) policies + `jwt_client_id() RETURNS TEXT` helper. Service-role bypass via `OR auth.role() = 'service_role'` on every policy — os-api uses `SUPABASE_SECRET_KEY` (sb_secret_*). HUD uses HS256 JWT minted via `POST /api/auth/client-token`; `JWT_AUTH_ENABLED` feature flag (default OFF) — code lands but auth path flips per-environment. **Required env vars** (see `os-api/.env.example`): `SUPABASE_SECRET_KEY` (server-side admin, RLS bypass) + `SUPABASE_JWT_SECRET` (legacy HS256 — Dashboard "JWT Secret (legacy)", reveal-once 1h window) + `JWT_AUTH_ENABLED=false` (default). HUD env: `VITE_JWT_AUTH_ENABLED=false` (default). **Verification harness** at `os-api/tests/_phase7-multi-tenant-isolation.ts` (the merge gate — must exit 0). Briefs in `~/agent-vault/briefs/2026-05-03-*phase7*.md`.
 
