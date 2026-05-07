@@ -26,17 +26,22 @@
 // 12. Cost-summary (PR #7 Phase F) — endpoint returns HTTP 403 when caller's
 //     JWT client_id does not match the URL :clientId (tenant 403 fires before
 //     the getClient lookup so existence cannot be inferred from 403-vs-404)
-// 13. Cost-summary (PR #7 Phase F) — own-tenant fetch returns HTTP 200 with
-//     non-zero totalUsd + non-empty breakdown rows (validates aggregation +
-//     month range + breakdown buckets against the seeded ledger entry)
+// 13. Cost-summary (PR #7 Phase F) — own-tenant fetch for the seeded row's
+//     UTC month returns HTTP 200 with non-zero totalUsd + non-empty breakdown
+//     rows (validates aggregation + month range + breakdown buckets). Month
+//     derived from seededA.ledgerCreatedAt to avoid UTC-rollover flake (CR R2-1).
+// 14. Cost-summary (PR #7 Phase F) — own-tenant fetch for the month BEFORE the
+//     seeded row's month returns HTTP 200 with totalUsd=0, entryCount=0, and
+//     breakdown=[] (CR R2-2 — proves the month filter actually filters; would
+//     return non-zero if the helper aggregated across months silently)
 //
-// PRE-REQUISITE for Assertions 6-13: os-api must be running with
+// PRE-REQUISITE for Assertions 6-14: os-api must be running with
 // JWT_AUTH_ENABLED=true and the cost-summary endpoint compiled in (PR #7
 // Phase F + the bug-class fix on the worktree, commits 294b395a + 9e31ce0).
 // Without the flag the endpoint tenant gates bootstrap-fall-back to
-// anonymous-allowed; without the endpoint compiled in assertions 11/12/13 will
-// 404 instead of 401/403/200. The harness surfaces a helpful env-hint message
-// on assertion 7 + 8 so the dev can fix and re-run.
+// anonymous-allowed; without the endpoint compiled in assertions 11/12/13/14
+// will 404 instead of 401/403/200/200. The harness surfaces a helpful env-hint
+// message on assertion 7 + 8 so the dev can fix and re-run.
 //
 // PRE-REQUISITE for the FETCH side of Assertion 6: bucket may be public OR
 // private (PR #5 Migration 018 flips private). The /object/sign/ URL pattern
@@ -99,6 +104,7 @@ interface SeededTenant {
   runId: string;
   storageObject: string;
   ledgerId: string;
+  ledgerCreatedAt: string;
   artifactId: string;
 }
 
@@ -139,7 +145,9 @@ async function seedClient(clientId: string): Promise<SeededTenant> {
   });
   if (upload.error) throw new Error(`[seed ${clientId}] storage upload: ${upload.error.message}`);
 
-  // 4. Cost ledger entry
+  // 4. Cost ledger entry — return created_at so cost-summary assertions can
+  //    derive the seed row's actual UTC month (CR R2-1: avoids harness flake
+  //    on UTC month rollover between seed and probe).
   const ledgerRes = await serviceClient
     .from("cost_ledger_entries")
     .insert({
@@ -149,10 +157,12 @@ async function seedClient(clientId: string): Promise<SeededTenant> {
       source: "opus-4.7",
       cost_usd: 0.0123,
     })
-    .select("id")
+    .select("id, created_at")
     .single();
   if (ledgerRes.error || !ledgerRes.data) throw new Error(`[seed ${clientId}] ledger: ${ledgerRes.error?.message}`);
-  const ledgerId = (ledgerRes.data as { id: string }).id;
+  const ledgerRow = ledgerRes.data as { id: string; created_at: string };
+  const ledgerId = ledgerRow.id;
+  const ledgerCreatedAt = ledgerRow.created_at;
 
   // 5. Artifact row tied to the Storage object — required for the
   //    /api/artifacts/:artifactId/signed-url endpoint to look up tenant
@@ -179,7 +189,7 @@ async function seedClient(clientId: string): Promise<SeededTenant> {
   }
   const artifactId = (artifactRes.data as { id: string }).id;
 
-  return { runId, storageObject, ledgerId, artifactId };
+  return { runId, storageObject, ledgerId, ledgerCreatedAt, artifactId };
 }
 
 async function cleanup(clientId: string, seeded: SeededTenant | undefined): Promise<void> {
@@ -267,9 +277,18 @@ async function requestCostSummary(
   return { status: resp.status, body };
 }
 
-function currentYearMonth(): string {
-  const d = new Date();
+function currentYearMonth(d: Date = new Date()): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+// CR R2-1: derive a non-overlapping month for the empty-month probe.
+// Goes back exactly one calendar month from the input date; year-wraps from
+// January → December correctly via Date.UTC normalization. Used in
+// Assertion 14 to validate the cost-summary `month` filter actually filters
+// (would falsely return 200 + non-zero if the helper aggregated across months).
+function previousYearMonth(d: Date): string {
+  const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1));
+  return currentYearMonth(prev);
 }
 
 async function main(): Promise<void> {
@@ -471,18 +490,28 @@ async function main(): Promise<void> {
     }
     console.log(`✓ Assertion 10 — cost-ledger endpoint cross-tenant returns HTTP 403`);
 
-    // ===== Assertions 11-13 — Cost-summary endpoint (PR #7 Phase F) =====
+    // ===== Assertions 11-14 — Cost-summary endpoint (PR #7 Phase F) =====
     // Per-client monthly cost aggregation endpoint; same auth contract as
-    // /api/runs/:runId/cost-ledger. Three-tier coverage mirrors Assertions
-    // 8/9/10 on the cost-ledger endpoint:
+    // /api/runs/:runId/cost-ledger. Four-tier coverage mirrors Assertions
+    // 8/9/10 on the cost-ledger endpoint + adds explicit month-filter coverage:
     //   • Assertion 11: missing JWT → 401 (CR R1-3 — guards auth-order regression)
     //   • Assertion 12: cross-tenant probe → 403 BEFORE any DB lookup
     //                   (closes existence-leak class — same as PR #6 R3-1)
     //   • Assertion 13: own-tenant → 200 with non-zero aggregates from seeded ledger
+    //   • Assertion 14: own-tenant on a different month → 200 with ZERO aggregates
+    //                   (CR R2-2 — proves the month filter actually filters and the
+    //                   helper isn't aggregating across months silently)
+    //
+    // CR R2-1: derive the seeded row's actual UTC YYYY-MM from
+    // `seededA.ledgerCreatedAt` instead of `new Date()`. Otherwise a UTC month
+    // rollover between seed insert and probe would query the wrong month.
+    const seedDate = new Date(seededA.ledgerCreatedAt);
+    const monthFromSeed = currentYearMonth(seedDate);
+    const monthBeforeSeed = previousYearMonth(seedDate);
 
     // ===== Assertion 11: Cost-summary endpoint returns 401 when JWT missing =====
     const noTokenSummary = await requestCostSummary(undefined, CLIENT_A_ID, {
-      month: currentYearMonth(),
+      month: monthFromSeed,
       breakdown: "event_type",
     });
     if (noTokenSummary.status !== 401) {
@@ -495,7 +524,7 @@ async function main(): Promise<void> {
 
     // ===== Assertion 12: Cost-summary endpoint returns 403 on cross-tenant =====
     const crossSummary = await requestCostSummary(tokenB, CLIENT_A_ID, {
-      month: currentYearMonth(),
+      month: monthFromSeed,
       breakdown: "event_type",
     });
     if (crossSummary.status !== 403) {
@@ -508,7 +537,7 @@ async function main(): Promise<void> {
 
     // ===== Assertion 13: Cost-summary own-tenant returns 200 + non-zero aggregates =====
     const ownSummary = await requestCostSummary(tokenA, CLIENT_A_ID, {
-      month: currentYearMonth(),
+      month: monthFromSeed,
       breakdown: "event_type",
     });
     if (ownSummary.status !== 200) {
@@ -539,10 +568,51 @@ async function main(): Promise<void> {
       );
     }
     console.log(
-      `✓ Assertion 13 — cost-summary own-tenant returns HTTP 200 + non-zero totalUsd ($${summaryBody.totalUsd.toFixed(4)}, entries=${summaryBody.entryCount}, buckets=${summaryBody.breakdown.length})`,
+      `✓ Assertion 13 — cost-summary own-tenant returns HTTP 200 + non-zero totalUsd ($${summaryBody.totalUsd.toFixed(4)}, entries=${summaryBody.entryCount}, buckets=${summaryBody.breakdown.length}) for ${monthFromSeed}`,
     );
 
-    console.log(`\n✓✓✓ ALL 13 ASSERTIONS PASS — PR #4 + PR #5 + PR #6 + PR #7 Storage + ledger + caller-auth-gate + cost-summary verified`);
+    // ===== Assertion 14: Cost-summary own-tenant on empty month returns 200 + ZERO aggregates =====
+    // CR R2-2: probe a month with no seeded entries (one calendar month before
+    // the seeded row). If the month filter is broken (e.g., aggregating across
+    // all months), this would return non-zero totals. Strict zero proves the
+    // [YYYY-MM-01, YYYY-(MM+1)-01) range filter in getCostSummaryForClient
+    // is correctly applied.
+    const emptySummary = await requestCostSummary(tokenA, CLIENT_A_ID, {
+      month: monthBeforeSeed,
+      breakdown: "event_type",
+    });
+    if (emptySummary.status !== 200) {
+      const detail = (emptySummary.body as { error?: string } | null)?.error ?? `status=${emptySummary.status}`;
+      throw new Error(`✗ Assertion 14 FAILED — own-tenant empty-month cost-summary: HTTP ${emptySummary.status}: ${detail}`);
+    }
+    const emptyBody = emptySummary.body as {
+      clientId?: string;
+      month?: string;
+      totalUsd?: number;
+      entryCount?: number;
+      breakdown?: { key: string; totalUsd: number; entryCount: number }[];
+      rateCardVersion?: string;
+    } | null;
+    if (emptyBody?.totalUsd !== 0) {
+      throw new Error(
+        `✗ Assertion 14 FAILED — empty month should return totalUsd=0, got ${emptyBody?.totalUsd}: ${JSON.stringify(emptyBody)}`,
+      );
+    }
+    if (emptyBody?.entryCount !== 0) {
+      throw new Error(
+        `✗ Assertion 14 FAILED — empty month should return entryCount=0, got ${emptyBody?.entryCount}: ${JSON.stringify(emptyBody)}`,
+      );
+    }
+    if (!Array.isArray(emptyBody?.breakdown) || emptyBody.breakdown.length !== 0) {
+      throw new Error(
+        `✗ Assertion 14 FAILED — empty month should return breakdown=[], got: ${JSON.stringify(emptyBody?.breakdown)}`,
+      );
+    }
+    console.log(
+      `✓ Assertion 14 — cost-summary previous-month (${monthBeforeSeed}) returns HTTP 200 with ZERO aggregates (validates month filter)`,
+    );
+
+    console.log(`\n✓✓✓ ALL 14 ASSERTIONS PASS — PR #4 + PR #5 + PR #6 + PR #7 Storage + ledger + caller-auth-gate + cost-summary verified`);
   } catch (err) {
     primaryError = err;
   } finally {
