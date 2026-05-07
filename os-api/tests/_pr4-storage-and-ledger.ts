@@ -1,24 +1,31 @@
-// PR #4 + PR #5 verification harness — Storage RLS + cost ledger isolation.
-// Mirrors the structure of _phase7-multi-tenant-isolation.ts.
-// Drop into os-api/tests/ as `_pr4-storage-and-ledger.ts` after migrations
-// 016 + 017 (PR #4) and 018 (PR #5) are applied to the linked Supabase project.
+// PR #4 + PR #5 + PR #6 verification harness — Storage RLS + cost ledger
+// isolation + caller-auth-gate. Mirrors the structure of
+// _phase7-multi-tenant-isolation.ts. Drop into os-api/tests/ as
+// `_pr4-storage-and-ledger.ts` after migrations 016 + 017 (PR #4) and 018
+// (PR #5) are applied to the linked Supabase project.
 //
 // Asserts:
-// 1. Storage UPLOAD — client A JWT uploads to own prefix succeeds
-// 2. Storage UPLOAD CROSS-TENANT — client A JWT upload to client B prefix is BLOCKED
-// 3. Storage DELETE CROSS-TENANT — client A JWT delete of client B file is BLOCKED
-// 4. Cost ledger READ isolation — client A JWT sees own ledger entries; not client B's
-// 5. Cost ledger APPEND-ONLY — client A JWT cannot UPDATE or DELETE own ledger row
-// 6. Storage SELECT — client A's JWT mints a signed URL for own artifact via
-//    os-api endpoint; the URL fetches HTTP 200 with the seeded bytes
-// 7. Storage SELECT CROSS-TENANT — client A's JWT requesting a signed URL
-//    for client B's artifact via the os-api endpoint returns HTTP 403
+//  1. Storage UPLOAD — client A JWT uploads to own prefix succeeds
+//  2. Storage UPLOAD CROSS-TENANT — client A JWT upload to client B prefix is BLOCKED
+//  3. Storage DELETE CROSS-TENANT — client A JWT delete of client B file is BLOCKED
+//  4. Cost ledger READ isolation — client A JWT sees own ledger entries; not client B's
+//  5. Cost ledger APPEND-ONLY — client A JWT cannot UPDATE or DELETE own ledger row
+//  6. Storage SELECT — client A's JWT mints a signed URL for own artifact via
+//     os-api endpoint; the URL fetches HTTP 200 with the seeded bytes
+//  7. Storage SELECT CROSS-TENANT — client A's JWT requesting a signed URL
+//     for client B's artifact via the os-api endpoint returns HTTP 403
+//  8. Caller-auth-gate (PR #6) — signed-URL endpoint returns HTTP 401 when
+//     no Authorization header is present (closes PR #5 R1-2 deferral)
+//  9. Caller-auth-gate (PR #6) — cost-ledger endpoint returns HTTP 401 when
+//     no Authorization header is present (closes PR #4 deferral)
+// 10. Caller-auth-gate (PR #6) — cost-ledger endpoint returns HTTP 403 when
+//     caller's JWT client_id does not match the run's client_id
 //
-// PRE-REQUISITE for Assertions 6 + 7: os-api must be running with
-// JWT_AUTH_ENABLED=true. Without that flag the endpoint's tenant gate
-// bootstrap-falls-back to anonymous-allowed and Assertion 7 will fail with
-// a 200 response — the harness surfaces a helpful env-hint message in
-// that case so the dev can fix and re-run.
+// PRE-REQUISITE for Assertions 6-10: os-api must be running with
+// JWT_AUTH_ENABLED=true. Without that flag the endpoint tenant gates
+// bootstrap-fall-back to anonymous-allowed and assertions 7/8/9/10 will
+// fail with a 200 response — the harness surfaces a helpful env-hint
+// message on assertion 7 + 8 so the dev can fix and re-run.
 //
 // PRE-REQUISITE for the FETCH side of Assertion 6: bucket may be public OR
 // private (PR #5 Migration 018 flips private). The /object/sign/ URL pattern
@@ -196,12 +203,28 @@ async function cleanup(clientId: string, seeded: SeededTenant | undefined): Prom
 }
 
 async function requestSignedUrl(
-  token: string,
+  token: string | undefined,
   artifactId: string,
 ): Promise<{ status: number; body: unknown }> {
-  const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/signed-url`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/signed-url`, { headers });
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    /* non-JSON response — leave null */
+  }
+  return { status: resp.status, body };
+}
+
+async function requestCostLedger(
+  token: string | undefined,
+  runId: string,
+): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/cost-ledger`, { headers });
   let body: unknown = null;
   try {
     body = await resp.json();
@@ -372,7 +395,45 @@ async function main(): Promise<void> {
     }
     console.log(`✓ Assertion 7 — cross-tenant signed-URL request BLOCKED with HTTP 403`);
 
-    console.log(`\n✓✓✓ ALL 7 ASSERTIONS PASS — PR #4 + PR #5 Storage + ledger isolation verified`);
+    // ===== Assertions 8 + 9 + 10 — Caller-auth-gate on operator endpoints (PR #6) =====
+    // PR #6 Phase B harden the signed-url + cost-ledger endpoints so missing
+    // Authorization (when JWT_AUTH_ENABLED=true) returns 401 and cross-tenant
+    // requests return 403. Closes the deferrals from PR #4 + PR #5.
+
+    // ===== Assertion 8: Signed-URL endpoint returns 401 on missing JWT =====
+    const noAuthSigned = await requestSignedUrl(undefined, sA.artifactId);
+    if (noAuthSigned.status !== 401) {
+      const detail = (noAuthSigned.body as { error?: string } | null)?.error ?? `status=${noAuthSigned.status}`;
+      throw new Error(
+        `✗ Assertion 8 FAILED — signed-URL endpoint must return HTTP 401 when JWT missing (flag on); got HTTP ${noAuthSigned.status}: ${detail}.\n` +
+          `  Most likely cause: os-api is running with JWT_AUTH_ENABLED=false (default — bootstrap-fallback path).\n` +
+          `  Restart os-api with JWT_AUTH_ENABLED=true in its env, then re-run this harness.`,
+      );
+    }
+    console.log(`✓ Assertion 8 — signed-URL endpoint returns HTTP 401 when JWT missing`);
+
+    // ===== Assertion 9: Cost-ledger endpoint returns 401 on missing JWT =====
+    const noAuthLedger = await requestCostLedger(undefined, sA.runId);
+    if (noAuthLedger.status !== 401) {
+      const detail = (noAuthLedger.body as { error?: string } | null)?.error ?? `status=${noAuthLedger.status}`;
+      throw new Error(
+        `✗ Assertion 9 FAILED — cost-ledger endpoint must return HTTP 401 when JWT missing (flag on); got HTTP ${noAuthLedger.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 9 — cost-ledger endpoint returns HTTP 401 when JWT missing`);
+
+    // ===== Assertion 10: Cost-ledger endpoint returns 403 on cross-tenant =====
+    const tokenB = await mintClientJwt(CLIENT_B_ID);
+    const crossLedger = await requestCostLedger(tokenB, sA.runId);
+    if (crossLedger.status !== 403) {
+      const detail = (crossLedger.body as { error?: string } | null)?.error ?? `status=${crossLedger.status}`;
+      throw new Error(
+        `✗ Assertion 10 FAILED — cost-ledger endpoint must return HTTP 403 cross-tenant; got HTTP ${crossLedger.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 10 — cost-ledger endpoint cross-tenant returns HTTP 403`);
+
+    console.log(`\n✓✓✓ ALL 10 ASSERTIONS PASS — PR #4 + PR #5 + PR #6 Storage + ledger + caller-auth-gate verified`);
   } catch (err) {
     primaryError = err;
   } finally {

@@ -390,12 +390,43 @@ app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
 });
 
 // GET /api/runs/:runId/cost-ledger - Per-event ledger payload for RunDetailDrawer
+//
+// PR #6 / Phase B — closes the caller-auth-gate hole left open by PR #4.
+// The PR #4 deferral framing ("single-operator pre-launch threat model") is
+// now retired; the 401/403 gate matches the signed-URL endpoint contract.
+//
+// Tenant gate behaviour:
+//   • JWT_AUTH_ENABLED=true  + missing/invalid Authorization → 401
+//   • JWT_AUTH_ENABLED=true  + mismatched client_id          → 403
+//   • JWT_AUTH_ENABLED=false                                 → no enforcement
+//     (bootstrap-fallback for default environments)
 app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    // Auth gate FIRST — close the resource-existence leak channel by requiring
+    // auth before any DB lookup. The 404 path only fires for authenticated
+    // callers; unauthenticated callers see 401 regardless of whether the run
+    // exists. CR R2-1.
+    //
+    // The verifier itself also short-circuits to null when the flag is off
+    // (auth.ts:83); mirroring the gate at the call site makes the
+    // no-enforcement contract explicit + survives runtime env-flip. CR R1-1.
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
@@ -781,13 +812,14 @@ app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) =
 // PR #5 / Phase A — closes the URL-as-secret read-side gap from PR #4.
 // The artifacts bucket flips private in PR #5 / Phase D (Migration 018);
 // this endpoint becomes the only path for HUD readers to fetch object bytes.
+// PR #6 / Phase B — adds the 401 path that PR #5 R1-2 deferred.
 //
 // Tenant gate behaviour:
-//   • JWT_AUTH_ENABLED=true  → the caller's JWT client_id MUST match the
-//     artifact's client_id, else 403. This is the production posture.
-//   • JWT_AUTH_ENABLED=false → no enforcement (caller is treated as anonymous).
-//     This matches the cost-ledger endpoint's known-limitation pattern;
-//     PR #6 unifies caller-auth-gate work across operator endpoints.
+//   • JWT_AUTH_ENABLED=true  + missing/invalid Authorization → 401
+//   • JWT_AUTH_ENABLED=true  + mismatched client_id          → 403
+//   • JWT_AUTH_ENABLED=false                                 → no enforcement
+//     (bootstrap-fallback for default environments — caller is treated as
+//     anonymous; the route still mints the URL).
 //
 // Response shape is brief-spec-exact so the HUD `useSignedArtifactUrl` hook
 // can rely on `signedUrl` + `expiresAt` for cache invalidation.
@@ -795,24 +827,43 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
   try {
     const artifactId = getParam(req, "artifactId");
 
+    // Auth gate FIRST — close the resource-existence leak channel by requiring
+    // auth before any DB lookup. The 404 path only fires for authenticated
+    // callers; unauthenticated callers see 401 regardless of whether the
+    // artifact exists. CR R2-1.
+    //
+    // The verifier itself also short-circuits to null when the flag is off
+    // (auth.ts:83); mirroring the gate at the call site makes the
+    // no-enforcement contract explicit + survives runtime env-flip. CR R1-1.
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
       return;
     }
+
+    // Tenant gate BEFORE the storagePath null check. Otherwise a valid
+    // other-tenant JWT holder could distinguish a 404 "no Storage object"
+    // response from a 403 "cross-tenant" response — leaking the binary
+    // signal "does that other-tenant artifact have a Storage object."
+    // Collapsing both cross-tenant cases to 403 closes that channel. CR R3-1.
+    if (jwtAuthEnabled && caller && artifact.clientId && caller.clientId !== artifact.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
     if (!artifact.storagePath) {
       // Local-filesystem-path artifacts (e.g. legacy NULL-storage_path entries
       // from PR #4 Phase A audit). HUD callers should gate on storagePath
       // truthy before requesting; treating as 404 keeps the contract simple.
+      // Reached only for own-tenant callers (post-R3-1 reorder).
       res.status(404).json({ error: "Artifact has no Storage object" });
-      return;
-    }
-
-    // Tenant gate (no-op when JWT_AUTH_ENABLED=false). When the flag flips on,
-    // any cross-tenant request returns 403 here before we ever mint a URL.
-    const caller = verifyClientJwtFromRequest(req);
-    if (caller && artifact.clientId && caller.clientId !== artifact.clientId) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
