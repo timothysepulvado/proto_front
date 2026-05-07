@@ -403,23 +403,28 @@ app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
 app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    // Auth gate FIRST — close the resource-existence leak channel by requiring
+    // auth before any DB lookup. The 404 path only fires for authenticated
+    // callers; unauthenticated callers see 401 regardless of whether the run
+    // exists. CR R2-1.
+    //
+    // The verifier itself also short-circuits to null when the flag is off
+    // (auth.ts:83); mirroring the gate at the call site makes the
+    // no-enforcement contract explicit + survives runtime env-flip. CR R1-1.
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
     }
 
-    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
-    // Gate the verifier call AND both checks on jwtAuthEnabled at the call site.
-    // The verifier itself also short-circuits to null when the flag is off
-    // (auth.ts:83), but mirroring the gate here makes the no-enforcement
-    // contract explicit at the route layer + survives any future runtime
-    // env-flip without a process restart. CR R1-1.
-    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
-    if (jwtAuthEnabled && !caller) {
-      res.status(401).json({ error: "Authentication required" });
-      return;
-    }
     if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
       res.status(403).json({ error: "Cross-tenant access denied" });
       return;
@@ -822,6 +827,21 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
   try {
     const artifactId = getParam(req, "artifactId");
 
+    // Auth gate FIRST — close the resource-existence leak channel by requiring
+    // auth before any DB lookup. The 404 path only fires for authenticated
+    // callers; unauthenticated callers see 401 regardless of whether the
+    // artifact exists. CR R2-1.
+    //
+    // The verifier itself also short-circuits to null when the flag is off
+    // (auth.ts:83); mirroring the gate at the call site makes the
+    // no-enforcement contract explicit + survives runtime env-flip. CR R1-1.
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
@@ -835,18 +855,6 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
       return;
     }
 
-    // Tenant gate (no-op when JWT_AUTH_ENABLED=false). When the flag is on,
-    // missing-JWT → 401 and mismatched-client → 403 BEFORE we ever mint a URL.
-    // Both the verifier call AND the checks are gated on jwtAuthEnabled here
-    // (the verifier itself also short-circuits when the flag is off — this
-    // mirroring makes the no-enforcement contract explicit at the call site
-    // and survives any runtime env-flip without a process restart). CR R1-1.
-    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
-    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
-    if (jwtAuthEnabled && !caller) {
-      res.status(401).json({ error: "Authentication required" });
-      return;
-    }
     if (jwtAuthEnabled && caller && artifact.clientId && caller.clientId !== artifact.clientId) {
       res.status(403).json({ error: "Cross-tenant access denied" });
       return;
