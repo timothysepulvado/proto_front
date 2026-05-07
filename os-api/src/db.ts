@@ -3446,18 +3446,24 @@ export async function getCostSummaryForClient(
     buckets.set(safeKey, bucket);
   }
 
+  // CR R1-1: stable ordering — break ties by ascending key string so the
+  // wire shape is deterministic regardless of Map insertion order. Same
+  // class of fix as PR #6 R3-1 (deterministic before non-deterministic).
   const breakdown = [...buckets.entries()]
     .map(([key, value]) => ({ key, ...value }))
-    .sort((a, b) => b.totalUsd - a.totalUsd);
+    .sort((a, b) => {
+      if (b.totalUsd !== a.totalUsd) return b.totalUsd - a.totalUsd;
+      return a.key.localeCompare(b.key);
+    });
 
-  let rateCardVersion = "v1";
-  let highestVersionCount = 0;
-  for (const [version, count] of rateCardCounts) {
-    if (count > highestVersionCount) {
-      rateCardVersion = version;
-      highestVersionCount = count;
-    }
-  }
+  // CR R1-1: pick highest-count rate card version with deterministic tie-break
+  // on smallest version string ascending. Pre-sorting by (count desc, version asc)
+  // and taking element 0 makes the result independent of Map iteration order.
+  const sortedVersions = [...rateCardCounts.entries()].sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  const rateCardVersion = sortedVersions.length > 0 ? sortedVersions[0][0] : "v1";
 
   return {
     clientId,

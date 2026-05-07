@@ -501,22 +501,10 @@ app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
 app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
-    const monthRaw = getQueryString(req.query.month) ?? defaultCurrentMonth();
-    const breakdownRaw = getQueryString(req.query.breakdown) ?? "event_type";
 
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthRaw)) {
-      res.status(400).json({ error: "month must be YYYY-MM (zero-padded month 01-12)" });
-      return;
-    }
-    if (breakdownRaw !== "event_type" && breakdownRaw !== "source") {
-      res.status(400).json({ error: "breakdown must be 'event_type' or 'source'" });
-      return;
-    }
-
-    // Auth gate FIRST — this endpoint identifies a client resource directly,
-    // so require auth before any DB read when JWT auth is enabled. That keeps
-    // the PR #6 401/403 ordering intact and avoids resource-existence leaks.
-    //
+    // Auth gate FIRST — before query param parsing/validation (CR R1-2).
+    // Unauthenticated callers must get 401 regardless of query param shape so
+    // a malformed-query probe can't distinguish authed-vs-unauthed via 400.
     // Tenant 403 fires BEFORE the getClient lookup so a cross-tenant probe
     // cannot use 403-vs-404 to enumerate which client_ids exist (same class
     // as PR #6 R3-1 storagePath leak). The clientId URL param is compared
@@ -530,6 +518,19 @@ app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Respons
     }
     if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
       res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    // Query param parsing happens AFTER auth gate clears.
+    const monthRaw = getQueryString(req.query.month) ?? defaultCurrentMonth();
+    const breakdownRaw = getQueryString(req.query.breakdown) ?? "event_type";
+
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthRaw)) {
+      res.status(400).json({ error: "month must be YYYY-MM (zero-padded month 01-12)" });
+      return;
+    }
+    if (breakdownRaw !== "event_type" && breakdownRaw !== "source") {
+      res.status(400).json({ error: "breakdown must be 'event_type' or 'source'" });
       return;
     }
 
