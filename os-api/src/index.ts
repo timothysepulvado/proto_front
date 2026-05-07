@@ -54,10 +54,12 @@ import {
   getShotSummaries,
   getRecentRunsByCampaign,
   getRunDetail,
+  getCostSummaryForClient,
   listCostLedgerEntriesByRun,
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
   getArtifactsForDeliverableWithVerdicts,
+  type CostSummaryBreakdown,
 } from "./db.js";
 import { finiteNonNegative } from "./cost_ledger.js";
 import { decideEscalation } from "./orchestrator.js";
@@ -88,6 +90,11 @@ function getQueryString(value: unknown): string | undefined {
   if (typeof value === "string") return value;
   if (Array.isArray(value) && typeof value[0] === "string") return value[0];
   return undefined;
+}
+
+function defaultCurrentMonth(): string {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 type CostLedgerBreakdownMode = "event_type" | "source" | "none";
@@ -477,6 +484,63 @@ app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("GET /api/runs/:runId/cost-ledger error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/clients/:clientId/cost-summary - Per-client monthly cost summary.
+//
+// Query params:
+//   ?month=YYYY-MM                 (defaults to current UTC month)
+//   ?breakdown=event_type|source   (defaults to event_type)
+//
+// Tenant gate mirrors the PR #6 cost-ledger route:
+//   • JWT_AUTH_ENABLED=true  + missing/invalid Authorization → 401
+//   • JWT_AUTH_ENABLED=true  + caller.clientId !== :clientId  → 403
+//   • JWT_AUTH_ENABLED=false                                  → no enforcement
+app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Response) => {
+  try {
+    const clientId = getParam(req, "clientId");
+    const monthRaw = getQueryString(req.query.month) ?? defaultCurrentMonth();
+    const breakdownRaw = getQueryString(req.query.breakdown) ?? "event_type";
+
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthRaw)) {
+      res.status(400).json({ error: "month must be YYYY-MM (zero-padded month 01-12)" });
+      return;
+    }
+    if (breakdownRaw !== "event_type" && breakdownRaw !== "source") {
+      res.status(400).json({ error: "breakdown must be 'event_type' or 'source'" });
+      return;
+    }
+
+    // Auth gate FIRST — this endpoint identifies a client resource directly,
+    // so require auth before any DB read when JWT auth is enabled. That keeps
+    // the PR #6 401/403 ordering intact and avoids resource-existence leaks.
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const client = await getClient(clientId);
+    if (!client) {
+      res.status(404).json({ error: "Client not found" });
+      return;
+    }
+
+    if (jwtAuthEnabled && caller && caller.clientId !== client.id) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    const summary = await getCostSummaryForClient(client.id, {
+      month: monthRaw,
+      breakdown: breakdownRaw as CostSummaryBreakdown,
+    });
+    res.json(summary);
+  } catch (err) {
+    console.error("GET /api/clients/:clientId/cost-summary error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
