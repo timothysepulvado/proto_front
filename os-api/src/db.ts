@@ -16,7 +16,7 @@ import type {
   ArtifactIterationVerdict,
 } from "./types.js";
 import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
-import { recordCost, type CostEvent } from "./cost_ledger.js";
+import { finiteNonNegative, recordCost, type CostEvent } from "./cost_ledger.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
 
@@ -3299,6 +3299,23 @@ export interface RunLedgerCostSummary {
   entryCount: number;
 }
 
+export type CostSummaryBreakdown = "event_type" | "source";
+
+export interface CostSummaryRow {
+  key: string;
+  totalUsd: number;
+  entryCount: number;
+}
+
+export interface CostSummary {
+  clientId: string;
+  month: string;
+  totalUsd: number;
+  entryCount: number;
+  breakdown: CostSummaryRow[];
+  rateCardVersion: string;
+}
+
 export interface CostLedgerEntryRow {
   id: string;
   client_id: string;
@@ -3371,6 +3388,90 @@ export async function getRunCostFromLedger(runId: string): Promise<RunLedgerCost
     byEventType,
     bySource,
     entryCount: (data ?? []).length,
+  };
+}
+
+export async function getCostSummaryForClient(
+  clientId: string,
+  options: { month: string; breakdown: CostSummaryBreakdown },
+): Promise<CostSummary> {
+  // Range query: [YYYY-MM-01, YYYY-(MM+1)-01) using the existing
+  // (client_id, created_at DESC) Migration 017 index.
+  const start = `${options.month}-01T00:00:00Z`;
+  const [year, month] = options.month.split("-").map(Number);
+  const nextMonth = month === 12
+    ? `${year + 1}-01-01T00:00:00Z`
+    : `${year}-${String(month + 1).padStart(2, "0")}-01T00:00:00Z`;
+
+  const { data, error } = await supabase
+    .from("cost_ledger_entries")
+    .select("event_type, source, cost_usd, rate_card_version")
+    .eq("client_id", clientId)
+    .gte("created_at", start)
+    .lt("created_at", nextMonth);
+
+  if (error) {
+    throw new Error(`getCostSummaryForClient: cost_ledger_entries read failed: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    return {
+      clientId,
+      month: options.month,
+      totalUsd: 0,
+      entryCount: 0,
+      breakdown: [],
+      rateCardVersion: "v1",
+    };
+  }
+
+  // Aggregate in memory — runs are bounded; breakdown cardinality is small.
+  const buckets = new Map<string, { totalUsd: number; entryCount: number }>();
+  const rateCardCounts = new Map<string, number>();
+  let totalUsd = 0;
+
+  for (const row of data) {
+    const safeCost = finiteNonNegative(row.cost_usd) ?? 0;
+    totalUsd += safeCost;
+
+    const version = row.rate_card_version || "v1";
+    rateCardCounts.set(version, (rateCardCounts.get(version) ?? 0) + 1);
+
+    const keyValue = options.breakdown === "event_type" ? row.event_type : row.source;
+    const key = String(keyValue ?? "unknown");
+    const safeKey = key.trim().length > 0 ? key : "unknown";
+    const bucket = buckets.get(safeKey) ?? { totalUsd: 0, entryCount: 0 };
+    bucket.totalUsd += safeCost;
+    bucket.entryCount += 1;
+    buckets.set(safeKey, bucket);
+  }
+
+  // CR R1-1: stable ordering — break ties by ascending key string so the
+  // wire shape is deterministic regardless of Map insertion order. Same
+  // class of fix as PR #6 R3-1 (deterministic before non-deterministic).
+  const breakdown = [...buckets.entries()]
+    .map(([key, value]) => ({ key, ...value }))
+    .sort((a, b) => {
+      if (b.totalUsd !== a.totalUsd) return b.totalUsd - a.totalUsd;
+      return a.key.localeCompare(b.key);
+    });
+
+  // CR R1-1: pick highest-count rate card version with deterministic tie-break
+  // on smallest version string ascending. Pre-sorting by (count desc, version asc)
+  // and taking element 0 makes the result independent of Map iteration order.
+  const sortedVersions = [...rateCardCounts.entries()].sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  const rateCardVersion = sortedVersions.length > 0 ? sortedVersions[0][0] : "v1";
+
+  return {
+    clientId,
+    month: options.month,
+    totalUsd,
+    entryCount: data.length,
+    breakdown,
+    rateCardVersion,
   };
 }
 
