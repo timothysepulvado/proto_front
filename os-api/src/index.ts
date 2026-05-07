@@ -516,21 +516,26 @@ app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Respons
     // Auth gate FIRST — this endpoint identifies a client resource directly,
     // so require auth before any DB read when JWT auth is enabled. That keeps
     // the PR #6 401/403 ordering intact and avoids resource-existence leaks.
+    //
+    // Tenant 403 fires BEFORE the getClient lookup so a cross-tenant probe
+    // cannot use 403-vs-404 to enumerate which client_ids exist (same class
+    // as PR #6 R3-1 storagePath leak). The clientId URL param is compared
+    // directly against caller.clientId — JWT mint and DB writes share the
+    // same string so byte-equality is the canonical tenant check.
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
     if (jwtAuthEnabled && !caller) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
 
     const client = await getClient(clientId);
     if (!client) {
       res.status(404).json({ error: "Client not found" });
-      return;
-    }
-
-    if (jwtAuthEnabled && caller && caller.clientId !== client.id) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
