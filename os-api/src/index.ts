@@ -409,13 +409,18 @@ app.get("/api/runs/:runId/cost-ledger", async (req: Request, res: Response) => {
       return;
     }
 
-    const caller = verifyClientJwtFromRequest(req);
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    // Gate the verifier call AND both checks on jwtAuthEnabled at the call site.
+    // The verifier itself also short-circuits to null when the flag is off
+    // (auth.ts:83), but mirroring the gate here makes the no-enforcement
+    // contract explicit at the route layer + survives any future runtime
+    // env-flip without a process restart. CR R1-1.
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
     if (jwtAuthEnabled && !caller) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    if (caller && run.clientId && caller.clientId !== run.clientId) {
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
       res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
@@ -832,13 +837,17 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
 
     // Tenant gate (no-op when JWT_AUTH_ENABLED=false). When the flag is on,
     // missing-JWT → 401 and mismatched-client → 403 BEFORE we ever mint a URL.
-    const caller = verifyClientJwtFromRequest(req);
+    // Both the verifier call AND the checks are gated on jwtAuthEnabled here
+    // (the verifier itself also short-circuits when the flag is off — this
+    // mirroring makes the no-enforcement contract explicit at the call site
+    // and survives any runtime env-flip without a process restart). CR R1-1.
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
     if (jwtAuthEnabled && !caller) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    if (caller && artifact.clientId && caller.clientId !== artifact.clientId) {
+    if (jwtAuthEnabled && caller && artifact.clientId && caller.clientId !== artifact.clientId) {
       res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
