@@ -847,16 +847,23 @@ app.get("/api/artifacts/:artifactId/signed-url", async (req: Request, res: Respo
       res.status(404).json({ error: "Artifact not found" });
       return;
     }
+
+    // Tenant gate BEFORE the storagePath null check. Otherwise a valid
+    // other-tenant JWT holder could distinguish a 404 "no Storage object"
+    // response from a 403 "cross-tenant" response — leaking the binary
+    // signal "does that other-tenant artifact have a Storage object."
+    // Collapsing both cross-tenant cases to 403 closes that channel. CR R3-1.
+    if (jwtAuthEnabled && caller && artifact.clientId && caller.clientId !== artifact.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
     if (!artifact.storagePath) {
       // Local-filesystem-path artifacts (e.g. legacy NULL-storage_path entries
       // from PR #4 Phase A audit). HUD callers should gate on storagePath
       // truthy before requesting; treating as 404 keeps the contract simple.
+      // Reached only for own-tenant callers (post-R3-1 reorder).
       res.status(404).json({ error: "Artifact has no Storage object" });
-      return;
-    }
-
-    if (jwtAuthEnabled && caller && artifact.clientId && caller.clientId !== artifact.clientId) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
