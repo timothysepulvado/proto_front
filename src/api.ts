@@ -92,6 +92,13 @@ export interface RunDetail {
   relatedStillsRun?: RecentCampaignRun | null;
 }
 
+export interface SignedArtifactUrlResponse {
+  artifactId: string;
+  signedUrl: string;
+  expiresInSeconds: number;
+  expiresAt: string;
+}
+
 export type RunCostLedgerBreakdownMode = "event_type" | "source" | "none";
 
 export interface RunCostLedgerBreakdownItem {
@@ -1516,6 +1523,12 @@ export async function getArtifactIterationsForDeliverable(
   const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`);
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ArtifactIterationsResponse;
+}
+
+export async function getSignedArtifactUrl(artifactId: string): Promise<SignedArtifactUrlResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/artifacts/${encodeURIComponent(artifactId)}/signed-url`);
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as SignedArtifactUrlResponse;
 }
 
 export function resolveArtifactDisplayUrl(displayUrl: string): string {

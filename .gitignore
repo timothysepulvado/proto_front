@@ -43,3 +43,4 @@ worker/__pycache__/
 
 # Supabase CLI local state
 supabase/.temp/
+.pr-draft-*.md

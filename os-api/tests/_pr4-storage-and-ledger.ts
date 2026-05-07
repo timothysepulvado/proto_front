@@ -1,7 +1,7 @@
-// PR #4 verification harness — Storage write-side RLS + cost ledger isolation.
+// PR #4 + PR #5 verification harness — Storage RLS + cost ledger isolation.
 // Mirrors the structure of _phase7-multi-tenant-isolation.ts.
 // Drop into os-api/tests/ as `_pr4-storage-and-ledger.ts` after migrations
-// 016 + 017 are applied to the linked Supabase project.
+// 016 + 017 (PR #4) and 018 (PR #5) are applied to the linked Supabase project.
 //
 // Asserts:
 // 1. Storage UPLOAD — client A JWT uploads to own prefix succeeds
@@ -9,15 +9,27 @@
 // 3. Storage DELETE CROSS-TENANT — client A JWT delete of client B file is BLOCKED
 // 4. Cost ledger READ isolation — client A JWT sees own ledger entries; not client B's
 // 5. Cost ledger APPEND-ONLY — client A JWT cannot UPDATE or DELETE own ledger row
+// 6. Storage SELECT — client A's JWT mints a signed URL for own artifact via
+//    os-api endpoint; the URL fetches HTTP 200 with the seeded bytes
+// 7. Storage SELECT CROSS-TENANT — client A's JWT requesting a signed URL
+//    for client B's artifact via the os-api endpoint returns HTTP 403
 //
-// NOTE: Storage SELECT isolation NOT TESTED in PR #4 — bucket stays public=true,
-// /object/public/ URL pattern bypasses RLS entirely. PR #5 flips bucket private
-// + adds a SELECT isolation assertion to this harness.
+// PRE-REQUISITE for Assertions 6 + 7: os-api must be running with
+// JWT_AUTH_ENABLED=true. Without that flag the endpoint's tenant gate
+// bootstrap-falls-back to anonymous-allowed and Assertion 7 will fail with
+// a 200 response — the harness surfaces a helpful env-hint message in
+// that case so the dev can fix and re-run.
+//
+// PRE-REQUISITE for the FETCH side of Assertion 6: bucket may be public OR
+// private (PR #5 Migration 018 flips private). The /object/sign/ URL pattern
+// works in both states; this assertion stays correct across the bucket flip.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient as createAnonClient } from "@supabase/supabase-js";
 import { mintClientJwt } from "../src/auth.js";
 import { supabase as serviceClient } from "../src/supabase.js";
+
+const OS_API_URL = process.env.OS_API_URL ?? "http://localhost:3001";
 
 const RUN_ID_SUFFIX = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 const CLIENT_A_ID = `pr4_test_a_${RUN_ID_SUFFIX}`;
@@ -65,7 +77,14 @@ async function makeAuthedClient(clientId: string): Promise<SupabaseClient> {
   return client;
 }
 
-async function seedClient(clientId: string): Promise<{ runId: string; storageObject: string; ledgerId: string }> {
+interface SeededTenant {
+  runId: string;
+  storageObject: string;
+  ledgerId: string;
+  artifactId: string;
+}
+
+async function seedClient(clientId: string): Promise<SeededTenant> {
   // 1. clients
   await expectMutation(
     await serviceClient.from("clients").insert({
@@ -117,18 +136,44 @@ async function seedClient(clientId: string): Promise<{ runId: string; storageObj
   if (ledgerRes.error || !ledgerRes.data) throw new Error(`[seed ${clientId}] ledger: ${ledgerRes.error?.message}`);
   const ledgerId = (ledgerRes.data as { id: string }).id;
 
-  return { runId, storageObject, ledgerId };
+  // 5. Artifact row tied to the Storage object — required for the
+  //    /api/artifacts/:artifactId/signed-url endpoint to look up tenant
+  //    + storage_path. Public URL is illustrative only; the endpoint never
+  //    reads the `path` column for signing (it uses storage_path).
+  const publicUrl = `https://placeholder/storage/v1/object/public/${BUCKET}/${storageObject}`;
+  const artifactRes = await serviceClient
+    .from("artifacts")
+    .insert({
+      run_id: runId,
+      client_id: clientId,
+      type: "image",
+      name: `seed-${RUN_ID_SUFFIX}.png`,
+      path: publicUrl,
+      storage_path: storageObject,
+      stage: "seed",
+      size: TEST_FILE_BYTES.length,
+      metadata: { harness: "pr4-pr5", suffix: RUN_ID_SUFFIX },
+    })
+    .select("id")
+    .single();
+  if (artifactRes.error || !artifactRes.data) {
+    throw new Error(`[seed ${clientId}] artifact: ${artifactRes.error?.message}`);
+  }
+  const artifactId = (artifactRes.data as { id: string }).id;
+
+  return { runId, storageObject, ledgerId, artifactId };
 }
 
-async function cleanup(clientId: string, seeded: { runId: string; storageObject: string; ledgerId: string } | undefined): Promise<void> {
+async function cleanup(clientId: string, seeded: SeededTenant | undefined): Promise<void> {
   // Reverse-order FK-aware delete. All via service-role.
   // Best-effort sequence: attempt every step, collect errors, then THROW after
   // the full pass so an orphan row never produces a false-green run. (CR R2.)
   // NOTE: cost_ledger_entries is append-only by RLS design (no UPDATE/DELETE
-  // policies). Cleanup of the seeded ledger row happens automatically via
-  // ON DELETE CASCADE on cost_ledger_entries.run_id when we delete the run
-  // below — no explicit ledger DELETE required, which respects the invariant
-  // even if BYPASSRLS is ever revoked from service_role in the future.
+  // policies). Cleanup of the seeded ledger row + artifacts row happens
+  // automatically via ON DELETE CASCADE on (cost_ledger_entries|artifacts).run_id
+  // when we delete the run below — no explicit DELETE required, which respects
+  // the append-only invariant even if BYPASSRLS is ever revoked from service_role
+  // in the future.
   const errors: string[] = [];
 
   if (seeded) {
@@ -136,7 +181,7 @@ async function cleanup(clientId: string, seeded: { runId: string; storageObject:
     const rmObj = await serviceClient.storage.from(BUCKET).remove([seeded.storageObject]);
     if (rmObj.error) errors.push(`storage remove: ${rmObj.error.message}`);
 
-    // Run row — CASCADE deletes the seeded ledger row + any artifacts/run_logs.
+    // Run row — CASCADE deletes the seeded ledger row + artifacts row + any run_logs.
     const rmRun = await serviceClient.from("runs").delete().eq("id", seeded.runId);
     if (rmRun.error) errors.push(`run delete: ${rmRun.error.message}`);
   }
@@ -150,11 +195,27 @@ async function cleanup(clientId: string, seeded: { runId: string; storageObject:
   }
 }
 
+async function requestSignedUrl(
+  token: string,
+  artifactId: string,
+): Promise<{ status: number; body: unknown }> {
+  const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/signed-url`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    /* non-JSON response — leave null */
+  }
+  return { status: resp.status, body };
+}
+
 async function main(): Promise<void> {
   console.log(`PR #4 harness — clients: ${CLIENT_A_ID} / ${CLIENT_B_ID}`);
 
-  let seededA: { runId: string; storageObject: string; ledgerId: string } | undefined;
-  let seededB: { runId: string; storageObject: string; ledgerId: string } | undefined;
+  let seededA: SeededTenant | undefined;
+  let seededB: SeededTenant | undefined;
 
   // Error accumulators — primary (assertion / setup) is preserved separately
   // from cleanup errors so a finally-throw never masks the actual test failure.
@@ -253,7 +314,65 @@ async function main(): Promise<void> {
     }
     console.log(`✓ Assertion 5 — ledger APPEND-ONLY (UPDATE blocked; cost still 0.0123)`);
 
-    console.log(`\n✓✓✓ ALL 5 ASSERTIONS PASS — PR #4 Storage write-side RLS + ledger isolation verified`);
+    // ===== Assertions 6 + 7 — Storage SELECT (signed-URL) isolation =====
+    // These exercise the os-api endpoint /api/artifacts/:id/signed-url end-to-end:
+    // own-tenant request must mint a working URL; cross-tenant must 403.
+    // Both depend on os-api running with JWT_AUTH_ENABLED=true; the probe
+    // ahead of Assertion 7 surfaces a clear env-hint if the flag is off.
+
+    const tokenA = await mintClientJwt(CLIENT_A_ID);
+
+    // ===== Assertion 6: Storage SELECT — same-tenant signed URL works end-to-end =====
+    const ownReq = await requestSignedUrl(tokenA, sA.artifactId);
+    if (ownReq.status !== 200) {
+      const detail = (ownReq.body as { error?: string } | null)?.error ?? `status=${ownReq.status}`;
+      throw new Error(`✗ Assertion 6 FAILED — own-tenant signed-URL request: ${detail}`);
+    }
+    const ownBody = ownReq.body as { signedUrl?: string; expiresInSeconds?: number } | null;
+    if (!ownBody?.signedUrl || typeof ownBody.signedUrl !== "string") {
+      throw new Error(`✗ Assertion 6 FAILED — endpoint response missing signedUrl: ${JSON.stringify(ownBody)}`);
+    }
+    if (!ownBody.signedUrl.includes("/object/sign/") || !ownBody.signedUrl.includes("token=")) {
+      throw new Error(`✗ Assertion 6 FAILED — signedUrl shape unexpected: ${ownBody.signedUrl.slice(0, 80)}`);
+    }
+
+    const fetchOwn = await fetch(ownBody.signedUrl);
+    if (!fetchOwn.ok) {
+      throw new Error(
+        `✗ Assertion 6 FAILED — fetching minted signed URL returned HTTP ${fetchOwn.status} ` +
+          `(bucket policy may not yet permit signed reads — verify Migration 016 SELECT policy is live)`,
+      );
+    }
+    const fetchedBytes = Buffer.from(await fetchOwn.arrayBuffer());
+    if (fetchedBytes.length !== TEST_FILE_BYTES.length) {
+      throw new Error(
+        `✗ Assertion 6 FAILED — fetched bytes length ${fetchedBytes.length} ≠ seeded ${TEST_FILE_BYTES.length}`,
+      );
+    }
+    if (!fetchedBytes.equals(TEST_FILE_BYTES)) {
+      throw new Error(`✗ Assertion 6 FAILED — fetched bytes differ from seeded payload`);
+    }
+    console.log(`✓ Assertion 6 — own-tenant signed URL minted + fetches HTTP 200 with seeded bytes`);
+
+    // ===== Assertion 7: Storage SELECT CROSS-TENANT — must return 403 =====
+    const crossReq = await requestSignedUrl(tokenA, sB.artifactId);
+    if (crossReq.status === 200) {
+      // Most likely cause: os-api running with JWT_AUTH_ENABLED=false.
+      // The endpoint's tenant gate bootstrap-falls-back to anonymous-allowed
+      // in that configuration; the gate only engages when the flag is on.
+      throw new Error(
+        `✗ Assertion 7 FAILED — cross-tenant signed-URL request returned HTTP 200, expected 403.\n` +
+          `  Most likely cause: os-api is running with JWT_AUTH_ENABLED=false (default).\n` +
+          `  Restart os-api with JWT_AUTH_ENABLED=true in its env, then re-run this harness.`,
+      );
+    }
+    if (crossReq.status !== 403) {
+      const detail = (crossReq.body as { error?: string } | null)?.error ?? `status=${crossReq.status}`;
+      throw new Error(`✗ Assertion 7 FAILED — expected HTTP 403, got HTTP ${crossReq.status}: ${detail}`);
+    }
+    console.log(`✓ Assertion 7 — cross-tenant signed-URL request BLOCKED with HTTP 403`);
+
+    console.log(`\n✓✓✓ ALL 7 ASSERTIONS PASS — PR #4 + PR #5 Storage + ledger isolation verified`);
   } catch (err) {
     primaryError = err;
   } finally {

@@ -15,6 +15,7 @@ import {
 import * as api from "../api";
 import type { Artifact, ArtifactIterationRow, ArtifactIterationsResponse, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, ProductionSlug, RunLog } from "../api";
 import type { AuditReportShot } from "../lib/auditReport";
+import { useSignedArtifactUrl } from "../hooks/useSignedArtifactUrl";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -526,8 +527,8 @@ function formatTimestamp(value: string | null | undefined) {
   });
 }
 
-function artifactImageUrl(row: ArtifactIterationRow) {
-  return api.resolveArtifactDisplayUrl(row.displayUrl || row.artifact.path);
+function fallbackArtifactDisplayUrl(row: ArtifactIterationRow) {
+  return api.resolveArtifactDisplayUrl(row.displayUrl);
 }
 
 function iterationVerdictLabel(row: ArtifactIterationRow) {
@@ -537,15 +538,26 @@ function iterationVerdictLabel(row: ArtifactIterationRow) {
 }
 
 function IterationThumb({ row, className = "h-full w-full" }: { row: ArtifactIterationRow; className?: string }) {
+  const canResolveFromStorage = Boolean(row.artifact.storagePath);
+  const { url, loading, error } = useSignedArtifactUrl(canResolveFromStorage ? row.artifact.id : undefined);
+  const fallbackUrl = row.displayUrl ? fallbackArtifactDisplayUrl(row) : null;
+  const displayUrl = canResolveFromStorage ? url : fallbackUrl;
+
   return (
     <div className={`overflow-hidden rounded-xl border border-white/10 bg-white/[0.035] ${className}`}>
-      {row.displayUrl ? (
+      {loading ? (
+        <div className="h-full w-full animate-pulse bg-white/10" />
+      ) : displayUrl ? (
         <img
-          src={artifactImageUrl(row)}
+          src={displayUrl}
           alt={`${row.label} thumbnail`}
           className="h-full w-full object-cover"
           loading="lazy"
         />
+      ) : canResolveFromStorage ? (
+        <div className="flex h-full w-full items-center justify-center px-3 text-center text-[8px] font-mono uppercase tracking-widest text-rose-200/70">
+          {error ?? "Image unavailable"}
+        </div>
       ) : (
         <div className="flex h-full w-full items-center justify-center text-[8px] font-mono uppercase tracking-widest text-white/30">
           No preview
