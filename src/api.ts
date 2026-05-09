@@ -1,3 +1,4 @@
+import { getAuthHeaders } from "./lib/apiAuth";
 import { supabase } from "./lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
@@ -400,7 +401,7 @@ export async function getClients(): Promise<Client[]> {
   // JWT-on and JWT-off modes. After migration 015, direct anon reads of
   // `clients` return 0 rows under RLS, which would break the default
   // JWT_AUTH_ENABLED=false HUD boot path.
-  const resp = await fetch(`${OS_API_URL}/api/clients`);
+  const resp = await fetch(`${OS_API_URL}/api/clients`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as Client[];
 }
@@ -1482,7 +1483,7 @@ export function subscribeToDriftAlerts(
 export async function createStillsAuditRun(clientId: string, campaignId: string): Promise<Run> {
   const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({
       mode: "stills",
       campaignId,
@@ -1498,13 +1499,14 @@ export async function getCampaignRecentRuns(campaignId: string, limit = 10): Pro
   const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
   const resp = await fetch(
     `${OS_API_URL}/api/campaigns/${campaignId}/recent-runs?limit=${encodeURIComponent(String(safeLimit))}`,
+    { headers: getAuthHeaders() },
   );
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as RecentCampaignRun[];
 }
 
 export async function getMotionPhaseGateState(campaignId: string): Promise<MotionPhaseGateState> {
-  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/motion-phase-gate`);
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/motion-phase-gate`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as MotionPhaseGateState;
 }
@@ -1512,7 +1514,7 @@ export async function getMotionPhaseGateState(campaignId: string): Promise<Motio
 export async function getDirectionDriftIndicators(
   campaignId: string,
 ): Promise<Record<string, DirectionDriftIndicator>> {
-  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/direction-drift`);
+  const resp = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/direction-drift`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as Record<string, DirectionDriftIndicator>;
 }
@@ -1520,13 +1522,13 @@ export async function getDirectionDriftIndicators(
 export async function getArtifactIterationsForDeliverable(
   deliverableId: string,
 ): Promise<ArtifactIterationsResponse> {
-  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`);
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ArtifactIterationsResponse;
 }
 
 export async function getSignedArtifactUrl(artifactId: string): Promise<SignedArtifactUrlResponse> {
-  const resp = await fetch(`${OS_API_URL}/api/artifacts/${encodeURIComponent(artifactId)}/signed-url`);
+  const resp = await fetch(`${OS_API_URL}/api/artifacts/${encodeURIComponent(artifactId)}/signed-url`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as SignedArtifactUrlResponse;
 }
@@ -1542,7 +1544,7 @@ export async function createMotionPhaseRun(
 ): Promise<Run> {
   const resp = await fetch(`${OS_API_URL}/api/clients/${clientId}/runs`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({
       mode: "video",
       campaignId,
@@ -1571,7 +1573,7 @@ export async function createMotionPhaseRun(
 }
 
 export async function getRunDetail(runId: string): Promise<RunDetail> {
-  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/detail`);
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/detail`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as RunDetail;
 }
@@ -1586,7 +1588,7 @@ export async function getRunCostLedger(
     params.set("limit", String(Math.floor(opts.limit)));
   }
   const query = params.toString();
-  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/cost-ledger${query ? `?${query}` : ""}`);
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/cost-ledger${query ? `?${query}` : ""}`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as RunCostLedgerResponse;
 }
@@ -1650,7 +1652,7 @@ export async function getArtifactPlatformUrls(
     const params = platforms && platforms.length > 0
       ? `?platforms=${platforms.join(",")}`
       : "";
-    const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/platforms${params}`);
+    const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/platforms${params}`, { headers: getAuthHeaders() });
     if (!resp.ok) {
       return null;
     }
@@ -1744,7 +1746,7 @@ export async function getBaselineHistory(clientId: string): Promise<BrandBaselin
 export async function calculateBaseline(clientId: string): Promise<BrandBaseline> {
   const response = await fetch(`${OS_API_URL}/api/clients/${clientId}/baseline/calculate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
   });
 
   if (!response.ok) {
@@ -1947,7 +1949,7 @@ export async function getCampaign(campaignId: string): Promise<Campaign | null> 
 
 // Get deliverable by ID via os-api (used by drawer detail fallbacks)
 export async function getDeliverable(deliverableId: string): Promise<CampaignDeliverable | null> {
-  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}`);
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}`, { headers: getAuthHeaders() });
   if (resp.status === 404) return null;
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as CampaignDeliverable;
@@ -2153,7 +2155,7 @@ export async function resolveEscalationAccept(
 ): Promise<ResolveEscalationResponse> {
   const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/resolve`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({
       status: "accepted",
       resolution_path: "accept",
@@ -2244,6 +2246,7 @@ export async function getShotSummaries(
   const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
   const resp = await fetch(
     `${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`,
+    { headers: getAuthHeaders() },
   );
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({ error: "Unknown error" }));
@@ -2500,13 +2503,13 @@ export function getProductionVideoUrl(
 }
 
 export async function getProductionShots(productionSlug: ProductionSlug): Promise<ProductionShotsResponse> {
-  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`);
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ProductionShotsResponse;
 }
 
 export async function getProductionShotStills(productionSlug: ProductionSlug): Promise<ProductionShotStillsResponse> {
-  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot-stills`);
+  const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot-stills`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ProductionShotStillsResponse;
 }
@@ -2535,7 +2538,7 @@ export async function patchProductionShot(
 ): Promise<ProductionShotPatchResponse> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2549,7 +2552,7 @@ export async function regenerateProductionShot(
 ): Promise<{ jobId: string; status: "running" }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/regenerate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2571,6 +2574,7 @@ export async function promoteProductionShot(
 }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/promote`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as {
@@ -2591,6 +2595,7 @@ export async function rejectProductionShot(
 ): Promise<{ shotNumber: number; rejected: boolean; pendingDeleted: boolean }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shots/${shotNumber}/reject`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as { shotNumber: number; rejected: boolean; pendingDeleted: boolean };
@@ -2613,7 +2618,7 @@ export async function approveProductionShotStill(
 }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/approve-still`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2649,7 +2654,7 @@ export async function rejectProductionShotStill(
 }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/reject-still`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2685,7 +2690,7 @@ export async function snapshotProductionShotStill(
 }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/snapshot-still`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2733,7 +2738,7 @@ export async function replaceProductionShotStill(
 
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/shot/${shotNumber}/still`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
@@ -2753,6 +2758,7 @@ export async function triggerProductionRender(
 ): Promise<{ jobId: string; status: "running" }> {
   const resp = await fetch(`${OS_API_URL}/api/productions/${productionSlug}/render`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as { jobId: string; status: "running" };

@@ -1,24 +1,42 @@
-// PR #4 + PR #5 verification harness — Storage RLS + cost ledger isolation.
-// Mirrors the structure of _phase7-multi-tenant-isolation.ts.
-// Drop into os-api/tests/ as `_pr4-storage-and-ledger.ts` after migrations
-// 016 + 017 (PR #4) and 018 (PR #5) are applied to the linked Supabase project.
+// PR #4 + PR #5 + PR #6 + PR #7 verification harness — Storage RLS + cost
+// ledger isolation + caller-auth-gate + per-client cost-summary aggregation.
+// Mirrors the structure of _phase7-multi-tenant-isolation.ts. Drop into
+// os-api/tests/ as `_pr4-storage-and-ledger.ts` after migrations 016 + 017
+// (PR #4) and 018 (PR #5) are applied to the linked Supabase project.
 //
 // Asserts:
-// 1. Storage UPLOAD — client A JWT uploads to own prefix succeeds
-// 2. Storage UPLOAD CROSS-TENANT — client A JWT upload to client B prefix is BLOCKED
-// 3. Storage DELETE CROSS-TENANT — client A JWT delete of client B file is BLOCKED
-// 4. Cost ledger READ isolation — client A JWT sees own ledger entries; not client B's
-// 5. Cost ledger APPEND-ONLY — client A JWT cannot UPDATE or DELETE own ledger row
-// 6. Storage SELECT — client A's JWT mints a signed URL for own artifact via
-//    os-api endpoint; the URL fetches HTTP 200 with the seeded bytes
-// 7. Storage SELECT CROSS-TENANT — client A's JWT requesting a signed URL
-//    for client B's artifact via the os-api endpoint returns HTTP 403
+//  1. Storage UPLOAD — client A JWT uploads to own prefix succeeds
+//  2. Storage UPLOAD CROSS-TENANT — client A JWT upload to client B prefix is BLOCKED
+//  3. Storage DELETE CROSS-TENANT — client A JWT delete of client B file is BLOCKED
+//  4. Cost ledger READ isolation — client A JWT sees own ledger entries; not client B's
+//  5. Cost ledger APPEND-ONLY — client A JWT cannot UPDATE or DELETE own ledger row
+//  6. Storage SELECT — client A's JWT mints a signed URL for own artifact via
+//     os-api endpoint; the URL fetches HTTP 200 with the seeded bytes
+//  7. Storage SELECT CROSS-TENANT — client A's JWT requesting a signed URL
+//     for client B's artifact via the os-api endpoint returns HTTP 403
+//  8. Caller-auth-gate (PR #6) — signed-URL endpoint returns HTTP 401 when
+//     no Authorization header is present (closes PR #5 R1-2 deferral)
+//  9. Caller-auth-gate (PR #6) — cost-ledger endpoint returns HTTP 401 when
+//     no Authorization header is present (closes PR #4 deferral)
+// 10. Caller-auth-gate (PR #6) — cost-ledger endpoint returns HTTP 403 when
+//     caller's JWT client_id does not match the run's client_id
+// 11. Cost-summary (PR #7 Phase F) — endpoint returns HTTP 401 when JWT is
+//     missing on a JWT_AUTH_ENABLED=true server (CR R1-3 — guards the auth
+//     gate from drifting back behind query-param validation)
+// 12. Cost-summary (PR #7 Phase F) — endpoint returns HTTP 403 when caller's
+//     JWT client_id does not match the URL :clientId (tenant 403 fires before
+//     the getClient lookup so existence cannot be inferred from 403-vs-404)
+// 13. Cost-summary (PR #7 Phase F) — own-tenant fetch returns HTTP 200 with
+//     non-zero totalUsd + non-empty breakdown rows (validates aggregation +
+//     month range + breakdown buckets against the seeded ledger entry)
 //
-// PRE-REQUISITE for Assertions 6 + 7: os-api must be running with
-// JWT_AUTH_ENABLED=true. Without that flag the endpoint's tenant gate
-// bootstrap-falls-back to anonymous-allowed and Assertion 7 will fail with
-// a 200 response — the harness surfaces a helpful env-hint message in
-// that case so the dev can fix and re-run.
+// PRE-REQUISITE for Assertions 6-13: os-api must be running with
+// JWT_AUTH_ENABLED=true and the cost-summary endpoint compiled in (PR #7
+// Phase F + the bug-class fix on the worktree, commits 294b395a + 9e31ce0).
+// Without the flag the endpoint tenant gates bootstrap-fall-back to
+// anonymous-allowed; without the endpoint compiled in assertions 11/12/13 will
+// 404 instead of 401/403/200. The harness surfaces a helpful env-hint message
+// on assertion 7 + 8 so the dev can fix and re-run.
 //
 // PRE-REQUISITE for the FETCH side of Assertion 6: bucket may be public OR
 // private (PR #5 Migration 018 flips private). The /object/sign/ URL pattern
@@ -196,12 +214,12 @@ async function cleanup(clientId: string, seeded: SeededTenant | undefined): Prom
 }
 
 async function requestSignedUrl(
-  token: string,
+  token: string | undefined,
   artifactId: string,
 ): Promise<{ status: number; body: unknown }> {
-  const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/signed-url`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}/api/artifacts/${artifactId}/signed-url`, { headers });
   let body: unknown = null;
   try {
     body = await resp.json();
@@ -209,6 +227,49 @@ async function requestSignedUrl(
     /* non-JSON response — leave null */
   }
   return { status: resp.status, body };
+}
+
+async function requestCostLedger(
+  token: string | undefined,
+  runId: string,
+): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}/api/runs/${runId}/cost-ledger`, { headers });
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    /* non-JSON response — leave null */
+  }
+  return { status: resp.status, body };
+}
+
+async function requestCostSummary(
+  token: string | undefined,
+  clientId: string,
+  query: { month?: string; breakdown?: string } = {},
+): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const params = new URLSearchParams();
+  if (query.month) params.set("month", query.month);
+  if (query.breakdown) params.set("breakdown", query.breakdown);
+  const queryStr = params.toString();
+  const url = `${OS_API_URL}/api/clients/${clientId}/cost-summary${queryStr ? `?${queryStr}` : ""}`;
+  const resp = await fetch(url, { headers });
+  let body: unknown = null;
+  try {
+    body = await resp.json();
+  } catch {
+    /* non-JSON response — leave null */
+  }
+  return { status: resp.status, body };
+}
+
+function currentYearMonth(): string {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 async function main(): Promise<void> {
@@ -372,7 +433,116 @@ async function main(): Promise<void> {
     }
     console.log(`✓ Assertion 7 — cross-tenant signed-URL request BLOCKED with HTTP 403`);
 
-    console.log(`\n✓✓✓ ALL 7 ASSERTIONS PASS — PR #4 + PR #5 Storage + ledger isolation verified`);
+    // ===== Assertions 8 + 9 + 10 — Caller-auth-gate on operator endpoints (PR #6) =====
+    // PR #6 Phase B harden the signed-url + cost-ledger endpoints so missing
+    // Authorization (when JWT_AUTH_ENABLED=true) returns 401 and cross-tenant
+    // requests return 403. Closes the deferrals from PR #4 + PR #5.
+
+    // ===== Assertion 8: Signed-URL endpoint returns 401 on missing JWT =====
+    const noAuthSigned = await requestSignedUrl(undefined, sA.artifactId);
+    if (noAuthSigned.status !== 401) {
+      const detail = (noAuthSigned.body as { error?: string } | null)?.error ?? `status=${noAuthSigned.status}`;
+      throw new Error(
+        `✗ Assertion 8 FAILED — signed-URL endpoint must return HTTP 401 when JWT missing (flag on); got HTTP ${noAuthSigned.status}: ${detail}.\n` +
+          `  Most likely cause: os-api is running with JWT_AUTH_ENABLED=false (default — bootstrap-fallback path).\n` +
+          `  Restart os-api with JWT_AUTH_ENABLED=true in its env, then re-run this harness.`,
+      );
+    }
+    console.log(`✓ Assertion 8 — signed-URL endpoint returns HTTP 401 when JWT missing`);
+
+    // ===== Assertion 9: Cost-ledger endpoint returns 401 on missing JWT =====
+    const noAuthLedger = await requestCostLedger(undefined, sA.runId);
+    if (noAuthLedger.status !== 401) {
+      const detail = (noAuthLedger.body as { error?: string } | null)?.error ?? `status=${noAuthLedger.status}`;
+      throw new Error(
+        `✗ Assertion 9 FAILED — cost-ledger endpoint must return HTTP 401 when JWT missing (flag on); got HTTP ${noAuthLedger.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 9 — cost-ledger endpoint returns HTTP 401 when JWT missing`);
+
+    // ===== Assertion 10: Cost-ledger endpoint returns 403 on cross-tenant =====
+    const tokenB = await mintClientJwt(CLIENT_B_ID);
+    const crossLedger = await requestCostLedger(tokenB, sA.runId);
+    if (crossLedger.status !== 403) {
+      const detail = (crossLedger.body as { error?: string } | null)?.error ?? `status=${crossLedger.status}`;
+      throw new Error(
+        `✗ Assertion 10 FAILED — cost-ledger endpoint must return HTTP 403 cross-tenant; got HTTP ${crossLedger.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 10 — cost-ledger endpoint cross-tenant returns HTTP 403`);
+
+    // ===== Assertions 11-13 — Cost-summary endpoint (PR #7 Phase F) =====
+    // Per-client monthly cost aggregation endpoint; same auth contract as
+    // /api/runs/:runId/cost-ledger. Three-tier coverage mirrors Assertions
+    // 8/9/10 on the cost-ledger endpoint:
+    //   • Assertion 11: missing JWT → 401 (CR R1-3 — guards auth-order regression)
+    //   • Assertion 12: cross-tenant probe → 403 BEFORE any DB lookup
+    //                   (closes existence-leak class — same as PR #6 R3-1)
+    //   • Assertion 13: own-tenant → 200 with non-zero aggregates from seeded ledger
+
+    // ===== Assertion 11: Cost-summary endpoint returns 401 when JWT missing =====
+    const noTokenSummary = await requestCostSummary(undefined, CLIENT_A_ID, {
+      month: currentYearMonth(),
+      breakdown: "event_type",
+    });
+    if (noTokenSummary.status !== 401) {
+      const detail = (noTokenSummary.body as { error?: string } | null)?.error ?? `status=${noTokenSummary.status}`;
+      throw new Error(
+        `✗ Assertion 11 FAILED — cost-summary endpoint must return HTTP 401 missing JWT; got HTTP ${noTokenSummary.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 11 — cost-summary endpoint returns HTTP 401 when JWT missing`);
+
+    // ===== Assertion 12: Cost-summary endpoint returns 403 on cross-tenant =====
+    const crossSummary = await requestCostSummary(tokenB, CLIENT_A_ID, {
+      month: currentYearMonth(),
+      breakdown: "event_type",
+    });
+    if (crossSummary.status !== 403) {
+      const detail = (crossSummary.body as { error?: string } | null)?.error ?? `status=${crossSummary.status}`;
+      throw new Error(
+        `✗ Assertion 12 FAILED — cost-summary endpoint must return HTTP 403 cross-tenant; got HTTP ${crossSummary.status}: ${detail}`,
+      );
+    }
+    console.log(`✓ Assertion 12 — cost-summary endpoint cross-tenant returns HTTP 403`);
+
+    // ===== Assertion 13: Cost-summary own-tenant returns 200 + non-zero aggregates =====
+    const ownSummary = await requestCostSummary(tokenA, CLIENT_A_ID, {
+      month: currentYearMonth(),
+      breakdown: "event_type",
+    });
+    if (ownSummary.status !== 200) {
+      const detail = (ownSummary.body as { error?: string } | null)?.error ?? `status=${ownSummary.status}`;
+      throw new Error(`✗ Assertion 13 FAILED — own-tenant cost-summary: HTTP ${ownSummary.status}: ${detail}`);
+    }
+    const summaryBody = ownSummary.body as {
+      clientId?: string;
+      month?: string;
+      totalUsd?: number;
+      entryCount?: number;
+      breakdown?: { key: string; totalUsd: number; entryCount: number }[];
+      rateCardVersion?: string;
+    } | null;
+    if (typeof summaryBody?.totalUsd !== "number" || summaryBody.totalUsd <= 0) {
+      throw new Error(
+        `✗ Assertion 13 FAILED — totalUsd missing or zero: ${JSON.stringify(summaryBody)}`,
+      );
+    }
+    if (!Array.isArray(summaryBody.breakdown) || summaryBody.breakdown.length === 0) {
+      throw new Error(
+        `✗ Assertion 13 FAILED — breakdown empty: ${JSON.stringify(summaryBody.breakdown)}`,
+      );
+    }
+    if (typeof summaryBody.entryCount !== "number" || summaryBody.entryCount < 1) {
+      throw new Error(
+        `✗ Assertion 13 FAILED — entryCount missing or zero: ${JSON.stringify(summaryBody)}`,
+      );
+    }
+    console.log(
+      `✓ Assertion 13 — cost-summary own-tenant returns HTTP 200 + non-zero totalUsd ($${summaryBody.totalUsd.toFixed(4)}, entries=${summaryBody.entryCount}, buckets=${summaryBody.breakdown.length})`,
+    );
+
+    console.log(`\n✓✓✓ ALL 13 ASSERTIONS PASS — PR #4 + PR #5 + PR #6 + PR #7 Storage + ledger + caller-auth-gate + cost-summary verified`);
   } catch (err) {
     primaryError = err;
   } finally {
