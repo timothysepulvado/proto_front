@@ -769,6 +769,23 @@ export async function getArtifacts(runId: string): Promise<Artifact[]> {
   return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
 }
 
+export async function getLatestVideoArtifactForCampaign(campaignId: string): Promise<Artifact | null> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .eq("type", "video")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get latest campaign video artifact: ${error.message}`);
+  }
+
+  return data ? mapDbArtifactToArtifact(data as DbArtifact) : null;
+}
+
 // Create artifact
 export async function createArtifact(
   runId: string,
@@ -1824,6 +1841,7 @@ export interface Campaign {
   maxRetries: number;
   referenceImages?: string[];
   guardrails?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -1863,6 +1881,7 @@ interface DbCampaign {
   max_retries: number;
   reference_images?: string[] | null;
   guardrails?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -1904,6 +1923,7 @@ function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
     maxRetries: db.max_retries,
     referenceImages: db.reference_images ?? undefined,
     guardrails: db.guardrails ?? undefined,
+    metadata: db.metadata ?? undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };

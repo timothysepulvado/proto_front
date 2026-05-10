@@ -38,6 +38,7 @@ import CampaignDashboard from "./components/CampaignDashboard";
 import AuditTriageTable from "./components/AuditTriageTable";
 import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
 import PillarPlaceholder from "./components/PillarPlaceholder";
+import CurrentCutPreview from "./components/CurrentCutPreview";
 import type { AuditReportShot } from "./lib/auditReport";
 import { applyClientJwt, isJwtAuthEnabled, subscribeToClientAuthEvents } from "./lib/clientAuth";
 import {
@@ -349,6 +350,7 @@ export default function App() {
   const hasMovedRef = useRef(false);
   const [activePillar, setActivePillar] = useState<PillarId>("creative");
   const [creativeSubtab, setCreativeSubtab] = useState<CreativeSubtab>("deliverables");
+  const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [finalHitlShotNumber, setFinalHitlShotNumber] = useState<number | null>(null);
@@ -660,6 +662,7 @@ export default function App() {
     setLogs(seedLogs);
     setShowRunMenu(false);
     setCreativeSubtab("deliverables");
+    setIsAuditPanelOpen(false);
     setActivePillar(pillarForClient(nextClient));
     setIsClientDetailOpen(true);
 
@@ -680,6 +683,7 @@ export default function App() {
     setCurrentStage(null);
     setShowRunMenu(false);
     setCreativeSubtab("deliverables");
+    setIsAuditPanelOpen(false);
     setActivePillar("creative");
   }, [teardownRunSubscriptions]);
 
@@ -1279,36 +1283,55 @@ export default function App() {
                         </p>
                       ) : null}
                     </div>
-	                  ) : activePillar === "creative" && activeClient ? (
-	                    <>
-                        {currentRun?.campaignId && (
+                  ) : activePillar === "creative" && activeClient ? (
+                    <>
+                      {currentRun?.campaignId && selectedCampaign ? (
+                        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] xl:items-start">
+                          <div className="min-w-0 space-y-3">
+                            <CurrentCutPreview
+                              campaign={selectedCampaign}
+                              campaignId={currentRun.campaignId}
+                              currentRun={currentRun}
+                            />
+                            {isFeaturedClient && <DeliverableTimeline productionSlug={currentClient.productionSlug} />}
+                            {isFeaturedClient && (
+                              <MotionPhaseGate
+                                clientId={activeClient}
+                                campaignId={currentRun.campaignId}
+                                onReviewGateClick={() => setActivePillar("review")}
+                                onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
+                              />
+                            )}
+                          </div>
+
                           <RecentRunsPanel
                             clientId={activeClient}
                             campaignId={currentRun.campaignId}
                             onRunClick={setSelectedRunDetailId}
                           />
-                        )}
-                        {isFeaturedClient && currentRun?.campaignId && (
-                          <MotionPhaseGate
-                            clientId={activeClient}
-                            campaignId={currentRun.campaignId}
-                            onReviewGateClick={() => setActivePillar("review")}
-                            onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
-                          />
-                        )}
-	                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
-	                        {[
-	                          { id: "deliverables" as const, label: "Deliverables" },
-	                          ...(isFeaturedClient ? [
-                              { id: "reshoots" as const, label: "Reshoots" },
-                              { id: "stills" as const, label: "Stills + Anchors" },
-                            ] : []),
-	                        ].map((tab) => (
+                        </div>
+                      ) : isFeaturedClient ? (
+                        <div className="flex flex-col items-center justify-center py-8">
+                          <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
+                          <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
+                            Loading Drift MV run
+                          </span>
+                        </div>
+                      ) : null}
+
+                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
+                        {[
+                          { id: "deliverables" as const, label: "Deliverables" },
+                          ...(isFeaturedClient ? [
+                            { id: "reshoots" as const, label: "Reshoots" },
+                            { id: "stills" as const, label: "Stills + Anchors" },
+                          ] : []),
+                        ].map((tab) => (
                           <button
                             key={tab.id}
                             type="button"
                             onClick={() => setCreativeSubtab(tab.id)}
-	                            className={`min-w-0 flex-1 truncate rounded-lg px-2 sm:px-3 py-2 text-[7px] sm:text-[8px] font-mono uppercase tracking-[0.18em] sm:tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
+                            className={`min-w-0 flex-1 truncate rounded-lg px-2 sm:px-3 py-2 text-[7px] sm:text-[8px] font-mono uppercase tracking-[0.18em] sm:tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
                               creativeSubtab === tab.id
                                 ? "border border-cyan-500/30 bg-cyan-500/15 text-cyan-300"
                                 : "border border-transparent text-white/35 hover:bg-white/5 hover:text-white/65"
@@ -1318,87 +1341,103 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-	                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
-	                        <ReshootPanel showRenderControls={false} />
-	                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
-                          <div className="space-y-3">
-                            <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
-                              <p className="text-[9px] font-mono uppercase tracking-[0.24em] text-cyan-100/70">
-                                Stills + Anchors
-                              </p>
-                              <p className="mt-1 text-[9px] leading-relaxed text-white/35">
-                                Select a shot on the left to curate the campaign anchor still, reject starting frames, snapshot a new frame, or replace the hero visual.
-                              </p>
-                            </div>
-	                          <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
-                              <div className="order-2 min-w-0 lg:order-1">
-	                              <ReshootPanel
-	                                onShotSelect={setSelectedAnchorShot}
-	                                activeShotNumber={selectedAnchorShot}
-	                                openDrawerOnSelect={false}
-                                  showRenderControls={false}
-	                              />
-                              </div>
-                              <div className="order-1 min-w-0 lg:order-2">
-		                              {selectedAnchorShot != null ? (
-		                                <AnchorStillPanel
-		                                  productionSlug={currentClient.productionSlug}
-		                                  shotNumber={selectedAnchorShot}
-		                                  campaignId={currentRun?.campaignId}
-		                                />
-	                              ) : (
-	                                <EmptyAnchorState />
-	                              )}
-                              </div>
-	                          </div>
+
+                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
+                        <ReshootPanel showRenderControls={false} />
+                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
+                        <div className="space-y-3">
+                          <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
+                            <p className="text-[9px] font-mono uppercase tracking-[0.24em] text-cyan-100/70">
+                              Stills + Anchors
+                            </p>
+                            <p className="mt-1 text-[9px] leading-relaxed text-white/35">
+                              Select a shot on the left to curate the campaign anchor still, reject starting frames, snapshot a new frame, or replace the hero visual.
+                            </p>
                           </div>
-	                      ) : (
-                        <>
-                          {isFeaturedClient && !currentRun?.campaignId ? (
-                            <div className="flex flex-col items-center justify-center py-8">
-                              <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
-                              <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
-                                Loading Drift MV run
-                              </span>
-                            </div>
-                          ) : !currentRun?.campaignId ? (
-                            <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
-                          ) : (
-                            <>
-                              {isFeaturedClient && (
-                                <AuditTriageTable
-                                  key={`audit:${activeClient}:${currentRun.campaignId}`}
-                                  clientId={currentClient.id}
-                                  campaignId={currentRun.campaignId}
-                                  campaignName={selectedCampaignName}
-                                  onAuditRunStarted={handleAuditRunStarted}
-                                  onAuditRunSettled={handleAuditRunSettled}
-                                  onAuditLog={handleAuditLog}
-                                  onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
-                                    n: shotNumber,
-                                    id: deliverableId,
-                                    runId,
-                                    auditShot,
-                                    initialTab: "critic",
-                                  })}
-                                />
-                              )}
-                              {isFeaturedClient && <DeliverableTimeline />}
-                              <DeliverableTracker
-                                key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
-                                campaignId={currentRun.campaignId}
-                                runId={currentRun.runId}
-                                onShotClick={(n, id, options) => setSelectedShot({
-                                  n,
-                                  id,
-                                  runId: options?.runId,
-                                  initialTab: options?.initialTab,
-                                  pinnedTimelineEventId: options?.pinnedTimelineEventId,
-                                })}
+                          <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+                            <div className="order-2 min-w-0 lg:order-1">
+                              <ReshootPanel
+                                onShotSelect={setSelectedAnchorShot}
+                                activeShotNumber={selectedAnchorShot}
+                                openDrawerOnSelect={false}
+                                showRenderControls={false}
                               />
-                            </>
+                            </div>
+                            <div className="order-1 min-w-0 lg:order-2">
+                              {selectedAnchorShot != null ? (
+                                <AnchorStillPanel
+                                  productionSlug={currentClient.productionSlug}
+                                  shotNumber={selectedAnchorShot}
+                                  campaignId={currentRun?.campaignId}
+                                />
+                              ) : (
+                                <EmptyAnchorState />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : !currentRun?.campaignId ? (
+                        <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
+                      ) : (
+                        <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] xl:items-start">
+                          <DeliverableTracker
+                            key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
+                            campaignId={currentRun.campaignId}
+                            runId={currentRun.runId}
+                            onShotClick={(n, id, options) => setSelectedShot({
+                              n,
+                              id,
+                              runId: options?.runId,
+                              initialTab: options?.initialTab,
+                              pinnedTimelineEventId: options?.pinnedTimelineEventId,
+                            })}
+                          />
+
+                          {isFeaturedClient && (
+                            <aside className="rounded-2xl border border-amber-400/15 bg-black/25 p-3 shadow-[0_0_30px_rgba(245,158,11,0.05)]">
+                              <button
+                                type="button"
+                                onClick={() => setIsAuditPanelOpen((value) => !value)}
+                                aria-expanded={isAuditPanelOpen}
+                                className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-left transition-all hover:border-amber-300/35 hover:bg-amber-300/10 focus:outline-none focus:ring-2 focus:ring-amber-300/40"
+                              >
+                                <span className="min-w-0">
+                                  <span className="block text-[8px] font-mono uppercase tracking-[0.24em] text-amber-100/75">
+                                    Audit triage filters
+                                  </span>
+                                  <span className="mt-1 block text-[8px] font-mono uppercase tracking-[0.16em] text-white/35">
+                                    Collapsible observability panel · Deliverables remain primary
+                                  </span>
+                                </span>
+                                <ChevronDown
+                                  size={14}
+                                  className={`shrink-0 text-white/35 transition-transform ${isAuditPanelOpen ? "" : "-rotate-90"}`}
+                                />
+                              </button>
+
+                              {isAuditPanelOpen && (
+                                <div className="mt-3 max-h-[720px] overflow-auto rounded-2xl border border-white/10 bg-black/20 p-2">
+                                  <AuditTriageTable
+                                    key={`audit:${activeClient}:${currentRun.campaignId}`}
+                                    clientId={currentClient.id}
+                                    campaignId={currentRun.campaignId}
+                                    campaignName={selectedCampaignName}
+                                    onAuditRunStarted={handleAuditRunStarted}
+                                    onAuditRunSettled={handleAuditRunSettled}
+                                    onAuditLog={handleAuditLog}
+                                    onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
+                                      n: shotNumber,
+                                      id: deliverableId,
+                                      runId,
+                                      auditShot,
+                                      initialTab: "critic",
+                                    })}
+                                  />
+                                </div>
+                              )}
+                            </aside>
                           )}
-                        </>
+                        </div>
                       )}
                     </>
                   ) : activePillar === "creative" ? (
