@@ -59,7 +59,10 @@ import {
   getMotionPhaseGateState,
   getDirectionDriftIndicatorsByCampaign,
   getArtifactsForDeliverableWithVerdicts,
+  acceptReviewGateEscalation,
+  commentReviewGateEscalation,
   type CostSummaryBreakdown,
+  type ReviewGateCommentScope,
 } from "./db.js";
 import { finiteNonNegative } from "./cost_ledger.js";
 import { decideEscalation } from "./orchestrator.js";
@@ -1674,6 +1677,168 @@ app.get("/api/escalations/:id", async (req: Request, res: Response) => {
     res.json({ ...escalation, decisions });
   } catch (err) {
     console.error("GET /api/escalations/:id error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/escalations/:id/accept - ADR-006 D4 image-card accept action.
+//
+// Tenant gate mirrors PR #6 signed-url/cost-ledger:
+//   • JWT_AUTH_ENABLED=true  + missing/invalid Authorization → 401
+//   • JWT_AUTH_ENABLED=true  + mismatched client_id          → 403
+//   • JWT_AUTH_ENABLED=false                                 → no enforcement
+app.patch("/api/escalations/:id/accept", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const existing = await getEscalation(id);
+    if (!existing) {
+      res.status(404).json({ error: "Escalation not found" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    const body = req.body as {
+      resolution_notes?: unknown;
+      resolutionNotes?: unknown;
+      accepted_by?: unknown;
+      acceptedBy?: unknown;
+    };
+    const resolutionNotes = body.resolution_notes ?? body.resolutionNotes;
+    if (resolutionNotes !== undefined && typeof resolutionNotes !== "string") {
+      res.status(400).json({ error: "resolution_notes must be a string when provided" });
+      return;
+    }
+    if (typeof resolutionNotes === "string" && resolutionNotes.length > 2000) {
+      res.status(400).json({ error: "resolution_notes must be 2000 characters or less" });
+      return;
+    }
+    const acceptedBy = body.accepted_by ?? body.acceptedBy;
+    if (acceptedBy !== undefined && typeof acceptedBy !== "string") {
+      res.status(400).json({ error: "accepted_by must be a string when provided" });
+      return;
+    }
+
+    const result = await acceptReviewGateEscalation(id, {
+      resolutionNotes: typeof resolutionNotes === "string" ? resolutionNotes : undefined,
+      acceptedBy: typeof acceptedBy === "string" ? acceptedBy : caller?.clientId ?? "review-gate",
+    });
+
+    if (result.escalation.runId) {
+      runEvents.emit(`escalation:${result.escalation.runId}`, result.escalation);
+    }
+
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("already terminal")) {
+      res.status(409).json({ error: message });
+      return;
+    }
+    if (message.includes("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    console.error("PATCH /api/escalations/:id/accept error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/escalations/:id/comment - ADR-006 D4 comment + scope toggle.
+//
+// scope='shot' writes runs.metadata.operator_override.shot_<id>.direction_comment
+// and kicks a targeted stills regen for that shot. scope='campaign' pivots the
+// campaign direction mantra (with prior mantra appended to abandoned_directions)
+// and kicks stills regen for latest below-threshold shots.
+app.patch("/api/escalations/:id/comment", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const existing = await getEscalation(id);
+    if (!existing) {
+      res.status(404).json({ error: "Escalation not found" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    const body = req.body as {
+      text?: unknown;
+      comment?: unknown;
+      scope?: unknown;
+      commented_by?: unknown;
+      commentedBy?: unknown;
+    };
+    const rawText = body.text ?? body.comment;
+    if (typeof rawText !== "string" || rawText.trim().length === 0) {
+      res.status(400).json({ error: "text is required" });
+      return;
+    }
+    if (rawText.length > 2000) {
+      res.status(400).json({ error: "text must be 2000 characters or less" });
+      return;
+    }
+    if (body.scope !== "shot" && body.scope !== "campaign") {
+      res.status(400).json({ error: "scope must be 'shot' or 'campaign'" });
+      return;
+    }
+    const commentedBy = body.commented_by ?? body.commentedBy;
+    if (commentedBy !== undefined && typeof commentedBy !== "string") {
+      res.status(400).json({ error: "commented_by must be a string when provided" });
+      return;
+    }
+
+    const result = await commentReviewGateEscalation(id, {
+      text: rawText,
+      scope: body.scope as ReviewGateCommentScope,
+      commentedBy: typeof commentedBy === "string" ? commentedBy : caller?.clientId ?? "review-gate",
+    });
+
+    const eventName = result.regenRun ? `regen-from-comment:${result.regenRun.runId}` : null;
+    if (eventName && result.regenPayload) {
+      runEvents.emit(eventName, result.regenPayload);
+    }
+    if (result.regenRun && process.env.REVIEW_GATE_COMMENT_REGEN_EXECUTION !== "false") {
+      setImmediate(() => executeRun(result.regenRun as Run).catch((err) => {
+        console.error(`Review Gate comment regen ${result.regenRun?.runId} failed:`, err);
+      }));
+    }
+
+    res.json({
+      ...result,
+      newRunId: result.regenRun?.runId ?? null,
+      eventName,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("text is required") || message.includes("scope") || message.includes("require")) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    if (message.includes("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    console.error("PATCH /api/escalations/:id/comment error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

@@ -2169,6 +2169,41 @@ export interface ResolveEscalationResponse {
   runHitlCleared: boolean;
 }
 
+export interface AcceptReviewGateEscalationResponse extends ResolveEscalationResponse {
+  shotNumber: number | null;
+  operatorOverride: Record<string, unknown> | null;
+}
+
+export type ReviewGateCommentScope = "shot" | "campaign";
+
+export interface ReviewGateCommentResponse {
+  escalation: AssetEscalation;
+  sourceRun: Run;
+  regenRun: Run | null;
+  newRunId: string | null;
+  eventName: string | null;
+  scope: ReviewGateCommentScope;
+  targetShotIds: number[];
+  targetDeliverableIds: string[];
+  regenPayload: {
+    sourceRunId: string | null;
+    regenRunId: string;
+    escalationId: string;
+    clientId: string;
+    campaignId: string;
+    scope: ReviewGateCommentScope;
+    comment: string;
+    targetShotIds: number[];
+    targetDeliverableIds: string[];
+    submittedAt: string;
+  } | null;
+  campaignDirection?: {
+    previousMantra?: string;
+    currentMantra: string;
+    abandonedCount: number;
+  };
+}
+
 export async function resolveEscalationAccept(
   escalationId: string,
   resolutionNotes: string,
@@ -2185,6 +2220,36 @@ export async function resolveEscalationAccept(
 
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ResolveEscalationResponse;
+}
+
+export async function acceptReviewGateEscalation(
+  escalationId: string,
+  resolutionNotes?: string,
+): Promise<AcceptReviewGateEscalationResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/accept`, {
+    method: "PATCH",
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(resolutionNotes ? { resolution_notes: resolutionNotes } : {}),
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as AcceptReviewGateEscalationResponse;
+}
+
+export async function commentReviewGateEscalation(
+  escalationId: string,
+  payload: { text: string; scope: ReviewGateCommentScope },
+): Promise<ReviewGateCommentResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/comment`, {
+    method: "PATCH",
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ReviewGateCommentResponse;
 }
 
 export function subscribeToAssetEscalations(

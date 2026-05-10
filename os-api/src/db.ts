@@ -1,6 +1,7 @@
 import { supabase } from "./supabase.js";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import type {
   Run, RunLog, Artifact, Client, HitlDecision, DriftMetric, DriftAlert,
   BrandBaseline, PromptTemplate, PromptScore, RunStatus, RunStage,
@@ -16,7 +17,7 @@ import type {
   ArtifactIterationRow, ArtifactIterationsResponse, ArtifactIterationOperatorOverride,
   ArtifactIterationVerdict,
 } from "./types.js";
-import { VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
+import { STAGE_DEFINITIONS, VALID_DELIVERABLE_TRANSITIONS } from "./types.js";
 import { finiteNonNegative, recordCost, type CostEvent } from "./cost_ledger.js";
 
 // ============ Database Row Types (snake_case, matching Supabase schema) ============
@@ -3045,6 +3046,417 @@ export async function getRecentRejectionLearnings(
   }
 
   return rows.map((row) => mapRejectionLearningEvent(row, categoryLabels));
+}
+
+// ── ADR-006 D4 Review Gate card actions ───────────────────────────────────
+
+export type ReviewGateCommentScope = "shot" | "campaign";
+
+export interface ReviewGateRegenPayload {
+  sourceRunId: string | null;
+  regenRunId: string;
+  escalationId: string;
+  clientId: string;
+  campaignId: string;
+  scope: ReviewGateCommentScope;
+  comment: string;
+  targetShotIds: number[];
+  targetDeliverableIds: string[];
+  submittedAt: string;
+}
+
+export interface ReviewGateAcceptResult {
+  escalation: AssetEscalation;
+  runHitlCleared: boolean;
+  shotNumber: number | null;
+  operatorOverride: Record<string, unknown> | null;
+}
+
+export interface ReviewGateCommentResult {
+  escalation: AssetEscalation;
+  sourceRun: Run;
+  regenRun: Run | null;
+  scope: ReviewGateCommentScope;
+  targetShotIds: number[];
+  targetDeliverableIds: string[];
+  regenPayload: ReviewGateRegenPayload | null;
+  campaignDirection?: {
+    previousMantra?: string;
+    currentMantra: string;
+    abandonedCount: number;
+  };
+}
+
+interface ReviewGateContext {
+  escalation: AssetEscalation;
+  artifact: Artifact | null;
+  run: Run;
+  deliverable: CampaignDeliverable | null;
+  campaign: Campaign;
+  shotNumber: number | null;
+}
+
+const REVIEW_GATE_OPEN_STATUSES = new Set<EscalationStatus>(["hitl_required", "in_progress"]);
+const DEFAULT_REVIEW_GATE_ACCEPT_NOTES =
+  "Accepted in Review Gate — operator visual review approved the current asset; clearing escalation for downstream use.";
+
+function cloneRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function normalizeReviewGateComment(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function slugPreview(value: string, fallback: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function passThresholdFromCampaign(campaign: Campaign): number {
+  const guardrails = isRecord(campaign.guardrails) ? campaign.guardrails : {};
+  const threshold = isRecord(guardrails.qa_threshold) ? guardrails.qa_threshold : null;
+  return readNumber(threshold?.pass_threshold) ?? 3.0;
+}
+
+function latestCriticIsBelowThreshold(iterations: ArtifactIterationsResponse, threshold: number): boolean {
+  const latest = [...iterations.rows]
+    .reverse()
+    .find((row) => row.verdict?.score != null || row.verdict?.verdict != null);
+  if (!latest?.verdict) return false;
+  if (latest.verdict.score != null) return latest.verdict.score < threshold;
+  return latest.verdict.verdict === "FAIL" || latest.verdict.verdict === "WARN";
+}
+
+async function getReviewGateContext(escalationId: string): Promise<ReviewGateContext> {
+  const escalation = await getEscalation(escalationId);
+  if (!escalation) throw new Error(`Escalation ${escalationId} not found`);
+  if (!escalation.runId) throw new Error(`Escalation ${escalationId} is missing run_id`);
+
+  const run = await getRun(escalation.runId);
+  if (!run) throw new Error(`Run ${escalation.runId} not found for escalation ${escalationId}`);
+
+  const [artifact, deliverable] = await Promise.all([
+    getArtifactById(escalation.artifactId),
+    escalation.deliverableId ? getDeliverable(escalation.deliverableId) : Promise.resolve(null),
+  ]);
+
+  const campaignId = run.campaignId ?? deliverable?.campaignId ?? artifact?.campaignId;
+  if (!campaignId) throw new Error(`Escalation ${escalationId} is missing campaign context`);
+  const campaign = await getCampaign(campaignId);
+  if (!campaign) throw new Error(`Campaign ${campaignId} not found for escalation ${escalationId}`);
+
+  const shotNumber = deliverable ? deriveDeliverableShotNumber(deliverable, 0) : null;
+  return { escalation, artifact, run, deliverable, campaign, shotNumber };
+}
+
+async function updateCampaignGuardrails(campaignId: string, guardrails: Record<string, unknown>): Promise<Campaign> {
+  const { data, error } = await supabase
+    .from("campaigns")
+    .update({ guardrails })
+    .eq("id", campaignId)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to update campaign guardrails: ${error.message}`);
+  return mapDbCampaignToCampaign(data as DbCampaign);
+}
+
+async function writeRunMetadata(runId: string, metadata: Record<string, unknown>): Promise<Run> {
+  const updated = await updateRun(runId, { metadata });
+  if (!updated) throw new Error(`Run ${runId} not found while writing metadata`);
+  return updated;
+}
+
+async function clearRunHitlIfNoOpenEscalations(runId: string, updatedEscalationId: string): Promise<boolean> {
+  const runEscalations = await listEscalationsByRun(runId);
+  const hasOtherOpenEscalations = runEscalations.some(
+    (item) => item.id !== updatedEscalationId && REVIEW_GATE_OPEN_STATUSES.has(item.status),
+  );
+  if (hasOtherOpenEscalations) return false;
+  const run = await getRun(runId);
+  if (!run?.hitlRequired) return false;
+  await updateRun(runId, { hitlRequired: false });
+  return true;
+}
+
+function buildStillsRegenRun(params: {
+  clientId: string;
+  campaignId: string;
+  parentRunId: string;
+  targetShotIds: number[];
+  targetDeliverableIds: string[];
+  comment: string;
+  scope: ReviewGateCommentScope;
+  escalationId: string;
+  submittedAt: string;
+}): Run {
+  const stages = STAGE_DEFINITIONS.stills.map((stage) => ({
+    ...stage,
+    status: "pending" as const,
+  }));
+
+  return {
+    runId: randomUUID(),
+    clientId: params.clientId,
+    campaignId: params.campaignId,
+    mode: "stills",
+    status: "pending",
+    stages,
+    createdAt: params.submittedAt,
+    updatedAt: params.submittedAt,
+    metadata: {
+      audit_mode: false,
+      shot_ids: params.targetShotIds,
+      deliverable_ids: params.targetDeliverableIds,
+      parentRunId: params.parentRunId,
+      inputs: {
+        review_gate_comment: {
+          escalation_id: params.escalationId,
+          scope: params.scope,
+          text: params.comment,
+          submitted_at: params.submittedAt,
+        },
+      },
+    },
+  };
+}
+
+export async function acceptReviewGateEscalation(
+  escalationId: string,
+  params: {
+    resolutionNotes?: string;
+    acceptedBy?: string;
+  } = {},
+): Promise<ReviewGateAcceptResult> {
+  const ctx = await getReviewGateContext(escalationId);
+  if (!REVIEW_GATE_OPEN_STATUSES.has(ctx.escalation.status)) {
+    if (ctx.escalation.status === "resolved" && ctx.escalation.resolutionPath === "accept") {
+      return {
+        escalation: ctx.escalation,
+        runHitlCleared: false,
+        shotNumber: ctx.shotNumber,
+        operatorOverride: null,
+      };
+    }
+    throw new Error(`Escalation is already terminal (${ctx.escalation.status})`);
+  }
+
+  const acceptedAt = new Date().toISOString();
+  const notes = normalizeReviewGateComment(params.resolutionNotes ?? DEFAULT_REVIEW_GATE_ACCEPT_NOTES);
+  const metadata = cloneRecord(ctx.run.metadata);
+  const operatorOverride = cloneRecord(metadata.operator_override);
+  let overridePayload: Record<string, unknown> | null = null;
+
+  if (ctx.shotNumber !== null) {
+    const shotKey = `shot_${ctx.shotNumber}`;
+    const existingShotOverride = cloneRecord(operatorOverride[shotKey]);
+    const artifactIter = ctx.artifact ? parseArtifactIteration(ctx.artifact) : null;
+    let latestScore: number | null = null;
+    let latestVerdict: string | null = null;
+    if (ctx.deliverable) {
+      try {
+        const iterations = await getArtifactsForDeliverableWithVerdicts(ctx.deliverable.id);
+        const latest = [...iterations.rows].reverse().find((row) => row.artifact.id === ctx.escalation.artifactId)
+          ?? [...iterations.rows].reverse().find((row) => row.verdict?.score != null || row.verdict?.verdict != null);
+        latestScore = latest?.verdict?.score ?? null;
+        latestVerdict = latest?.verdict?.verdict ?? null;
+      } catch {
+        // Non-fatal: accept still records the operator override; critic fields stay null.
+      }
+    }
+
+    overridePayload = {
+      ...existingShotOverride,
+      decision_at: acceptedAt,
+      decision_by: params.acceptedBy ?? "review-gate",
+      decided_artifact_path: ctx.artifact?.path ?? null,
+      decided_iter: artifactIter,
+      critic_verdict: latestVerdict,
+      critic_score: latestScore,
+      rationale: notes,
+      locked_to: ctx.artifact?.path ?? null,
+      action: "accept",
+      accepted_artifact_id: ctx.escalation.artifactId,
+      accepted_escalation_id: escalationId,
+    };
+    operatorOverride[shotKey] = overridePayload;
+    metadata.operator_override = operatorOverride;
+    await writeRunMetadata(ctx.run.runId, metadata);
+  }
+
+  const updated = await updateEscalation(escalationId, {
+    status: "resolved",
+    resolutionPath: "accept",
+    resolutionNotes: notes,
+    finalArtifactId: ctx.escalation.artifactId,
+    resolvedAt: acceptedAt,
+  });
+
+  const runHitlCleared = await clearRunHitlIfNoOpenEscalations(ctx.run.runId, updated.id);
+  return {
+    escalation: updated,
+    runHitlCleared,
+    shotNumber: ctx.shotNumber,
+    operatorOverride: overridePayload,
+  };
+}
+
+export async function commentReviewGateEscalation(
+  escalationId: string,
+  params: {
+    text: string;
+    scope: ReviewGateCommentScope;
+    commentedBy?: string;
+  },
+): Promise<ReviewGateCommentResult> {
+  const text = normalizeReviewGateComment(params.text);
+  if (!text) throw new Error("Comment text is required");
+  if (params.scope !== "shot" && params.scope !== "campaign") {
+    throw new Error("Comment scope must be 'shot' or 'campaign'");
+  }
+
+  const ctx = await getReviewGateContext(escalationId);
+  const submittedAt = new Date().toISOString();
+  const metadata = cloneRecord(ctx.run.metadata);
+  const operatorOverride = cloneRecord(metadata.operator_override);
+  const campaignId = ctx.campaign.id;
+  const clientId = ctx.run.clientId;
+
+  let targetShotIds: number[] = [];
+  let targetDeliverableIds: string[] = [];
+  let campaignDirection: ReviewGateCommentResult["campaignDirection"];
+
+  if (params.scope === "shot") {
+    if (ctx.shotNumber === null || !ctx.deliverable) {
+      throw new Error("Shot-scoped comments require a mapped deliverable shot");
+    }
+    const shotKey = `shot_${ctx.shotNumber}`;
+    const existingShotOverride = cloneRecord(operatorOverride[shotKey]);
+    operatorOverride[shotKey] = {
+      ...existingShotOverride,
+      direction_comment: text,
+      direction_comment_meta: {
+        scope: "shot",
+        escalation_id: escalationId,
+        submitted_at: submittedAt,
+        submitted_by: params.commentedBy ?? "review-gate",
+      },
+    };
+    targetShotIds = [ctx.shotNumber];
+    targetDeliverableIds = [ctx.deliverable.id];
+  } else {
+    const guardrails = cloneRecord(ctx.campaign.guardrails);
+    const musicVideoContext = cloneRecord(guardrails.music_video_context);
+    const directionalHistory = cloneRecord(guardrails.directional_history);
+    const previousMantra =
+      readString(musicVideoContext.direction_mantra) ??
+      readString(directionalHistory.current_direction_mantra);
+    const existingAbandonedRaw =
+      Array.isArray(musicVideoContext.abandoned_directions)
+        ? musicVideoContext.abandoned_directions
+        : Array.isArray(directionalHistory.abandoned_directions)
+          ? directionalHistory.abandoned_directions
+          : [];
+    const abandoned = existingAbandonedRaw.filter(isRecord).map((entry) => ({ ...entry }));
+
+    if (previousMantra && previousMantra !== text) {
+      abandoned.push({
+        name: slugPreview(previousMantra, "prior_campaign_direction"),
+        rejected_at: submittedAt.slice(0, 10),
+        reason: `Superseded by Review Gate campaign-wide direction comment: ${text}`,
+        snapshot_ref: `review_gate_comment:${escalationId}`,
+      });
+    }
+
+    musicVideoContext.direction_mantra = text;
+    musicVideoContext.abandoned_directions = abandoned;
+    directionalHistory.current_direction_mantra = text;
+    directionalHistory.abandoned_directions = abandoned;
+    guardrails.music_video_context = musicVideoContext;
+    guardrails.directional_history = directionalHistory;
+    await updateCampaignGuardrails(campaignId, guardrails);
+
+    const campaignOverride = cloneRecord(operatorOverride.campaign);
+    campaignOverride.direction_pivot = {
+      text,
+      previous_direction_mantra: previousMantra ?? null,
+      next_direction_mantra: text,
+      escalation_id: escalationId,
+      submitted_at: submittedAt,
+      submitted_by: params.commentedBy ?? "review-gate",
+    };
+    operatorOverride.campaign = campaignOverride;
+    campaignDirection = {
+      previousMantra,
+      currentMantra: text,
+      abandonedCount: abandoned.length,
+    };
+
+    const threshold = passThresholdFromCampaign(ctx.campaign);
+    const deliverables = await getDeliverablesByCampaign(campaignId);
+    for (const deliverable of deliverables) {
+      try {
+        const iterations = await getArtifactsForDeliverableWithVerdicts(deliverable.id);
+        if (!latestCriticIsBelowThreshold(iterations, threshold)) continue;
+        const shot = iterations.shotNumber ?? deriveDeliverableShotNumber(deliverable, targetShotIds.length);
+        if (!targetShotIds.includes(shot)) targetShotIds.push(shot);
+        targetDeliverableIds.push(deliverable.id);
+      } catch {
+        // Non-fatal: skip deliverables whose iteration history cannot be aggregated.
+      }
+    }
+  }
+
+  metadata.operator_override = operatorOverride;
+  const sourceRun = await writeRunMetadata(ctx.run.runId, metadata);
+
+  let regenRun: Run | null = null;
+  let regenPayload: ReviewGateRegenPayload | null = null;
+  const dedupedTargetDeliverableIds = [...new Set(targetDeliverableIds)];
+  targetShotIds = [...new Set(targetShotIds)].sort((left, right) => left - right);
+
+  if (targetShotIds.length > 0) {
+    const runToCreate = buildStillsRegenRun({
+      clientId,
+      campaignId,
+      parentRunId: ctx.run.runId,
+      targetShotIds,
+      targetDeliverableIds: dedupedTargetDeliverableIds,
+      comment: text,
+      scope: params.scope,
+      escalationId,
+      submittedAt,
+    });
+    regenRun = await createRun(runToCreate);
+    regenPayload = {
+      sourceRunId: ctx.run.runId,
+      regenRunId: regenRun.runId,
+      escalationId,
+      clientId,
+      campaignId,
+      scope: params.scope,
+      comment: text,
+      targetShotIds,
+      targetDeliverableIds: dedupedTargetDeliverableIds,
+      submittedAt,
+    };
+  }
+
+  return {
+    escalation: ctx.escalation,
+    sourceRun,
+    regenRun,
+    scope: params.scope,
+    targetShotIds,
+    targetDeliverableIds: dedupedTargetDeliverableIds,
+    regenPayload,
+    campaignDirection,
+  };
 }
 
 // ── asset_escalations CRUD ─────────────────────────────────────────────────
