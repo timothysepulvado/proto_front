@@ -1437,27 +1437,12 @@ export default function App() {
                       <Radar size={16} className="text-cyan-400 animate-pulse" />
                     </div>
 
-                    <div className="flex justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
+                    <div className="flex flex-1 items-center justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
                       <CircularTelemetry
                         percent={currentClient.health}
                         label="Sync"
                         color={currentClient.health < 50 ? "amber" : "cyan"}
                       />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2.5 mt-3">
-                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Agents</span>
-                        <span className="text-2xl font-bold font-mono tracking-tighter">
-                          {currentClient.runsLabel}
-                        </span>
-                      </div>
-                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Health</span>
-                        <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">
-                          Normal
-                        </span>
-                      </div>
                     </div>
                     <OverlayEffects className="rounded-[2rem]" />
                   </div>
