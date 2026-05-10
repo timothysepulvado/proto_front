@@ -367,6 +367,25 @@ export interface OrchestrationDecisionRecord {
   createdAt: string;
 }
 
+export type RejectionLearningBlockMode = "soft" | "terminal";
+
+export interface RejectionLearningEvent {
+  id: string;
+  clientId: string;
+  campaignId?: string;
+  shotId?: number;
+  assetId?: string;
+  categoryId?: string;
+  /** Derived label from rejection_categories when available; falls back to categoryId. */
+  categoryLabel?: string;
+  whatWrong: string;
+  correction: string;
+  refImagePath?: string;
+  blockMode: RejectionLearningBlockMode;
+  createdAt: string;
+  createdBy: string;
+}
+
 // ─── Video Grade (mirrors brand-engine VideoGradeResult) ─────────────────
 export interface VideoGradeCriterion {
   name: string;
@@ -694,6 +713,13 @@ export interface OrchestratorInput {
    * prefix gets the music-video context appended once per campaign.
    */
   musicVideoContext?: MusicVideoContext;
+  /**
+   * ADR-006 D4 Schema D4-1: append-only operator rejection learnings captured
+   * by Reject-as-Teach. Rendered as a dynamic axiom suffix after the
+   * cache-warm campaign/direction prefix so the orchestrator avoids repeating
+   * operator-rejected mistakes without invalidating the stable prefix.
+   */
+  recentLearnings?: RejectionLearningEvent[];
   // Note: `qa_threshold` (campaign.guardrails.qa_threshold) is READ by
   // escalation_loop.ts::_maybeBorderlineAccept to short-circuit borderline
   // non-blocking scores BEFORE the orchestrator is called. It is NOT passed

@@ -8,6 +8,7 @@ import type {
   KnownLimitation, KnownLimitationSeverity,
   AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
   OrchestrationDecisionRecord, PromptHistoryEntry,
+  RejectionLearningEvent,
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
   MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
   DirectionDriftIndicator, DirectionDriftVerdictSource,
@@ -2830,6 +2831,21 @@ interface DbOrchestrationDecision {
   created_at: string;
 }
 
+interface DbRejectionLearningEvent {
+  id: string;
+  client_id: string;
+  campaign_id: string | null;
+  shot_id: number | null;
+  asset_id: string | null;
+  category_id: string | null;
+  what_wrong: string;
+  correction: string;
+  ref_image_path: string | null;
+  block_mode: string;
+  created_at: string;
+  created_by: string;
+}
+
 // ── Mappers ────────────────────────────────────────────────────────────────
 function mapKnownLimitation(d: DbKnownLimitation): KnownLimitation {
   return {
@@ -2885,6 +2901,28 @@ function mapOrchestrationDecision(d: DbOrchestrationDecision): OrchestrationDeci
     cost: d.cost ?? undefined,
     latencyMs: d.latency_ms ?? undefined,
     createdAt: d.created_at,
+  };
+}
+
+function mapRejectionLearningEvent(
+  d: DbRejectionLearningEvent,
+  categoryLabels: Map<string, string> = new Map(),
+): RejectionLearningEvent {
+  const categoryLabel = d.category_id ? categoryLabels.get(d.category_id) : undefined;
+  return {
+    id: d.id,
+    clientId: d.client_id,
+    campaignId: d.campaign_id ?? undefined,
+    shotId: d.shot_id ?? undefined,
+    assetId: d.asset_id ?? undefined,
+    categoryId: d.category_id ?? undefined,
+    categoryLabel,
+    whatWrong: d.what_wrong,
+    correction: d.correction,
+    refImagePath: d.ref_image_path ?? undefined,
+    blockMode: d.block_mode === "terminal" ? "terminal" : "soft",
+    createdAt: d.created_at,
+    createdBy: d.created_by,
   };
 }
 
@@ -2975,6 +3013,38 @@ export async function incrementLimitationCounter(id: string): Promise<void> {
     })
     .eq("id", id);
   if (error) throw new Error(`Failed to increment limitation counter: ${error.message}`);
+}
+
+export async function getRecentRejectionLearnings(
+  clientId: string,
+  campaignId: string,
+  limit = 10,
+): Promise<RejectionLearningEvent[]> {
+  const cappedLimit = Math.max(1, Math.min(Math.floor(limit), 50));
+  const { data, error } = await supabase
+    .from("rejection_learning_events")
+    .select("*")
+    .eq("client_id", clientId)
+    .eq("campaign_id", campaignId)
+    .order("created_at", { ascending: false })
+    .limit(cappedLimit);
+  if (error) throw new Error(`Failed to get rejection learnings: ${error.message}`);
+
+  const rows = (data ?? []) as DbRejectionLearningEvent[];
+  const categoryIds = [...new Set(rows.map((row) => row.category_id).filter((id): id is string => Boolean(id)))];
+  const categoryLabels = new Map<string, string>();
+  if (categoryIds.length > 0) {
+    const { data: categories, error: categoryError } = await supabase
+      .from("rejection_categories")
+      .select("id, label")
+      .in("id", categoryIds);
+    if (categoryError) throw new Error(`Failed to get rejection learning categories: ${categoryError.message}`);
+    for (const category of (categories ?? []) as Array<{ id: string; label: string | null }>) {
+      if (category.label) categoryLabels.set(category.id, category.label);
+    }
+  }
+
+  return rows.map((row) => mapRejectionLearningEvent(row, categoryLabels));
 }
 
 // ── asset_escalations CRUD ─────────────────────────────────────────────────

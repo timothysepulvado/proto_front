@@ -65,7 +65,7 @@ export async function decideEscalation(
   // Chunk 1: for music-video campaigns, append the cache-stable shot list to
   // the SYSTEM prompt so continuity + narrative context prefix every per-shot
   // call. Non-MV campaigns fall through to the default (preamble + core).
-  const systemCached = buildSystemPrompt(input.musicVideoContext);
+  const systemCached = buildSystemPrompt(input.musicVideoContext, input.recentLearnings);
 
   const rawResponse = await callClaude({
     systemCached,

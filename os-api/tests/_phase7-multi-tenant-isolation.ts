@@ -5,8 +5,11 @@
 // 1. JWT-scoped session for client A reads ONLY client A's rows across per-client tables
 // 2. JWT-scoped session for client B reads ONLY client B's rows
 // 3. Service-role key bypasses RLS and sees both test tenants
-// 4. Anon key without JWT returns 0 rows or RLS-deny on per-client tables
-// 5. Global tables are readable by both JWT-scoped sessions
+// 4. rejection_learning_events: cross-tenant read returns 0 rows
+// 5. rejection_learning_events: UPDATE affects 0 rows (append-only)
+// 6. rejection_learning_events: DELETE affects 0 rows (append-only)
+// 7. Anon key without JWT returns 0 rows or RLS-deny on per-client tables
+// 8. Global tables are readable by both JWT-scoped sessions
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient as createAnonClient } from "@supabase/supabase-js";
@@ -36,6 +39,7 @@ const PER_CLIENT_TABLES = [
   "hitl_decisions",
   "asset_escalations",
   "orchestration_decisions",
+  "rejection_learning_events",
 ] as const;
 
 const GLOBAL_TABLES = ["rejection_categories", "known_limitations"] as const;
@@ -53,6 +57,7 @@ type SeededClientRows = {
   deliverableId: string;
   artifactId: string;
   escalationId: string;
+  rejectionLearningEventId: string;
 };
 
 function requireEnv(name: string): string {
@@ -220,12 +225,32 @@ async function seedClient(clientId: string): Promise<SeededClientRows> {
     `[seed ${clientId}] orchestration_decisions insert`,
   );
 
+  // 10. rejection_learning_events (ADR-006 D4 Schema D4-1)
+  const rejectionLearningEvent = await expectNoError(
+    await serviceClient
+      .from("rejection_learning_events")
+      .insert({
+        client_id: clientId,
+        campaign_id: campaign.id,
+        shot_id: 1,
+        asset_id: artifact.id,
+        what_wrong: "phase7 cross-tenant fixture",
+        correction: "keep tenant-specific rejection learning isolated",
+        block_mode: "soft",
+        created_by: "phase7-harness",
+      })
+      .select("id")
+      .single(),
+    `[seed ${clientId}] rejection_learning_events insert`,
+  ) as { id: string };
+
   return {
     campaignId: campaign.id,
     runId: run.id,
     deliverableId: deliverable.id,
     artifactId: artifact.id,
     escalationId: escalation.id,
+    rejectionLearningEventId: rejectionLearningEvent.id,
   };
 }
 
@@ -350,6 +375,76 @@ async function assertInsertHelpersValidateTenantFks(rowsA: SeededClientRows, row
   console.log("✓ INSERT helpers validate every tenant-bearing FK before write");
 }
 
+async function assertRejectionLearningEventsRls(
+  authedA: SupabaseClient,
+  authedB: SupabaseClient,
+  rowsA: SeededClientRows,
+): Promise<void> {
+  const inserted = await expectNoError(
+    await authedA
+      .from("rejection_learning_events")
+      .insert({
+        client_id: CLIENT_A_ID,
+        campaign_id: rowsA.campaignId,
+        shot_id: 42,
+        asset_id: rowsA.artifactId,
+        what_wrong: "JWT-A fixture should not leak to JWT-B",
+        correction: "JWT-B must see zero rows for this learning event",
+        block_mode: "soft",
+        created_by: "phase7-harness-jwt-a",
+      })
+      .select("id, client_id")
+      .single(),
+    "[rlearn] JWT-A insert",
+  ) as { id: string; client_id: string };
+  if (inserted.client_id !== CLIENT_A_ID) {
+    throw new Error(`[rlearn] JWT-A insert returned client_id=${inserted.client_id}`);
+  }
+
+  const { data: crossTenantRows, error: crossTenantError } = await authedB
+    .from("rejection_learning_events")
+    .select("id, client_id")
+    .eq("id", inserted.id);
+  if (crossTenantError) throw new Error(`[rlearn] JWT-B cross-tenant read failed: ${crossTenantError.message}`);
+  if ((crossTenantRows ?? []).length !== 0) {
+    throw new Error(`[rlearn] JWT-B saw ${crossTenantRows!.length} JWT-A rejection learning row(s)`);
+  }
+
+  const { data: updateRows, error: updateError } = await authedA
+    .from("rejection_learning_events")
+    .update({ correction: "MUTATED — append-only regression" })
+    .eq("id", inserted.id)
+    .select("id, correction");
+  if (updateError) throw new Error(`[rlearn] append-only UPDATE errored instead of affecting 0 rows: ${updateError.message}`);
+  if ((updateRows ?? []).length !== 0) {
+    throw new Error(`[rlearn] append-only UPDATE affected ${updateRows!.length} row(s)`);
+  }
+
+  const { data: deleteRows, error: deleteError } = await authedA
+    .from("rejection_learning_events")
+    .delete()
+    .eq("id", inserted.id)
+    .select("id");
+  if (deleteError) throw new Error(`[rlearn] append-only DELETE errored instead of affecting 0 rows: ${deleteError.message}`);
+  if ((deleteRows ?? []).length !== 0) {
+    throw new Error(`[rlearn] append-only DELETE affected ${deleteRows!.length} row(s)`);
+  }
+
+  const stillThere = await expectNoError(
+    await serviceClient
+      .from("rejection_learning_events")
+      .select("id, correction")
+      .eq("id", inserted.id)
+      .single(),
+    "[rlearn] service-role verify append-only row survived",
+  ) as { id: string; correction: string };
+  if (stillThere.correction !== "JWT-B must see zero rows for this learning event") {
+    throw new Error(`[rlearn] append-only UPDATE mutated correction to ${JSON.stringify(stillThere.correction)}`);
+  }
+
+  console.log("✓ rejection_learning_events RLS: cross-tenant read blocked + UPDATE/DELETE append-only");
+}
+
 async function assertAnonBlocked(client: SupabaseClient): Promise<void> {
   for (const tbl of PER_CLIENT_TABLES) {
     const { data, error } = await client.from(tbl).select("id, client_id");
@@ -392,6 +487,7 @@ async function assertGlobalReadable(client: SupabaseClient, label: string): Prom
 
 async function cleanupClient(clientId: string): Promise<void> {
   const deletes: Array<[PerClientTable | "clients", PromiseLike<{ error: { message: string } | null }>]> = [
+    ["rejection_learning_events", serviceClient.from("rejection_learning_events").delete().eq("client_id", clientId)],
     ["orchestration_decisions", serviceClient.from("orchestration_decisions").delete().eq("client_id", clientId)],
     ["asset_escalations", serviceClient.from("asset_escalations").delete().eq("client_id", clientId)],
     ["hitl_decisions", serviceClient.from("hitl_decisions").delete().eq("client_id", clientId)],
@@ -436,13 +532,14 @@ async function main(): Promise<void> {
     await assertOnlyClient(authedA, CLIENT_A_ID, "JWT-A");
     await assertOnlyClient(authedB, CLIENT_B_ID, "JWT-B");
     await assertSeesBoth(serviceClient);
+    await assertRejectionLearningEventsRls(authedA, authedB, seededA);
     await assertTenantMismatchValidation(seededA);
     await assertInsertHelpersValidateTenantFks(seededA, seededB);
     await assertAnonBlocked(anon);
     await assertGlobalReadable(authedA, "JWT-A-global");
     await assertGlobalReadable(authedB, "JWT-B-global");
 
-    console.log("\n✓✓✓ ALL 5 ASSERTIONS PASS — multi-tenant RLS verified");
+    console.log("\n✓✓✓ ALL 8 ASSERTIONS PASS — multi-tenant RLS verified");
   } catch (error) {
     console.error(`\n✗ FAIL: ${describeError(error)}`);
     process.exitCode = 1;
