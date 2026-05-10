@@ -37,6 +37,7 @@ import ActiveClientBadge from "./components/ActiveClientBadge";
 import CampaignDashboard from "./components/CampaignDashboard";
 import AuditTriageTable from "./components/AuditTriageTable";
 import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
+import PillarPlaceholder from "./components/PillarPlaceholder";
 import type { AuditReportShot } from "./lib/auditReport";
 import { applyClientJwt, isJwtAuthEnabled, subscribeToClientAuthEvents } from "./lib/clientAuth";
 import {
@@ -570,6 +571,7 @@ export default function App() {
     { id: "creative" as const, label: "Creative Studio", description: "Generate images and video" },
     { id: "drift" as const, label: "Brand Drift", description: "Brand compliance scoring and drift metrics" },
     { id: "review" as const, label: "Review Gate", description: "Human-in-the-loop review and approval" },
+    { id: "insight" as const, label: "Insight Loop", description: "External performance intelligence and engagement feedback" },
   ];
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
@@ -1192,7 +1194,7 @@ export default function App() {
 
                 <ActiveClientBadge client={currentClient} />
 
-                {/* Four Pillars Tabs */}
+                {/* Five Pillars Tabs */}
                 <div className="flex space-x-1 bg-black/20 p-1 rounded-xl border border-white/5">
                   {pillars.map((pillar) => (
 	                    <button
@@ -1215,8 +1217,13 @@ export default function App() {
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
 
-                  {/* Review Gate: show escalation-level HITL plus legacy run queue */}
-                  {activePillar === "review" ? (
+                  {activePillar === "memory" ? (
+                    <PillarPlaceholder
+                      title="Brand Memory — coming in Phase 8"
+                      body="Ingest, index, and retrieve brand assets will get a dedicated command surface in Phase 8. For now, this pillar stays visible so the HUD accounts for the full operating model without pretending the workflow is already built."
+                      accent="cyan"
+                    />
+                  ) : activePillar === "review" ? (
                     <div className="space-y-3">
                       <ReviewGateEscalationSurface
                         clientId={activeClient}
@@ -1408,14 +1415,11 @@ export default function App() {
                       Select a BrandStudios workspace to view drift alerts
                     </p>
                   ) : activePillar === "insight" ? (
-                    <div className="mt-3 rounded-2xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 px-4 py-5">
-                      <p className="text-[10px] font-mono uppercase tracking-[0.24em] text-orange-200/80">
-                        Insight Loop coming soon
-                      </p>
-                      <p className="mt-2 text-[9px] leading-relaxed text-white/35">
-                        External asset performance and engagement tracking will appear here once Phase 8 starts.
-                      </p>
-                    </div>
+                    <PillarPlaceholder
+                      title="Insight Loop — coming in Phase 8"
+                      body="External asset performance, audience response, and in-the-wild creative intelligence will land here in Phase 8. The placeholder keeps the fifth pillar accountable while data integration remains intentionally out of scope for Phase 4.A."
+                      accent="orange"
+                    />
                   ) : (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
                       Select a pillar to continue
