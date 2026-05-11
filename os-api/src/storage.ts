@@ -158,3 +158,62 @@ export async function createArtifactSignedUrl(
     return null;
   }
 }
+
+function decodePngDataUrl(value: string): Buffer {
+  const trimmed = value.trim();
+  const dataUrlMatch = /^data:(image\/png);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(trimmed);
+  const rawBase64 = dataUrlMatch ? dataUrlMatch[2] : trimmed;
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(rawBase64)) {
+    throw new Error("ref_image_data must be PNG base64 or a data:image/png;base64 URL");
+  }
+  const buffer = Buffer.from(rawBase64.replace(/\s+/g, ""), "base64");
+  if (buffer.length === 0) {
+    throw new Error("ref_image_data decoded to an empty file");
+  }
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A.
+  if (
+    buffer.length < 8 ||
+    buffer[0] !== 0x89 ||
+    buffer[1] !== 0x50 ||
+    buffer[2] !== 0x4e ||
+    buffer[3] !== 0x47 ||
+    buffer[4] !== 0x0d ||
+    buffer[5] !== 0x0a ||
+    buffer[6] !== 0x1a ||
+    buffer[7] !== 0x0a
+  ) {
+    throw new Error("ref_image_data must decode to a PNG image");
+  }
+  return buffer;
+}
+
+export function buildRejectionLearningRefImagePath(
+  clientId: string,
+  runId: string,
+  eventId: string,
+): string {
+  return `${clientId}/${runId}/learning/${eventId}.png`;
+}
+
+export async function uploadRejectionLearningReferenceImage(params: {
+  clientId: string;
+  runId: string;
+  eventId: string;
+  refImageData: string;
+}): Promise<{ storagePath: string; size: number }> {
+  const storagePath = buildRejectionLearningRefImagePath(params.clientId, params.runId, params.eventId);
+  const buffer = decodePngDataUrl(params.refImageData);
+
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(storagePath, buffer, {
+      contentType: "image/png",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`Failed to upload rejection learning reference image: ${error.message}`);
+  }
+
+  return { storagePath, size: buffer.length };
+}

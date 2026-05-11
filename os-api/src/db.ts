@@ -9,7 +9,7 @@ import type {
   KnownLimitation, KnownLimitationSeverity,
   AssetEscalation, EscalationLevel, EscalationStatus, EscalationAction,
   OrchestrationDecisionRecord, PromptHistoryEntry,
-  RejectionLearningEvent,
+  RejectionLearningEvent, RejectionCategory, RejectionLearningBlockMode,
   BeatName, ShotSummary, RecentCampaignRun, RunDetail,
   MotionGateShotOfNote, MotionGateShotState, MotionPhaseGateState,
   DirectionDriftIndicator, DirectionDriftVerdictSource,
@@ -2811,9 +2811,19 @@ interface DbAssetEscalation {
   resolution_path: string | null;
   resolution_notes: string | null;
   final_artifact_id: string | null;
+  learning_event_id: string | null;
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface DbRejectionCategory {
+  id: string;
+  name?: string | null;
+  label?: string | null;
+  description?: string | null;
+  negative_prompt: string | null;
+  positive_guidance: string | null;
 }
 
 interface DbOrchestrationDecision {
@@ -2881,6 +2891,7 @@ function mapAssetEscalation(d: DbAssetEscalation): AssetEscalation {
     resolutionPath: (d.resolution_path ?? undefined) as EscalationAction | undefined,
     resolutionNotes: d.resolution_notes ?? undefined,
     finalArtifactId: d.final_artifact_id ?? undefined,
+    learningEventId: d.learning_event_id ?? undefined,
     resolvedAt: d.resolved_at ?? undefined,
     createdAt: d.created_at,
     updatedAt: d.updated_at,
@@ -2924,6 +2935,16 @@ function mapRejectionLearningEvent(
     blockMode: d.block_mode === "terminal" ? "terminal" : "soft",
     createdAt: d.created_at,
     createdBy: d.created_by,
+  };
+}
+
+function mapRejectionCategory(d: DbRejectionCategory): RejectionCategory {
+  return {
+    id: d.id,
+    name: d.name ?? d.label ?? d.id,
+    description: d.description ?? undefined,
+    negativePrompt: d.negative_prompt ?? undefined,
+    positiveGuidance: d.positive_guidance ?? undefined,
   };
 }
 
@@ -3048,6 +3069,52 @@ export async function getRecentRejectionLearnings(
   return rows.map((row) => mapRejectionLearningEvent(row, categoryLabels));
 }
 
+export async function listRejectionCategories(): Promise<RejectionCategory[]> {
+  const { data, error } = await supabase
+    .from("rejection_categories")
+    .select("*");
+  if (error) throw new Error(`Failed to list rejection categories: ${error.message}`);
+  return ((data ?? []) as DbRejectionCategory[])
+    .map(mapRejectionCategory)
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export async function createRejectionLearningEvent(params: {
+  id?: string;
+  clientId: string;
+  campaignId?: string | null;
+  shotId?: number | null;
+  assetId?: string | null;
+  categoryId: string;
+  whatWrong: string;
+  correction: string;
+  refImagePath?: string | null;
+  blockMode: RejectionLearningBlockMode;
+  createdBy: string;
+}): Promise<RejectionLearningEvent> {
+  const eventId = params.id ?? randomUUID();
+  const { data, error } = await supabase
+    .from("rejection_learning_events")
+    .insert({
+      id: eventId,
+      client_id: params.clientId,
+      campaign_id: params.campaignId ?? null,
+      shot_id: params.shotId ?? null,
+      asset_id: params.assetId ?? null,
+      category_id: params.categoryId,
+      what_wrong: params.whatWrong,
+      correction: params.correction,
+      ref_image_path: params.refImagePath ?? null,
+      block_mode: params.blockMode,
+      created_by: params.createdBy,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to create rejection learning event: ${error.message}`);
+  return mapRejectionLearningEvent(data as DbRejectionLearningEvent);
+}
+
 // ── ADR-006 D4 Review Gate card actions ───────────────────────────────────
 
 export type ReviewGateCommentScope = "shot" | "campaign";
@@ -3085,6 +3152,15 @@ export interface ReviewGateCommentResult {
     currentMantra: string;
     abandonedCount: number;
   };
+}
+
+export interface ReviewGateRejectResult {
+  escalation: AssetEscalation;
+  learningEvent: RejectionLearningEvent;
+  runHitlCleared: boolean;
+  shotNumber: number | null;
+  blockMode: RejectionLearningBlockMode;
+  refImagePath: string | null;
 }
 
 interface ReviewGateContext {
@@ -3303,6 +3379,67 @@ export async function acceptReviewGateEscalation(
     runHitlCleared,
     shotNumber: ctx.shotNumber,
     operatorOverride: overridePayload,
+  };
+}
+
+export async function rejectReviewGateEscalation(
+  escalationId: string,
+  params: {
+    eventId: string;
+    categoryId: string;
+    whatWrong: string;
+    correction: string;
+    blockMode: RejectionLearningBlockMode;
+    refImagePath?: string | null;
+    rejectedBy?: string;
+  },
+): Promise<ReviewGateRejectResult> {
+  const whatWrong = normalizeReviewGateComment(params.whatWrong);
+  const correction = normalizeReviewGateComment(params.correction);
+  if (whatWrong.length < 10) throw new Error("what_wrong must be at least 10 characters");
+  if (correction.length < 10) throw new Error("correction must be at least 10 characters");
+  if (params.blockMode !== "soft" && params.blockMode !== "terminal") {
+    throw new Error("block_mode must be 'soft' or 'terminal'");
+  }
+
+  const ctx = await getReviewGateContext(escalationId);
+  if (!REVIEW_GATE_OPEN_STATUSES.has(ctx.escalation.status)) {
+    throw new Error(`Escalation is already terminal (${ctx.escalation.status})`);
+  }
+
+  const learningEvent = await createRejectionLearningEvent({
+    id: params.eventId,
+    clientId: ctx.run.clientId,
+    campaignId: ctx.campaign.id,
+    shotId: ctx.shotNumber,
+    assetId: ctx.escalation.artifactId,
+    categoryId: params.categoryId,
+    whatWrong,
+    correction,
+    refImagePath: params.refImagePath ?? null,
+    blockMode: params.blockMode,
+    createdBy: params.rejectedBy ?? "review-gate",
+  });
+
+  const rejectedAt = new Date().toISOString();
+  const updated = await updateEscalation(escalationId, {
+    status: params.blockMode === "terminal" ? "rejected_terminal" : "rejected_soft",
+    resolutionNotes:
+      params.blockMode === "terminal"
+        ? `Reject-as-Teach terminal block captured in rejection_learning_events:${learningEvent.id}.`
+        : `Reject-as-Teach soft block captured in rejection_learning_events:${learningEvent.id}.`,
+    learningEventId: learningEvent.id,
+    resolvedAt: rejectedAt,
+  });
+  const runHitlCleared = await clearRunHitlIfNoOpenEscalations(ctx.run.runId, updated.id);
+
+  return {
+    escalation: updated,
+    learningEvent,
+    runHitlCleared,
+    shotNumber: ctx.shotNumber,
+    blockMode: params.blockMode,
+    refImagePath: params.refImagePath ?? null,
   };
 }
 
@@ -3592,6 +3729,7 @@ export async function updateEscalation(id: string, updates: {
   resolutionPath?: EscalationAction;
   resolutionNotes?: string;
   finalArtifactId?: string;
+  learningEventId?: string | null;
   resolvedAt?: string | null;
 }): Promise<AssetEscalation> {
   const patch: Record<string, unknown> = {};
@@ -3603,6 +3741,7 @@ export async function updateEscalation(id: string, updates: {
   if (updates.resolutionPath !== undefined) patch.resolution_path = updates.resolutionPath;
   if (updates.resolutionNotes !== undefined) patch.resolution_notes = updates.resolutionNotes;
   if (updates.finalArtifactId !== undefined) patch.final_artifact_id = updates.finalArtifactId;
+  if (updates.learningEventId !== undefined) patch.learning_event_id = updates.learningEventId;
   if (updates.resolvedAt !== undefined) patch.resolved_at = updates.resolvedAt;
   const { data, error } = await supabase
     .from("asset_escalations")

@@ -61,6 +61,8 @@ import {
   getArtifactsForDeliverableWithVerdicts,
   acceptReviewGateEscalation,
   commentReviewGateEscalation,
+  rejectReviewGateEscalation,
+  listRejectionCategories,
   type CostSummaryBreakdown,
   type ReviewGateCommentScope,
 } from "./db.js";
@@ -73,7 +75,7 @@ import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
 import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest } from "./auth.js";
-import { createArtifactSignedUrl } from "./storage.js";
+import { createArtifactSignedUrl, uploadRejectionLearningReferenceImage } from "./storage.js";
 
 dotenv.config();
 
@@ -125,6 +127,12 @@ function imageContentType(filePath: string): string {
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".webp") return "image/webp";
   return "image/png";
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // ============ Auth Routes ============
@@ -1648,6 +1656,27 @@ app.patch("/api/known-limitations/:id", async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/rejection-categories - Shared Reject-as-Teach taxonomy.
+//
+// Shared/global table: JWT is required when JWT_AUTH_ENABLED=true, but no
+// tenant filter is applied because categories are intentionally cross-client.
+app.get("/api/rejection-categories", async (req: Request, res: Response) => {
+  try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const categories = await listRejectionCategories();
+    res.json({ categories });
+  } catch (err) {
+    console.error("GET /api/rejection-categories error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // ============ Asset Escalations ============
 
 // GET /api/escalations - List (filter by status, run, campaign, client)
@@ -1839,6 +1868,153 @@ app.patch("/api/escalations/:id/comment", async (req: Request, res: Response) =>
       return;
     }
     console.error("PATCH /api/escalations/:id/comment error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/escalations/:id/reject - ADR-006 D4 Reject-as-Teach capture + block.
+//
+// Canonical auth order mirrors /accept + /comment:
+//   jwtAuthEnabled gate → 401 missing JWT → getEscalation → 404 → tenant 403
+//   → body validation / write path.
+app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
+  try {
+    const id = getParam(req, "id");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const existing = await getEscalation(id);
+    if (!existing) {
+      res.status(404).json({ error: "Escalation not found" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
+      return;
+    }
+
+    const body = req.body as {
+      category_id?: unknown;
+      categoryId?: unknown;
+      what_wrong?: unknown;
+      whatWrong?: unknown;
+      correction?: unknown;
+      ref_image_data?: unknown;
+      refImageData?: unknown;
+      block_mode?: unknown;
+      blockMode?: unknown;
+      rejected_by?: unknown;
+      rejectedBy?: unknown;
+    };
+
+    const categoryId = normalizeNonEmptyString(body.category_id ?? body.categoryId);
+    const whatWrong = normalizeNonEmptyString(body.what_wrong ?? body.whatWrong);
+    const correction = normalizeNonEmptyString(body.correction);
+    const blockMode = body.block_mode ?? body.blockMode;
+    const refImageData = body.ref_image_data ?? body.refImageData;
+    const rejectedBy = body.rejected_by ?? body.rejectedBy;
+
+    if (!categoryId) {
+      res.status(400).json({ error: "category_id is required" });
+      return;
+    }
+    if (!whatWrong || whatWrong.length < 10) {
+      res.status(400).json({ error: "what_wrong must be at least 10 characters" });
+      return;
+    }
+    if (!correction || correction.length < 10) {
+      res.status(400).json({ error: "correction must be at least 10 characters" });
+      return;
+    }
+    if (whatWrong.length > 2000 || correction.length > 2000) {
+      res.status(400).json({ error: "what_wrong and correction must be 2000 characters or less" });
+      return;
+    }
+    if (blockMode !== "soft" && blockMode !== "terminal") {
+      res.status(400).json({ error: "block_mode must be 'soft' or 'terminal'" });
+      return;
+    }
+    if (refImageData !== undefined && typeof refImageData !== "string") {
+      res.status(400).json({ error: "ref_image_data must be a PNG base64 string when provided" });
+      return;
+    }
+    if (typeof rejectedBy !== "undefined" && typeof rejectedBy !== "string") {
+      res.status(400).json({ error: "rejected_by must be a string when provided" });
+      return;
+    }
+
+    const categories = await listRejectionCategories();
+    if (!categories.some((category) => category.id === categoryId)) {
+      res.status(400).json({ error: "category_id does not match a known rejection category" });
+      return;
+    }
+
+    const eventId = uuidv4();
+    let refImagePath: string | null = null;
+    let refImageSignedUrl: string | null = null;
+    if (typeof refImageData === "string" && refImageData.trim().length > 0) {
+      if (!existing.runId) {
+        res.status(400).json({ error: "Escalation is missing run_id required for ref image upload" });
+        return;
+      }
+      const uploaded = await uploadRejectionLearningReferenceImage({
+        clientId: existing.clientId ?? caller?.clientId ?? "unknown-client",
+        runId: existing.runId,
+        eventId,
+        refImageData,
+      });
+      refImagePath = uploaded.storagePath;
+      refImageSignedUrl = await createArtifactSignedUrl(uploaded.storagePath, 60 * 60);
+      if (!refImageSignedUrl) {
+        throw new Error("Failed to create signed URL for rejection learning reference image");
+      }
+    }
+
+    const result = await rejectReviewGateEscalation(id, {
+      eventId,
+      categoryId,
+      whatWrong,
+      correction,
+      blockMode,
+      refImagePath,
+      rejectedBy: typeof rejectedBy === "string" ? rejectedBy : caller?.clientId ?? "review-gate",
+    });
+
+    if (result.escalation.runId) {
+      runEvents.emit(`escalation:${result.escalation.runId}`, result.escalation);
+    }
+
+    res.json({
+      ...result,
+      eventId: result.learningEvent.id,
+      refImagePath,
+      refImageSignedUrl,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      message.includes("what_wrong") ||
+      message.includes("correction") ||
+      message.includes("block_mode") ||
+      message.includes("ref_image_data")
+    ) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    if (message.includes("already terminal")) {
+      res.status(409).json({ error: message });
+      return;
+    }
+    if (message.includes("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    console.error("POST /api/escalations/:id/reject error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });

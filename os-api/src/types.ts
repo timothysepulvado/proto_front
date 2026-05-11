@@ -299,7 +299,9 @@ export type EscalationStatus =
   | "accepted"
   | "redesigned"
   | "replaced"
-  | "hitl_required";
+  | "hitl_required"
+  | "rejected_soft"
+  | "rejected_terminal";
 
 export type EscalationAction =
   | "prompt_fix"
@@ -346,9 +348,18 @@ export interface AssetEscalation {
   resolutionPath?: EscalationAction;
   resolutionNotes?: string;
   finalArtifactId?: string;
+  learningEventId?: string;
   resolvedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RejectionCategory {
+  id: string;
+  name: string;
+  description?: string;
+  negativePrompt?: string;
+  positiveGuidance?: string;
 }
 
 export interface OrchestrationDecisionRecord {

@@ -143,7 +143,8 @@ export default function ReviewGateEscalationSurface({
     setMessage(null);
 
     if (action === "reject") {
-      setMessage("Reject-as-Teach lands in Sub-phase 4.D-3. No rejection was written.");
+      setMessage("Reject-as-Teach learning captured and block applied.");
+      await refresh();
       return;
     }
 

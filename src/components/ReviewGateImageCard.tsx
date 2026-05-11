@@ -13,6 +13,7 @@ import {
   type ReviewGateEscalation,
 } from "../api";
 import { useSignedArtifactUrl } from "../hooks/useSignedArtifactUrl";
+import RejectTeachModal from "./RejectTeachModal";
 
 type ReviewGateImageCardAction = "accept" | "reject" | "comment";
 
@@ -95,7 +96,7 @@ export default function ReviewGateImageCard({
   const [commentText, setCommentText] = useState("");
   const [scope, setScope] = useState<ReviewGateCommentScope>("shot");
   const [busyAction, setBusyAction] = useState<ReviewGateImageCardAction | null>(null);
-  const [rejectHint, setRejectHint] = useState<string | null>(null);
+  const [rejectOpen, setRejectOpen] = useState(false);
 
   const { escalation, deliverable, run } = item;
   const shotNumber = iters[0]?.shotNumber ?? shotNumberFromText(deliverable?.description);
@@ -108,7 +109,6 @@ export default function ReviewGateImageCard({
 
   const handleAccept = async () => {
     setBusyAction("accept");
-    setRejectHint(null);
     try {
       await onAction("accept");
     } finally {
@@ -119,7 +119,6 @@ export default function ReviewGateImageCard({
   const handleComment = async () => {
     if (!canSubmitComment) return;
     setBusyAction("comment");
-    setRejectHint(null);
     try {
       await onAction("comment", { text: commentText.trim(), scope });
       setCommentText("");
@@ -190,12 +189,6 @@ export default function ReviewGateImageCard({
           </div>
         </div>
 
-        {rejectHint && (
-          <div className="mt-3 rounded-xl border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-[9px] font-mono text-rose-100/75">
-            {rejectHint}
-          </div>
-        )}
-
         {commentOpen && (
           <div className="mt-3 rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.06] p-3">
             <label className="block">
@@ -264,7 +257,7 @@ export default function ReviewGateImageCard({
           <button
             type="button"
             onClick={() => {
-              setRejectHint("Reject-as-Teach lands in Sub-phase 4.D-3. No rejection was written.");
+              setRejectOpen(true);
             }}
             className="inline-flex items-center justify-center rounded-xl border border-rose-400/25 bg-rose-500/10 px-2 py-2 text-[8px] font-black uppercase tracking-[0.14em] text-rose-100 transition hover:border-rose-300/50 hover:bg-rose-500/18"
           >
@@ -273,7 +266,6 @@ export default function ReviewGateImageCard({
           <button
             type="button"
             onClick={() => {
-              setRejectHint(null);
               setCommentOpen((value) => !value);
             }}
             className="inline-flex items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-500/10 px-2 py-2 text-[8px] font-black uppercase tracking-[0.14em] text-cyan-100 transition hover:border-cyan-300/50 hover:bg-cyan-500/18"
@@ -291,6 +283,14 @@ export default function ReviewGateImageCard({
           </button>
         </div>
       </div>
+      <RejectTeachModal
+        open={rejectOpen}
+        escalation={item}
+        onClose={() => setRejectOpen(false)}
+        onRejected={async () => {
+          await onAction("reject");
+        }}
+      />
     </article>
   );
 }
