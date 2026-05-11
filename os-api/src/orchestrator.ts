@@ -17,6 +17,7 @@ import { callClaude, getDefaultModel } from "./anthropic.js";
 import {
   buildSystemPrompt,
   buildUserMessage,
+  splitSystemPromptForCache,
 } from "./orchestrator_prompts.js";
 import type {
   OrchestratorInput,
@@ -65,10 +66,12 @@ export async function decideEscalation(
   // Chunk 1: for music-video campaigns, append the cache-stable shot list to
   // the SYSTEM prompt so continuity + narrative context prefix every per-shot
   // call. Non-MV campaigns fall through to the default (preamble + core).
-  const systemCached = buildSystemPrompt(input.musicVideoContext, input.recentLearnings);
+  const systemPrompt = buildSystemPrompt(input.musicVideoContext, input.recentLearnings);
+  const { cachePrefix: systemCached, dynamicSuffix: systemDynamic } = splitSystemPromptForCache(systemPrompt);
 
   const rawResponse = await callClaude({
     systemCached,
+    systemDynamic: systemDynamic ?? undefined,
     userMessage,
     // temperature omitted: Claude Opus 4.7 on direct Anthropic API deprecated
     // the field (400 invalid_request_error). Vertex used to accept + ignore it

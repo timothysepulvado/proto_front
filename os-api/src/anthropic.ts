@@ -149,6 +149,15 @@ export function getBackend(): "direct" | "vertex" | null {
 export interface OrchestratorCallRequest {
   /** Stable system text that should be cached across calls within a run. */
   systemCached: string;
+  /**
+   * Optional dynamic system suffix rendered after the cached block.
+   *
+   * Use this for per-campaign/per-operator learnings that must influence the
+   * model but must NOT move the cache breakpoint. The first system block keeps
+   * `cache_control: { type: "ephemeral" }`; this suffix is a separate,
+   * uncached system text block.
+   */
+  systemDynamic?: string;
   /** Per-call dynamic context (user message). Not cached. */
   userMessage: string;
   /** Optional override model id. */
@@ -212,6 +221,33 @@ export interface OrchestratorCallResponse {
   webSearchCount: number;
 }
 
+export type ClaudeSystemTextBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral" };
+};
+
+export function buildClaudeSystemBlocks(
+  systemCached: string,
+  systemDynamic?: string | null,
+): ClaudeSystemTextBlock[] {
+  const blocks: ClaudeSystemTextBlock[] = [
+    {
+      type: "text",
+      text: systemCached,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+  const dynamic = systemDynamic?.trim();
+  if (dynamic) {
+    blocks.push({
+      type: "text",
+      text: dynamic,
+    });
+  }
+  return blocks;
+}
+
 // ── Main call ─────────────────────────────────────────────────────────────
 /**
  * Invoke Claude (on Vertex) with a cached system prompt + dynamic user
@@ -243,13 +279,7 @@ export async function callClaude(
         model,
         max_tokens: maxTokens,
         ...(temperature !== undefined ? { temperature } : {}),
-        system: [
-          {
-            type: "text",
-            text: request.systemCached,
-            cache_control: { type: "ephemeral" },
-          },
-        ],
+        system: buildClaudeSystemBlocks(request.systemCached, request.systemDynamic),
         messages: [
           {
             role: "user",

@@ -353,6 +353,20 @@ export function buildSystemPrompt(
   return parts.join("\n");
 }
 
+export function splitSystemPromptForCache(prompt: string): {
+  cachePrefix: string;
+  dynamicSuffix: string | null;
+} {
+  const idx = prompt.indexOf(`\n${REJECTION_LEARNINGS_HEADING}`);
+  if (idx < 0) {
+    return { cachePrefix: prompt, dynamicSuffix: null };
+  }
+  return {
+    cachePrefix: prompt.slice(0, idx).trimEnd(),
+    dynamicSuffix: prompt.slice(idx + 1).trim(),
+  };
+}
+
 /**
  * Backwards-compat alias — any legacy import of `SYSTEM_PROMPT` still works.
  * Emits the non-music-video prompt (preamble + core). For music-video

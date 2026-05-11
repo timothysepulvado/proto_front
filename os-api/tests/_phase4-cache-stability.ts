@@ -11,10 +11,13 @@
  *   npx tsx os-api/tests/_phase4-cache-stability.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
+import { buildClaudeSystemBlocks, type ClaudeSystemTextBlock } from "../src/anthropic.js";
 import {
   REJECTION_LEARNINGS_HEADING,
   buildSystemPrompt,
+  splitSystemPromptForCache,
 } from "../src/orchestrator_prompts.js";
 import type { BeatName, MusicVideoContext, RejectionLearningEvent } from "../src/types.js";
 
@@ -121,6 +124,49 @@ function approxTokenCount(text: string): number {
   return Math.round(text.length / 4);
 }
 
+type MockCacheUsage = {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
+class MockAnthropicPromptCache {
+  private cachedPrefixes = new Set<string>();
+
+  call(system: ClaudeSystemTextBlock[], userMessage: string): MockCacheUsage {
+    assert.equal(system[0]?.cache_control?.type, "ephemeral");
+    const cachedPrefix = system[0].text;
+    const prefixTokens = approxTokenCount(cachedPrefix);
+    const dynamicTokens = system
+      .slice(1)
+      .reduce((total, block) => total + approxTokenCount(block.text), 0);
+    const userTokens = approxTokenCount(userMessage);
+    const wasCached = this.cachedPrefixes.has(cachedPrefix);
+    this.cachedPrefixes.add(cachedPrefix);
+    return {
+      inputTokens: dynamicTokens + userTokens,
+      cacheReadTokens: wasCached ? prefixTokens : 0,
+      cacheWriteTokens: wasCached ? 0 : prefixTokens,
+    };
+  }
+}
+
+function mockOrchestratorProbe(
+  prompt: string,
+  cache: MockAnthropicPromptCache,
+): MockCacheUsage & { system: ClaudeSystemTextBlock[]; dynamicTokens: number } {
+  const { cachePrefix, dynamicSuffix } = splitSystemPromptForCache(prompt);
+  const system = buildClaudeSystemBlocks(cachePrefix, dynamicSuffix);
+  const dynamicTokens = system
+    .slice(1)
+    .reduce((total, block) => total + approxTokenCount(block.text), 0);
+  return {
+    ...cache.call(system, "Return a minimal valid JSON escalation decision."),
+    system,
+    dynamicTokens,
+  };
+}
+
 const basePrompt = buildSystemPrompt(MV_CONTEXT);
 const emptyPrompt = buildSystemPrompt(MV_CONTEXT, []);
 const withLearningA = buildSystemPrompt(MV_CONTEXT, [LEARNING_A]);
@@ -150,6 +196,53 @@ check("cache-warm prefix token count stays stable across rejection events", () =
   assert.equal(approxTokenCount(cacheWarmPrefix(withLearningB)), tokensEmpty);
 });
 
+check("Anthropic request shape keeps rejection learnings outside the cached system block", () => {
+  const { cachePrefix, dynamicSuffix } = splitSystemPromptForCache(withLearningA);
+  const system = buildClaudeSystemBlocks(cachePrefix, dynamicSuffix);
+  assert.equal(system.length, 2);
+  assert.equal(system[0].cache_control?.type, "ephemeral");
+  assert.equal(system[0].text, cacheWarmPrefix(emptyPrompt));
+  assert.ok(!system[0].text.includes(REJECTION_LEARNINGS_HEADING));
+  assert.ok(system[1].text.includes(REJECTION_LEARNINGS_HEADING));
+  assert.equal(system[1].cache_control, undefined);
+});
+
+check("Probe 1: empty learnings orchestrator call records cache write tokens", () => {
+  const cache = new MockAnthropicPromptCache();
+  const probe1 = mockOrchestratorProbe(emptyPrompt, cache);
+  assert.equal(probe1.cacheReadTokens, 0);
+  assert.ok(probe1.cacheWriteTokens > 0);
+  assert.equal(probe1.system.length, 1);
+});
+
+check("Probe 2: repeated empty learnings call records cache read tokens equal to Probe 1 write", () => {
+  const cache = new MockAnthropicPromptCache();
+  const probe1 = mockOrchestratorProbe(emptyPrompt, cache);
+  const probe2 = mockOrchestratorProbe(emptyPrompt, cache);
+  assert.equal(probe2.cacheWriteTokens, 0);
+  assert.equal(probe2.cacheReadTokens, probe1.cacheWriteTokens);
+});
+
+check("Probe 3: with-learnings first call writes the unchanged prefix and adds only dynamic delta tokens", () => {
+  const cache = new MockAnthropicPromptCache();
+  const emptyProbe = mockOrchestratorProbe(emptyPrompt, new MockAnthropicPromptCache());
+  const learningProbe = mockOrchestratorProbe(withLearningA, cache);
+  assert.equal(learningProbe.cacheReadTokens, 0);
+  assert.equal(learningProbe.cacheWriteTokens, emptyProbe.cacheWriteTokens);
+  assert.equal(learningProbe.system.length, 2);
+  assert.ok(learningProbe.dynamicTokens > 0);
+  assert.ok(learningProbe.inputTokens >= learningProbe.dynamicTokens);
+});
+
+check("Probe 4: repeated with-learnings call reads the same unchanged cached prefix", () => {
+  const cache = new MockAnthropicPromptCache();
+  const probe3 = mockOrchestratorProbe(withLearningA, cache);
+  const probe4 = mockOrchestratorProbe(withLearningA, cache);
+  assert.equal(probe4.cacheWriteTokens, 0);
+  assert.equal(probe4.cacheReadTokens, probe3.cacheWriteTokens);
+  assert.equal(probe4.dynamicTokens, probe3.dynamicTokens);
+});
+
 check("axiom block uses required one-line operator-learning format", () => {
   assert.ok(
     withLearningA.includes(
@@ -162,6 +255,24 @@ check("non-MV prompt can still append learnings without music-video context", ()
   const nonMv = buildSystemPrompt(undefined, [LEARNING_A]);
   assert.ok(nonMv.includes(REJECTION_LEARNINGS_HEADING));
   assert.ok(!cacheWarmPrefix(nonMv).includes("## MUSIC VIDEO CONTEXT"));
+});
+
+check("escalation_loop fetches recent rejection learnings once before the orchestrator call", () => {
+  const source = readFileSync(new URL("../src/escalation_loop.ts", import.meta.url), "utf8");
+  const fetchMatches = [...source.matchAll(/await getRecentRejectionLearnings\(/g)];
+  assert.equal(fetchMatches.length, 1);
+  const fetchIdx = source.indexOf("await getRecentRejectionLearnings(");
+  const decideIdx = source.indexOf("decisionResult = await decideEscalation(");
+  assert.ok(fetchIdx > 0 && decideIdx > fetchIdx);
+});
+
+check("escalation_loop passes recentLearnings into decideEscalation and records IDs for audit", () => {
+  const source = readFileSync(new URL("../src/escalation_loop.ts", import.meta.url), "utf8");
+  const decideIdx = source.indexOf("decisionResult = await decideEscalation(");
+  const decideEnd = source.indexOf("});", decideIdx);
+  const decideBlock = source.slice(decideIdx, decideEnd);
+  assert.ok(decideBlock.includes("recentLearnings,"));
+  assert.ok(source.includes("recentRejectionLearningIds: recentLearnings.map((learning) => learning.id)"));
 });
 
 let passed = 0;
