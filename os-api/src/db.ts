@@ -3175,6 +3175,7 @@ interface ReviewGateContext {
 const REVIEW_GATE_OPEN_STATUSES = new Set<EscalationStatus>(["hitl_required", "in_progress"]);
 const DEFAULT_REVIEW_GATE_ACCEPT_NOTES =
   "Accepted in Review Gate — operator visual review approved the current asset; clearing escalation for downstream use.";
+const REVIEW_GATE_ACCEPTED_NOTES_PREFIX = "Accepted in Review Gate";
 
 function cloneRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? { ...value } : {};
@@ -3379,6 +3380,124 @@ export async function acceptReviewGateEscalation(
     runHitlCleared,
     shotNumber: ctx.shotNumber,
     operatorOverride: overridePayload,
+  };
+}
+
+export interface ZombieEscalationBackfillResult {
+  found: number;
+  resolved: number;
+  ids: string[];
+  resolvedIds: string[];
+  skippedIds: string[];
+  reasonCounts: Record<"accepted_notes" | "legacy_null_notes", number>;
+}
+
+/**
+ * ADR-006 D4-5 one-shot cleanup for historical Review Gate accept rows that
+ * wrote the accepted boilerplate into resolution_notes but stayed in_progress.
+ * The 4.D-2 live audit also found the same zombie family in older Drift MV rows
+ * where the historical handler failed before writing resolution_notes at all;
+ * those are guarded by age + status + null-notes so fresh active work is not
+ * affected.
+ *
+ * Idempotency guard: each row update includes id + status='in_progress' +
+ * the matching zombie predicate, so a second run finds 0 rows and a race with
+ * an already-resolved row reports it as skipped instead of re-affecting it.
+ */
+export async function backfillZombieReviewGateEscalations(params: {
+  clientId?: string;
+  staleHours?: number;
+} = {}): Promise<ZombieEscalationBackfillResult> {
+  const staleHours = params.staleHours ?? 6;
+  const staleBeforeIso = new Date(Date.now() - staleHours * 60 * 60 * 1000).toISOString();
+
+  let acceptedQuery = supabase
+    .from("asset_escalations")
+    .select("id")
+    .eq("status", "in_progress")
+    .ilike("resolution_notes", `${REVIEW_GATE_ACCEPTED_NOTES_PREFIX}%`)
+    .order("created_at", { ascending: true });
+
+  let legacyNullQuery = supabase
+    .from("asset_escalations")
+    .select("id")
+    .eq("status", "in_progress")
+    .is("resolution_notes", null)
+    .lt("created_at", staleBeforeIso)
+    .order("created_at", { ascending: true });
+
+  if (params.clientId) {
+    acceptedQuery = acceptedQuery.eq("client_id", params.clientId);
+    legacyNullQuery = legacyNullQuery.eq("client_id", params.clientId);
+  }
+
+  const [{ data: acceptedData, error: acceptedError }, { data: legacyNullData, error: legacyNullError }] =
+    await Promise.all([acceptedQuery, legacyNullQuery]);
+
+  if (acceptedError) {
+    throw new Error(`Failed to select accepted-note Review Gate zombie escalations: ${acceptedError.message}`);
+  }
+  if (legacyNullError) {
+    throw new Error(`Failed to select legacy null-note Review Gate zombie escalations: ${legacyNullError.message}`);
+  }
+
+  type ZombieBackfillReason = "accepted_notes" | "legacy_null_notes";
+  interface ZombieBackfillTarget {
+    id: string;
+    reason: ZombieBackfillReason;
+  }
+
+  const targetsById = new Map<string, ZombieBackfillTarget>();
+  for (const row of (acceptedData ?? []) as Array<{ id: string }>) {
+    targetsById.set(row.id, { id: row.id, reason: "accepted_notes" });
+  }
+  for (const row of (legacyNullData ?? []) as Array<{ id: string }>) {
+    if (!targetsById.has(row.id)) targetsById.set(row.id, { id: row.id, reason: "legacy_null_notes" });
+  }
+
+  const targets = [...targetsById.values()];
+  const ids = targets.map((row) => row.id);
+  const resolvedIds: string[] = [];
+  const skippedIds: string[] = [];
+  const reasonCounts: ZombieEscalationBackfillResult["reasonCounts"] = {
+    accepted_notes: 0,
+    legacy_null_notes: 0,
+  };
+  for (const target of targets) reasonCounts[target.reason] += 1;
+
+  for (const target of targets) {
+    let updateQuery = supabase
+      .from("asset_escalations")
+      .update({ status: "resolved" })
+      .eq("id", target.id)
+      .eq("status", "in_progress");
+
+    if (target.reason === "accepted_notes") {
+      updateQuery = updateQuery.ilike("resolution_notes", `${REVIEW_GATE_ACCEPTED_NOTES_PREFIX}%`);
+    } else {
+      updateQuery = updateQuery.is("resolution_notes", null).lt("created_at", staleBeforeIso);
+    }
+    if (params.clientId) updateQuery = updateQuery.eq("client_id", params.clientId);
+
+    const { data: updated, error: updateError } = await updateQuery.select("id").maybeSingle();
+
+    if (updateError) {
+      throw new Error(`Failed to resolve Review Gate zombie escalation ${target.id}: ${updateError.message}`);
+    }
+    if (updated?.id) {
+      resolvedIds.push(updated.id);
+    } else {
+      skippedIds.push(target.id);
+    }
+  }
+
+  return {
+    found: ids.length,
+    resolved: resolvedIds.length,
+    ids,
+    resolvedIds,
+    skippedIds,
+    reasonCounts,
   };
 }
 

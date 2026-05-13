@@ -2060,7 +2060,7 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
 
     const openStatuses = new Set(["hitl_required", "in_progress"]);
     if (!openStatuses.has(existing.status)) {
-      if (existing.status === "accepted" && existing.resolutionPath === "accept") {
+      if ((existing.status === "resolved" || existing.status === "accepted") && existing.resolutionPath === "accept") {
         res.json({ escalation: existing, runHitlCleared: false, alreadyResolved: true });
         return;
       }
@@ -2070,7 +2070,7 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
 
     const resolvedAt = new Date().toISOString();
     const updated = await updateEscalation(id, {
-      status: "accepted",
+      status: "resolved",
       resolutionPath: "accept",
       resolutionNotes: resolutionNotes.trim(),
       resolvedAt,
