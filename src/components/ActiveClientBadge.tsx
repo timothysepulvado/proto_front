@@ -19,7 +19,7 @@ export default function ActiveClientBadge({ client }: ActiveClientBadgeProps) {
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-cyan-400/20 bg-[#15217C]/35 px-4 py-3 shadow-[0_0_28px_rgba(21,33,124,0.28)]">
-      <div className="absolute inset-y-0 left-0 w-1 bg-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.9)]" />
+      <div className="absolute inset-y-0 left-0 w-1 bg-cyan-300 shadow-[0_0_18px_rgba(73,157,216,0.9)]" />
       <div className="relative flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-cyan-300/30 bg-cyan-300/10">

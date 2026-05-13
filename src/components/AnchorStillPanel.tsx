@@ -226,7 +226,7 @@ function StillFrame({
 export function EmptyAnchorState() {
   return (
     <div className="mt-4 flex min-h-[560px] flex-col items-center justify-center rounded-3xl border border-dashed border-cyan-500/20 bg-[#070a0f]/55 p-6 text-center shadow-[0_0_40px_rgba(0,0,0,0.18)]">
-      <div className="rounded-full border border-cyan-500/25 bg-cyan-500/10 p-4 shadow-[0_0_40px_rgba(34,211,238,0.10)]">
+      <div className="rounded-full border border-cyan-500/25 bg-cyan-500/10 p-4 shadow-[0_0_40px_rgba(73,157,216,0.10)]">
         <ImageIcon size={26} className="text-cyan-300/70" />
       </div>
       <p className="mt-4 text-[10px] font-mono uppercase tracking-[0.3em] text-white/45">Select a shot</p>
@@ -468,7 +468,7 @@ export default function AnchorStillPanel({ productionSlug = "drift-mv", shotNumb
         )}
 
         {startingStillUpdatedAt && (
-          <div className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-[10px] font-mono uppercase tracking-wider text-cyan-100 shadow-[0_0_26px_rgba(34,211,238,0.10)] transition-opacity duration-500">
+          <div className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-3 text-[10px] font-mono uppercase tracking-wider text-cyan-100 shadow-[0_0_26px_rgba(73,157,216,0.10)] transition-opacity duration-500">
             <RefreshCw size={13} className="mr-2 inline" /> Starting still updated {formatTimeStamp(startingStillUpdatedAt)}
           </div>
         )}

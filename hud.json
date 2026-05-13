@@ -41,18 +41,18 @@
           "vignette": "soft"
         },
         "palette": {
-          "primary": "#0F1956",
+          "primary": "#15217C",
           "accent": "#ED4C14",
-          "cream": "#FAFAF8",
-          "hud_cyan": "#3DE7FF",
-          "hud_lime": "#B6FF4A",
+          "cream": "#EFECEB",
+          "hud_cyan": "#499DD8",
+          "hud_lime": "#FFFFFF",
           "danger": "#FF4D4D",
-          "warning": "#FFB020"
+          "warning": "#ED4C14"
         },
         "typography": {
           "ui": "Manrope",
-          "display": "Playfair Display",
-          "mono": "JetBrains Mono"
+          "display": "Manrope",
+          "mono": "Manrope"
         }
       }
     },

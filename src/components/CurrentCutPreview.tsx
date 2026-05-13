@@ -130,7 +130,7 @@ export default function CurrentCutPreview({ campaign, campaignId, currentRun }: 
   const videoError = error ?? (source?.kind === "artifact" ? signedArtifactUrl.error : null);
 
   return (
-    <section className="relative overflow-hidden rounded-2xl border border-cyan-400/15 bg-black/25 p-4 shadow-[0_0_35px_rgba(34,211,238,0.05)]">
+    <section className="relative overflow-hidden rounded-2xl border border-cyan-400/15 bg-black/25 p-4 shadow-[0_0_35px_rgba(73,157,216,0.05)]">
       <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-transparent via-cyan-300/60 to-transparent opacity-50" />
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -156,7 +156,7 @@ export default function CurrentCutPreview({ campaign, campaignId, currentRun }: 
             className="h-[220px] w-full bg-black object-contain md:h-[260px] xl:h-[300px]"
           />
         ) : (
-          <div className="flex h-[220px] flex-col items-center justify-center gap-3 bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.12),transparent_58%)] px-6 text-center md:h-[260px] xl:h-[300px]">
+          <div className="flex h-[220px] flex-col items-center justify-center gap-3 bg-[radial-gradient(circle_at_center,rgba(73,157,216,0.12),transparent_58%)] px-6 text-center md:h-[260px] xl:h-[300px]">
             {isVideoLoading ? (
               <>
                 <Loader2 size={22} className="animate-spin text-cyan-200/70" />

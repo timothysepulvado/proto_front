@@ -204,7 +204,7 @@ const PancakeCore = ({ active, isDragging }: { active: boolean; isDragging: bool
             i === 1 ? "w-10" : i === 2 ? "w-14" : i === 3 ? "w-16" : "w-12"
           } ${
             active
-              ? "bg-cyan-400 border-white shadow-[0_0_25px_rgba(34,211,238,0.8)]"
+              ? "bg-cyan-400 border-white shadow-[0_0_25px_rgba(73,157,216,0.8)]"
               : "bg-gradient-to-r from-cyan-900 via-cyan-600 to-cyan-900 border-cyan-400/30 group-hover:border-cyan-400/60 shadow-lg"
           }`}
           style={{
@@ -228,7 +228,7 @@ const CircularTelemetry = ({ percent, label, color = "cyan" }: { percent: number
 
   return (
     <div className="relative w-28 h-28 flex items-center justify-center">
-      <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_8px_rgba(34,211,238,0.4)]">
+      <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_8px_rgba(73,157,216,0.4)]">
         <circle cx="56" cy="56" r="48" stroke="currentColor" strokeWidth="1" fill="transparent" className="text-white/5" />
         <circle
           cx="56"
@@ -917,7 +917,7 @@ export default function App() {
   }, [currentRun, teardownRunSubscriptions]);
 
   return (
-    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#141821]">
+    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-orange-500/30 bg-brand-primary">
       <div
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -980,7 +980,7 @@ export default function App() {
                   <div
                     className={`w-8 h-8 rounded-lg flex items-center justify-center border transition-all ${
                       activeClient === client.id
-                        ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.4)]"
+                        ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(73,157,216,0.4)]"
                         : "bg-white/5 border-white/10"
                     }`}
                   >
@@ -1057,7 +1057,7 @@ export default function App() {
                     <div
                       key={i}
                       className={`h-1 w-1 rounded-full ${
-                        i < 5 ? "bg-cyan-400 shadow-[0_0_5px_cyan]" : "bg-white/10"
+                        i < 5 ? "bg-cyan-400 shadow-[0_0_5px_var(--blue)]" : "bg-white/10"
                       }`}
                     />
                   ))}
@@ -1136,7 +1136,7 @@ export default function App() {
             {currentClient && isClientDetailOpen && canReadSupabase && (
               <div key={`${currentClient.id}:${authEpoch}`} className={`w-full min-w-0 z-10 space-y-4 ml-0 md:ml-4 ${workspaceMaxClass}`}>
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
-                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
+                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_var(--blue)]" />
                   <div className="space-y-2">
                     <h1 className="text-3xl sm:text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl break-words sm:whitespace-nowrap">
                       {currentClient.displayName}
@@ -1394,7 +1394,7 @@ export default function App() {
                           />
 
                           {isFeaturedClient && (
-                            <aside className="rounded-2xl border border-amber-400/15 bg-black/25 p-3 shadow-[0_0_30px_rgba(245,158,11,0.05)]">
+                            <aside className="rounded-2xl border border-amber-400/15 bg-black/25 p-3 shadow-[0_0_30px_rgba(237,76,20,0.05)]">
                               <button
                                 type="button"
                                 onClick={() => setIsAuditPanelOpen((value) => !value)}
@@ -1489,7 +1489,7 @@ export default function App() {
                   <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative overflow-hidden">
                     <div className="flex justify-between items-center mb-4">
                       <div className="flex items-center space-x-3">
-                        <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_cyan] ${isRunning ? "bg-amber-400 animate-pulse" : "bg-cyan-400"}`} />
+                        <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_var(--blue)] ${isRunning ? "bg-amber-400 animate-pulse" : "bg-cyan-400"}`} />
                         <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
                           Run Feed
                         </span>
@@ -1605,7 +1605,7 @@ export default function App() {
                                 setIsExpanded(true);
                               }
                             }}
-                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
+                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(237,76,20,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
                             {reviewAttentionCount > 0 && (
@@ -1751,7 +1751,7 @@ export default function App() {
                 ))}
               </div>
 
-              <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(34,211,238,0.3)] hover:bg-white transition-all active:scale-95">
+              <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(73,157,216,0.3)] hover:bg-white transition-all active:scale-95">
 	                Create BrandStudios Workspace
               </button>
             </div>
