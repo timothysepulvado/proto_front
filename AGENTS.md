@@ -386,10 +386,17 @@ agent-comm ask jackie "Read [files/docs]. [Analysis question]. Today is [date]."
 
 ## Brand Identity
 
+**Canonical palette (LOCKED by Tim 2026-05-12 — supersedes any conflicting values in older briefs/specs):**
+
 - Navy blue: `#15217C` (primary)
-- Orange: `#ED4C14` (accent)
 - Warm off-white: `#EFECEB` (background)
-- Light editorial aesthetic — premium creative agency, AI-native
+- Orange: `#ED4C14` (accent)
+- Blue: `#499DD8` (secondary accent — mix in only where variety needed; does NOT replace navy as primary)
+- White: `#FFFFFF` (contrast + accents)
+
+**Light editorial aesthetic** — premium creative agency, AI-native.
+
+> The `static-preview.html` exploration used `#0F1956` deep navy + `#FAFAF8` cream + `#3DE7FF` hud-cyan + `#B6FF4A` hud-lime. Those are NOT canonical; the palette above is the source of truth for Phase 4.E onward.
 
 ---
 
