@@ -31,11 +31,12 @@ proto_front/
 │       ├── ReshootPanel.tsx                 ← Reshoots/stills views + Gap 5 canonical-ref surfaces; Gap 6 hides legacy "Re-render Final Cut"
 │       ├── MotionPhaseGate.tsx              ← Gap 6 — locked-stills aggregation + HITL block predicate + confirmation modal + mode:video CTA
 │       ├── WatcherSignalsPanel.tsx          ← Live SSE watcher — cost + loop alerts + cancel
+│       ├── CampaignDashboard.tsx            ← Campaign picker/command surface; mounted when a client detail is open and no campaign is selected
 │       ├── DriftAlertPanel.tsx              ← Drift alerts + acknowledgment
 │       ├── BaselinePanel.tsx                ← Brand baseline snapshots
-│       ├── FinalHITLPanel.tsx               ← Full-edit HITL surface (Phase 2b)
+│       ├── FinalHITLPanel.tsx               ← Full-edit HITL surface inside ReviewPanel; reachable from run-level HITL and ShotReshootDrawer Final HITL dispatch
 │       ├── DeliverableTimeline.tsx          ← Horizontal-scrub deliverables timeline (Phase 2b)
-│       └── PromptEvolutionPanel.tsx         ← Prompt performance + evolution
+│       └── PromptEvolutionPanel.tsx         ← Prompt performance + evolution; mounted by Creative Studio for selected campaigns with no hydrated campaign run
 │
 ├── os-api/src/             ← Express API (orchestration layer)
 │   ├── index.ts            ← Routes: runs, HITL, campaigns, deliverables, drift, prompts, productions, +
@@ -67,10 +68,25 @@ proto_front/
 │   └── cli/main.py         ← CLI interface
 │
 ├── supabase/migrations/    ← 18 migrations (001-018). Highlights: 007 known_limitations + asset_escalations + orchestration_decisions; 008 adds "regrade" to run_mode enum; 009 stills failure-class catalog; 010 stills enum value; 011 runs.metadata JSONB (audit_report + operator_override); 012 image-class failure classes for direction-drift detection; 013 clients.ui_config JSONB (multi-tenant presentation overrides — display_name/entity_label/featured + future UI flags, matches storage_config pattern); 014 client_id denormalization on per-client tables; 015 multi-tenant RLS + jwt_client_id() helper; 016 storage.objects client-scoped RLS; 017 cost_ledger_entries; 018 storage.buckets.public=false flip for artifacts
-├── output/playwright/      ← Visual QA captures — 28 post-direction-fix-pass-gap{1..8}-{1440,768,375}.png + variants (compare/enabled/blocked/collapsed)
+├── output/playwright/      ← Visual QA captures — 28 post-direction-fix-pass-gap{1..8}-{1440,768,375}.png + variants (compare/enabled/blocked/collapsed), plus Phase 4 captures through `phase-4f-*`
 ├── hud.json                ← Client data + UI config (source of truth)
 └── docs/                   ← Integration audit, tech requirements, runbooks/stills-mode.md
 ```
+
+### Phase 4.G orphan validation (2026-05-13)
+
+The May 7 UX inventory flagged `CampaignDashboard`, `PromptEvolutionPanel`, and
+`FinalHITLPanel` as suspected orphans. Phase 4.G traced imports, JSX mounts, and
+runtime conditionals. None were deleted:
+
+| Component | Classification | Active mount path |
+|-----------|----------------|-------------------|
+| `CampaignDashboard.tsx` | MOUNTED + USED | `App.tsx` imports it and renders it when `currentClient && isClientDetailOpen && !selectedCampaign`. This is the first client campaign-command surface after client load/switch and after the `Campaigns` back button clears `selectedCampaign`; campaign cards call `handleCampaignSelect`. |
+| `PromptEvolutionPanel.tsx` | MOUNTED + USED | `App.tsx` imports it and renders it in Creative Studio when a campaign is selected but `currentRun?.campaignId` is absent. This is reachable for non-featured/no-run campaign workspaces, including draft campaign shells. |
+| `FinalHITLPanel.tsx` | MOUNTED + USED | `ReviewPanel.tsx` imports and renders it inside the run-level HITL modal. `App.tsx` opens `ReviewPanel` for `currentRun.status === "needs_review"`, pending review runs, or the `brandstudios:open-final-hitl` event dispatched by `ShotReshootDrawer`'s Final HITL button. |
+
+This validation satisfies ADR-006 deferred-cleanup without deleting mounted
+operator surfaces.
 
 ### Connected Repos (called by runner, not standalone)
 
