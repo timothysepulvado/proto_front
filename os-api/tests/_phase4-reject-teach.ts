@@ -311,7 +311,12 @@ async function main(): Promise<void> {
       correction: "Keep the frame grounded in human aftermath and remove hero mech framing.",
       block_mode: "soft",
     });
-    check("reject endpoint returns 403 for cross-tenant escalation", crossTenant.status === 403);
+    // Resource-existence-leak fix (CodeRabbit PR #8). Cross-tenant probes now
+    // return a uniform 404 — the scoped DB lookup returns null for both
+    // "not found" and "exists but foreign tenant" so the outsider cannot
+    // differentiate the two. Mirrors PR #6 R2 hardening + the same change in
+    // _phase4-review-gate-card.ts.
+    check("reject endpoint returns 404 for cross-tenant escalation (no existence leak)", crossTenant.status === 404);
 
     const invalidPayload = await requestJson("POST", `/api/escalations/${seededA.shot1.escalationId}/reject`, tokenA, {
       category_id: categoryId,

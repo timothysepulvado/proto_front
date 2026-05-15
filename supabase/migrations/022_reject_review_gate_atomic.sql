@@ -61,8 +61,11 @@ BEGIN
   -- 2. Transition the escalation in the same transaction. Failure rolls back
   --    the insert above so the system never holds a learning row that's not
   --    attached to a terminal escalation.
+  -- asset_escalations.status + resolution_path are TEXT columns (not enums);
+  -- write the value directly. resolution_path is intentionally left untouched
+  -- here — the reject path does not set it (only accept does).
   UPDATE asset_escalations
-  SET status = p_new_status::escalation_status,
+  SET status = p_new_status,
       resolution_notes = p_resolution_notes,
       learning_event_id = p_event_id,
       resolved_at = p_resolved_at
