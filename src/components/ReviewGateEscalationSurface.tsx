@@ -40,16 +40,13 @@ function shotNumberFromText(value: string | undefined): number | null {
 }
 
 function isAcceptedBoilerplateZombie(item: ReviewGateEscalation): boolean {
-  if (/Accepted in Review Gate/i.test(item.escalation.resolutionNotes ?? "")) return true;
-
-  // Live Drift MV still carries the same accepted-zombie family on older
-  // in_progress rows where the historical handler failed before writing
-  // resolution_notes at all. Keep this UI filter conservative: only hide
-  // note-less in_progress rows after they are clearly not fresh active work.
-  if (item.escalation.status !== "in_progress" || item.escalation.resolutionNotes) return false;
-  const createdAtMs = new Date(item.escalation.createdAt).getTime();
-  if (!Number.isFinite(createdAtMs)) return false;
-  return Date.now() - createdAtMs > 6 * 60 * 60 * 1000;
+  // Tightened per CodeRabbit PR #8 finding (ReviewGateEscalationSurface.tsx:53).
+  // The prior 6h-null-notes heuristic also matched legitimately stalled
+  // in_progress escalations, hiding real unresolved work after a few hours.
+  // The historical null-notes population was cleared by migration 020 + the
+  // ADR-006 D4-5 bulk backfill; this filter should only own the explicit
+  // accepted-boilerplate match going forward.
+  return /Accepted in Review Gate/i.test(item.escalation.resolutionNotes ?? "");
 }
 
 export default function ReviewGateEscalationSurface({

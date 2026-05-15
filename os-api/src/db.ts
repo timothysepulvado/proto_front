@@ -744,8 +744,12 @@ export function aggregateMotionPhaseGateState(input: MotionPhaseGateAggregationI
       });
     }
 
+    // Operator acceptance through Review Gate (PR #8 path) writes status="resolved"
+    // with resolutionPath="accept"; the legacy escalation_loop accept path writes
+    // status="accepted". Both signal "operator-confirmed cleared" for motion-phase
+    // gate aggregation. Resolves CodeRabbit PR #8 finding (db.ts:3375).
     if (
-      escalation.status === "accepted"
+      ((escalation.status === "accepted") || (escalation.status === "resolved"))
       && escalation.resolutionPath === "accept"
       && isStillsStageSignal
       && lockedShotNumbers.has(entry.shotNumber)
@@ -1353,7 +1357,13 @@ export async function getDirectionDriftIndicatorsByCampaign(
     const deliverable = deliverables.find((item) => item.id === escalation.deliverableId);
     if (!deliverable) continue;
     const shotNumber = deriveDeliverableShotNumber(deliverable, deliverables.indexOf(deliverable));
-    if (escalation.status === "accepted" && escalation.resolutionPath === "accept") {
+    // Both legacy ("accepted") and Review-Gate ("resolved") accept terminations
+    // clear direction-drift indicators. See db.ts:747 for the same broadened
+    // predicate. Resolves CodeRabbit PR #8 finding (db.ts:3375).
+    if (
+      ((escalation.status === "accepted") || (escalation.status === "resolved"))
+      && escalation.resolutionPath === "accept"
+    ) {
       events.push({
         deliverableId: deliverable.id,
         shotNumber,
@@ -3243,10 +3253,34 @@ async function updateCampaignGuardrails(campaignId: string, guardrails: Record<s
   return mapDbCampaignToCampaign(data as DbCampaign);
 }
 
-async function writeRunMetadata(runId: string, metadata: Record<string, unknown>): Promise<Run> {
-  const updated = await updateRun(runId, { metadata });
-  if (!updated) throw new Error(`Run ${runId} not found while writing metadata`);
-  return updated;
+/**
+ * Atomic JSONB merge of `payload` into `runs.metadata.operator_override.<key>`.
+ *
+ * Wraps the `merge_run_operator_override` RPC introduced in migration 021. The
+ * RPC does a single `jsonb_set` so concurrent writes on different override keys
+ * (e.g., shot_18 + shot_19 in flight at the same time) cannot clobber each
+ * other the way a whole-`metadata` `updateRun` did.
+ *
+ * Resolves CodeRabbit PR #8 finding (os-api/src/db.ts:3249).
+ */
+async function mergeRunOperatorOverride(
+  runId: string,
+  overrideKey: string,
+  payload: Record<string, unknown>,
+): Promise<Run> {
+  const { data, error } = await supabase.rpc("merge_run_operator_override", {
+    p_run_id: runId,
+    p_override_key: overrideKey,
+    p_payload: payload as unknown as Record<string, unknown>,
+  });
+  if (error) {
+    throw new Error(`Failed to merge runs.metadata.operator_override.${overrideKey}: ${error.message}`);
+  }
+  const rows = (data ?? []) as DbRun[];
+  if (rows.length === 0) {
+    throw new Error(`Run ${runId} not found while merging operator_override.${overrideKey}`);
+  }
+  return mapDbRunToRun(rows[0]);
 }
 
 async function clearRunHitlIfNoOpenEscalations(runId: string, updatedEscalationId: string): Promise<boolean> {
@@ -3325,13 +3359,15 @@ export async function acceptReviewGateEscalation(
 
   const acceptedAt = new Date().toISOString();
   const notes = normalizeReviewGateComment(params.resolutionNotes ?? DEFAULT_REVIEW_GATE_ACCEPT_NOTES);
-  const metadata = cloneRecord(ctx.run.metadata);
-  const operatorOverride = cloneRecord(metadata.operator_override);
   let overridePayload: Record<string, unknown> | null = null;
 
   if (ctx.shotNumber !== null) {
     const shotKey = `shot_${ctx.shotNumber}`;
-    const existingShotOverride = cloneRecord(operatorOverride[shotKey]);
+    // Preserve any prior fields on this shot's override entry (e.g. an earlier
+    // comment that wrote direction_comment) — the merge RPC patches the keyed
+    // sub-object, not the whole metadata document.
+    const existingOperatorOverride = cloneRecord(ctx.run.metadata?.operator_override);
+    const existingShotOverride = cloneRecord(existingOperatorOverride[shotKey]);
     const artifactIter = ctx.artifact ? parseArtifactIteration(ctx.artifact) : null;
     let latestScore: number | null = null;
     let latestVerdict: string | null = null;
@@ -3361,9 +3397,10 @@ export async function acceptReviewGateEscalation(
       accepted_artifact_id: ctx.escalation.artifactId,
       accepted_escalation_id: escalationId,
     };
-    operatorOverride[shotKey] = overridePayload;
-    metadata.operator_override = operatorOverride;
-    await writeRunMetadata(ctx.run.runId, metadata);
+    // Atomic JSONB merge — replaces the prior whole-blob writeRunMetadata so
+    // concurrent shot accepts/comments on the same run cannot race-clobber.
+    // Resolves CodeRabbit PR #8 finding (db.ts:3249).
+    await mergeRunOperatorOverride(ctx.run.runId, shotKey, overridePayload);
   }
 
   const updated = await updateEscalation(escalationId, {
@@ -3526,30 +3563,46 @@ export async function rejectReviewGateEscalation(
     throw new Error(`Escalation is already terminal (${ctx.escalation.status})`);
   }
 
-  const learningEvent = await createRejectionLearningEvent({
-    id: params.eventId,
-    clientId: ctx.run.clientId,
-    campaignId: ctx.campaign.id,
-    shotId: ctx.shotNumber,
-    assetId: ctx.escalation.artifactId,
-    categoryId: params.categoryId,
-    whatWrong,
-    correction,
-    refImagePath: params.refImagePath ?? null,
-    blockMode: params.blockMode,
-    createdBy: params.rejectedBy ?? "review-gate",
-  });
-
   const rejectedAt = new Date().toISOString();
-  const updated = await updateEscalation(escalationId, {
-    status: params.blockMode === "terminal" ? "rejected_terminal" : "rejected_soft",
-    resolutionNotes:
-      params.blockMode === "terminal"
-        ? `Reject-as-Teach terminal block captured in rejection_learning_events:${learningEvent.id}.`
-        : `Reject-as-Teach soft block captured in rejection_learning_events:${learningEvent.id}.`,
-    learningEventId: learningEvent.id,
-    resolvedAt: rejectedAt,
+  const newStatus = params.blockMode === "terminal" ? "rejected_terminal" : "rejected_soft";
+  const resolutionNotes =
+    params.blockMode === "terminal"
+      ? `Reject-as-Teach terminal block captured in rejection_learning_events:${params.eventId}.`
+      : `Reject-as-Teach soft block captured in rejection_learning_events:${params.eventId}.`;
+
+  // Single-transaction insert + update via the migration 022 RPC. If either
+  // step fails, the whole transaction rolls back — no orphan learning row.
+  // Idempotent on params.eventId via the learning event PK. Resolves
+  // CodeRabbit PR #8 finding (db.ts:3552).
+  const { data, error } = await supabase.rpc("reject_review_gate_escalation_atomic", {
+    p_event_id: params.eventId,
+    p_client_id: ctx.run.clientId,
+    p_campaign_id: ctx.campaign.id,
+    p_shot_id: ctx.shotNumber,
+    p_asset_id: ctx.escalation.artifactId,
+    p_category_id: params.categoryId,
+    p_what_wrong: whatWrong,
+    p_correction: correction,
+    p_ref_image_path: params.refImagePath ?? null,
+    p_block_mode: params.blockMode,
+    p_created_by: params.rejectedBy ?? "review-gate",
+    p_escalation_id: escalationId,
+    p_new_status: newStatus,
+    p_resolution_notes: resolutionNotes,
+    p_resolved_at: rejectedAt,
   });
+  if (error) {
+    throw new Error(`Failed to commit Reject-as-Teach: ${error.message}`);
+  }
+  const rows = (data ?? []) as Array<{
+    learning_event: DbRejectionLearningEvent;
+    updated_escalation: DbAssetEscalation;
+  }>;
+  if (rows.length === 0) {
+    throw new Error(`Reject-as-Teach RPC returned no rows for escalation ${escalationId}`);
+  }
+  const learningEvent = mapRejectionLearningEvent(rows[0].learning_event);
+  const updated = mapAssetEscalation(rows[0].updated_escalation);
   const runHitlCleared = await clearRunHitlIfNoOpenEscalations(ctx.run.runId, updated.id);
 
   return {
@@ -3578,22 +3631,26 @@ export async function commentReviewGateEscalation(
 
   const ctx = await getReviewGateContext(escalationId);
   const submittedAt = new Date().toISOString();
-  const metadata = cloneRecord(ctx.run.metadata);
-  const operatorOverride = cloneRecord(metadata.operator_override);
   const campaignId = ctx.campaign.id;
   const clientId = ctx.run.clientId;
 
   let targetShotIds: number[] = [];
   let targetDeliverableIds: string[] = [];
   let campaignDirection: ReviewGateCommentResult["campaignDirection"];
+  // Override key + payload to merge via the JSONB-atomic RPC. Set once below
+  // depending on scope; one merge call per comment ⇒ no whole-blob race.
+  let overrideKey: string;
+  let overridePayload: Record<string, unknown>;
 
   if (params.scope === "shot") {
     if (ctx.shotNumber === null || !ctx.deliverable) {
       throw new Error("Shot-scoped comments require a mapped deliverable shot");
     }
     const shotKey = `shot_${ctx.shotNumber}`;
-    const existingShotOverride = cloneRecord(operatorOverride[shotKey]);
-    operatorOverride[shotKey] = {
+    const existingOperatorOverride = cloneRecord(ctx.run.metadata?.operator_override);
+    const existingShotOverride = cloneRecord(existingOperatorOverride[shotKey]);
+    overrideKey = shotKey;
+    overridePayload = {
       ...existingShotOverride,
       direction_comment: text,
       direction_comment_meta: {
@@ -3637,7 +3694,8 @@ export async function commentReviewGateEscalation(
     guardrails.directional_history = directionalHistory;
     await updateCampaignGuardrails(campaignId, guardrails);
 
-    const campaignOverride = cloneRecord(operatorOverride.campaign);
+    const existingOperatorOverride = cloneRecord(ctx.run.metadata?.operator_override);
+    const campaignOverride = cloneRecord(existingOperatorOverride.campaign);
     campaignOverride.direction_pivot = {
       text,
       previous_direction_mantra: previousMantra ?? null,
@@ -3646,7 +3704,8 @@ export async function commentReviewGateEscalation(
       submitted_at: submittedAt,
       submitted_by: params.commentedBy ?? "review-gate",
     };
-    operatorOverride.campaign = campaignOverride;
+    overrideKey = "campaign";
+    overridePayload = campaignOverride;
     campaignDirection = {
       previousMantra,
       currentMantra: text,
@@ -3668,8 +3727,10 @@ export async function commentReviewGateEscalation(
     }
   }
 
-  metadata.operator_override = operatorOverride;
-  const sourceRun = await writeRunMetadata(ctx.run.runId, metadata);
+  // Atomic JSONB merge — single RPC call replaces the prior read-mutate-write
+  // pattern that raced on concurrent shot writes. Resolves CodeRabbit PR #8
+  // finding (db.ts:3249).
+  const sourceRun = await mergeRunOperatorOverride(ctx.run.runId, overrideKey, overridePayload);
 
   let regenRun: Run | null = null;
   let regenPayload: ReviewGateRegenPayload | null = null;
@@ -3748,6 +3809,28 @@ export async function getEscalation(id: string): Promise<AssetEscalation | null>
     .from("asset_escalations")
     .select("*")
     .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`Failed to get escalation: ${error.message}`);
+  return data ? mapAssetEscalation(data as DbAssetEscalation) : null;
+}
+
+/**
+ * Caller-scoped lookup. Mirrors the PR #6 R2 fix pattern for cost-summary /
+ * signed-url: when JWT_AUTH_ENABLED=true, the route handler MUST do the initial
+ * DB read using this helper so a foreign-tenant probe can't differentiate
+ * 404-not-found from 403-cross-tenant. Returns null whenever the row either
+ * doesn't exist OR exists but belongs to a different tenant — the route then
+ * returns 404 uniformly. Resolves CodeRabbit PR #8 finding (index.ts:1737).
+ */
+export async function getEscalationForClient(
+  id: string,
+  clientId: string,
+): Promise<AssetEscalation | null> {
+  const { data, error } = await supabase
+    .from("asset_escalations")
+    .select("*")
+    .eq("id", id)
+    .eq("client_id", clientId)
     .maybeSingle();
   if (error) throw new Error(`Failed to get escalation: ${error.message}`);
   return data ? mapAssetEscalation(data as DbAssetEscalation) : null;

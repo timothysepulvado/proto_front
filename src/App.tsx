@@ -1314,7 +1314,10 @@ export default function App() {
                         <div className="flex flex-col items-center justify-center py-8">
                           <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
                           <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
-                            Loading Drift MV run
+                            {/* Reads the HUD-backed campaign name so the loader copy
+                                stays correct when other featured productions land
+                                (CodeRabbit PR #8 finding — was hard-coded "Drift MV"). */}
+                            Loading {selectedCampaignName || "campaign"} run
                           </span>
                         </div>
                       ) : null}

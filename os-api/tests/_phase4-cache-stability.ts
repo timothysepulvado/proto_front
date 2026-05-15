@@ -243,12 +243,17 @@ check("Probe 4: repeated with-learnings call reads the same unchanged cached pre
   assert.equal(probe4.dynamicTokens, probe3.dynamicTokens);
 });
 
-check("axiom block uses required one-line operator-learning format", () => {
-  assert.ok(
-    withLearningA.includes(
-      "- [campaign_direction_reversion] The regen reintroduced glossy mech-heavy hero framing. → CORRECT: Use aftermath-first human-scale composition with grounded materials.",
-    ),
-  );
+check("axiom block uses required one-line operator-learning format (JSON-structured)", () => {
+  // Operator-authored fields are serialized as JSON-shaped data (NOT imperative
+  // prose) so a malicious or sloppy `whatWrong`/`correction` cannot be elevated
+  // to system-level instructions inside the orchestrator's cache-stable prefix.
+  // Resolves CodeRabbit PR #8 finding (orchestrator_prompts.ts:350).
+  const expected = `- ${JSON.stringify({
+    category: "campaign_direction_reversion",
+    rejectedObservation: "The regen reintroduced glossy mech-heavy hero framing.",
+    requiredCorrection: "Use aftermath-first human-scale composition with grounded materials.",
+  })}`;
+  assert.ok(withLearningA.includes(expected));
 });
 
 check("non-MV prompt can still append learnings without music-video context", () => {

@@ -46,6 +46,7 @@ import {
   updateKnownLimitation,
   listEscalations,
   getEscalation,
+  getEscalationForClient,
   getEscalationByArtifact,
   listEscalationsByRun,
   updateEscalation,
@@ -75,7 +76,11 @@ import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
 import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest } from "./auth.js";
-import { createArtifactSignedUrl, uploadRejectionLearningReferenceImage } from "./storage.js";
+import {
+  createArtifactSignedUrl,
+  deleteRejectionLearningReferenceImage,
+  uploadRejectionLearningReferenceImage,
+} from "./storage.js";
 
 dotenv.config();
 
@@ -1727,13 +1732,17 @@ app.patch("/api/escalations/:id/accept", async (req: Request, res: Response) => 
       return;
     }
 
-    const existing = await getEscalation(id);
+    // Resource-existence-leak fix (CodeRabbit PR #8). The route param `:id` is
+    // the only tenant signal we have, so we must scope the lookup itself when
+    // JWT_AUTH_ENABLED=true: foreign-tenant probes get a uniform 404 instead of
+    // distinguishing 404-not-found from 403-cross-tenant. Mirrors the PR #6 R2
+    // hardening on cost-summary / signed-url. JWT off → legacy unscoped read
+    // preserves anonymous-allowed dev behavior.
+    const existing = jwtAuthEnabled && caller
+      ? await getEscalationForClient(id, caller.clientId)
+      : await getEscalation(id);
     if (!existing) {
       res.status(404).json({ error: "Escalation not found" });
-      return;
-    }
-    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
@@ -1800,13 +1809,13 @@ app.patch("/api/escalations/:id/comment", async (req: Request, res: Response) =>
       return;
     }
 
-    const existing = await getEscalation(id);
+    // Resource-existence-leak fix (CodeRabbit PR #8) — see /accept for the
+    // canonical comment block. Same scoped-lookup pattern.
+    const existing = jwtAuthEnabled && caller
+      ? await getEscalationForClient(id, caller.clientId)
+      : await getEscalation(id);
     if (!existing) {
       res.status(404).json({ error: "Escalation not found" });
-      return;
-    }
-    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
@@ -1888,13 +1897,13 @@ app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
       return;
     }
 
-    const existing = await getEscalation(id);
+    // Resource-existence-leak fix (CodeRabbit PR #8) — see /accept for the
+    // canonical comment block. Same scoped-lookup pattern.
+    const existing = jwtAuthEnabled && caller
+      ? await getEscalationForClient(id, caller.clientId)
+      : await getEscalation(id);
     if (!existing) {
       res.status(404).json({ error: "Escalation not found" });
-      return;
-    }
-    if (jwtAuthEnabled && caller && existing.clientId && caller.clientId !== existing.clientId) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
@@ -1975,15 +1984,27 @@ app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
       }
     }
 
-    const result = await rejectReviewGateEscalation(id, {
-      eventId,
-      categoryId,
-      whatWrong,
-      correction,
-      blockMode,
-      refImagePath,
-      rejectedBy: typeof rejectedBy === "string" ? rejectedBy : caller?.clientId ?? "review-gate",
-    });
+    let result;
+    try {
+      result = await rejectReviewGateEscalation(id, {
+        eventId,
+        categoryId,
+        whatWrong,
+        correction,
+        blockMode,
+        refImagePath,
+        rejectedBy: typeof rejectedBy === "string" ? rejectedBy : caller?.clientId ?? "review-gate",
+      });
+    } catch (rpcErr) {
+      // Compensation: the migration 022 RPC rolls back the DB writes atomically,
+      // but a ref image uploaded above is not transactional. Remove the orphan
+      // image so storage doesn't accumulate dead bytes on retry. Resolves
+      // CodeRabbit PR #8 finding (db.ts:3552).
+      if (refImagePath) {
+        await deleteRejectionLearningReferenceImage(refImagePath).catch(() => false);
+      }
+      throw rpcErr;
+    }
 
     if (result.escalation.runId) {
       runEvents.emit(`escalation:${result.escalation.runId}`, result.escalation);

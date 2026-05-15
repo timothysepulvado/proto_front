@@ -7,7 +7,13 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test:phase4-cache-stability": "tsx tests/_phase4-cache-stability.ts",
+    "test:phase4-review-gate-card": "tsx tests/_phase4-review-gate-card.ts",
+    "test:phase4-reject-teach": "tsx tests/_phase4-reject-teach.ts",
+    "test:phase7-multi-tenant-isolation": "tsx tests/_phase7-multi-tenant-isolation.ts",
+    "test:pr4-storage-and-ledger": "tsx tests/_pr4-storage-and-ledger.ts",
+    "test:merge-gate": "npm run test:phase4-cache-stability && npm run test:phase7-multi-tenant-isolation && npm run test:pr4-storage-and-ledger"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",

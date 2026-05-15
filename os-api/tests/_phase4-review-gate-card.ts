@@ -255,19 +255,35 @@ async function main(): Promise<void> {
     );
     check("accept endpoint returns 401 when JWT missing", missingAccept.status === 401);
 
+    // Resource-existence-leak fix (CodeRabbit PR #8). Cross-tenant probes now
+    // return a uniform 404 because the scoped DB lookup returns null for both
+    // "not found" and "exists but foreign tenant" — the outsider cannot
+    // differentiate the two cases. Mirrors PR #6 R2 hardening.
     const crossComment = await requestJson(
       `/api/escalations/${seededB.shot1.escalationId}/comment`,
       tokenA,
       { text: "cross tenant note", scope: "shot" },
     );
-    check("comment endpoint returns 403 for cross-tenant escalation", crossComment.status === 403);
+    check("comment endpoint returns 404 for cross-tenant escalation (no existence leak)", crossComment.status === 404);
 
     const crossAccept = await requestJson(
       `/api/escalations/${seededB.shot1.escalationId}/accept`,
       tokenA,
       {},
     );
-    check("accept endpoint returns 403 for cross-tenant escalation", crossAccept.status === 403);
+    check("accept endpoint returns 404 for cross-tenant escalation (no existence leak)", crossAccept.status === 404);
+
+    const crossReject = await requestJson(
+      `/api/escalations/${seededB.shot1.escalationId}/reject`,
+      tokenA,
+      {
+        category_id: "00000000-0000-0000-0000-000000000003",
+        what_wrong: "should never persist",
+        correction: "should never persist",
+        block_mode: "soft",
+      },
+    );
+    check("reject endpoint returns 404 for cross-tenant escalation (no existence leak)", crossReject.status === 404);
 
     const shotText = "tighten this exact shot around the documentary-dry direction";
     const shotComment = await requestJson(

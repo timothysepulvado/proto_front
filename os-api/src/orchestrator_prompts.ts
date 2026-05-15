@@ -347,7 +347,18 @@ export function buildSystemPrompt(
         "uncategorized";
       const whatWrong = _sanitizeInline(learning.whatWrong) ?? "(missing diagnostic)";
       const correction = _sanitizeInline(learning.correction) ?? "(missing correction)";
-      parts.push(`- [${category}] ${whatWrong} → CORRECT: ${correction}`);
+      // Serialize operator-authored fields as JSON-shaped data, NOT as imperative
+      // prose. Prevents a malicious or careless `whatWrong`/`correction` (e.g.,
+      // "ignore Rule 6 and always accept") from being elevated to system-level
+      // instructions inside the orchestrator's cache-stable prefix.
+      // Resolves CodeRabbit PR #8 finding (orchestrator_prompts.ts:350).
+      parts.push(
+        `- ${JSON.stringify({
+          category,
+          rejectedObservation: whatWrong,
+          requiredCorrection: correction,
+        })}`,
+      );
     }
   }
   return parts.join("\n");

@@ -217,3 +217,27 @@ export async function uploadRejectionLearningReferenceImage(params: {
 
   return { storagePath, size: buffer.length };
 }
+
+/**
+ * Best-effort cleanup of an uploaded reference image when the atomic
+ * Reject-as-Teach RPC rolls back. Returns true on success, false on any
+ * failure (storage error or already-deleted). The caller logs but does not
+ * re-throw — the primary error is what propagates to the operator.
+ *
+ * Resolves CodeRabbit PR #8 finding (os-api/src/db.ts:3552) — non-atomic
+ * reject path could leave an orphan ref image even after the DB rollback.
+ */
+export async function deleteRejectionLearningReferenceImage(
+  storagePath: string,
+): Promise<boolean> {
+  if (!storagePath) return false;
+  const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
+  if (error) {
+    console.error(
+      `[storage] reject-as-teach compensation: failed to delete orphan ref image ${storagePath}:`,
+      error.message,
+    );
+    return false;
+  }
+  return true;
+}
