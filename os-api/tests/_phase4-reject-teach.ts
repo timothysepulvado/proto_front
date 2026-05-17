@@ -90,7 +90,7 @@ async function makeAuthedClient(clientId: string): Promise<SupabaseClient> {
   const token = await mintClientJwt(clientId);
   const client = createAnonClient(requireEnv("SUPABASE_URL"), requireEnv("SUPABASE_KEY"), {
     global: {
-      fetch: (input, init) => {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
         const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
         headers.set("Authorization", `Bearer ${token}`);
         return fetch(input, { ...init, headers });
@@ -338,8 +338,17 @@ async function main(): Promise<void> {
     check("soft reject returns a signed ref-image URL", typeof softReject.body.refImageSignedUrl === "string" && String(softReject.body.refImageSignedUrl).includes("token="));
 
     const eventId = softReject.body.eventId as string;
+    // Assert the path is actually a string before trusting the cast and
+    // queueing it for cleanup (PR #8 Karl review Minor #5) — a regressed
+    // endpoint returning undefined must fail loudly, not push a bad value.
+    check(
+      "soft reject returns a string refImagePath",
+      typeof softReject.body.refImagePath === "string" && softReject.body.refImagePath.length > 0,
+    );
     const refImagePath = softReject.body.refImagePath as string;
-    storagePathsToCleanup.push(refImagePath);
+    if (typeof refImagePath === "string" && refImagePath.length > 0) {
+      storagePathsToCleanup.push(refImagePath);
+    }
 
     const softEscalation = await expectSingle<{
       status: string;

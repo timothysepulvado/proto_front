@@ -159,6 +159,13 @@ export async function createArtifactSignedUrl(
   }
 }
 
+// Defensive ceiling for Reject-as-Teach reference images (operator-supplied
+// PNG screenshots). 15 MB is generous for a UI capture and bounds the
+// allocation below (PR #8 Karl review Minor #7 — size is now estimated from
+// the base64 length BEFORE Buffer.from() so a pathological payload is rejected
+// without first materializing a giant Buffer).
+const MAX_REF_IMAGE_BYTES = 15 * 1024 * 1024;
+
 function decodePngDataUrl(value: string): Buffer {
   const trimmed = value.trim();
   const dataUrlMatch = /^data:(image\/png);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(trimmed);
@@ -166,7 +173,17 @@ function decodePngDataUrl(value: string): Buffer {
   if (!/^[A-Za-z0-9+/=\r\n]+$/.test(rawBase64)) {
     throw new Error("ref_image_data must be PNG base64 or a data:image/png;base64 URL");
   }
-  const buffer = Buffer.from(rawBase64.replace(/\s+/g, ""), "base64");
+  const cleaned = rawBase64.replace(/\s+/g, "");
+  // Estimate decoded byte length from the base64 string before allocating:
+  // 4 base64 chars → 3 bytes, minus 1 byte per '=' pad char.
+  const padding = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0;
+  const estimatedBytes = Math.floor((cleaned.length * 3) / 4) - padding;
+  if (estimatedBytes > MAX_REF_IMAGE_BYTES) {
+    throw new Error(
+      `ref_image_data exceeds the ${MAX_REF_IMAGE_BYTES} byte limit (estimated ${estimatedBytes} bytes)`,
+    );
+  }
+  const buffer = Buffer.from(cleaned, "base64");
   if (buffer.length === 0) {
     throw new Error("ref_image_data decoded to an empty file");
   }
@@ -231,13 +248,24 @@ export async function deleteRejectionLearningReferenceImage(
   storagePath: string,
 ): Promise<boolean> {
   if (!storagePath) return false;
-  const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
-  if (error) {
+  // remove() can throw (network/transport) before it ever returns { error },
+  // which would break the documented "false on any failure" contract and let
+  // the throw escape the compensation path (PR #8 Karl review Minor #6).
+  try {
+    const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
+    if (error) {
+      console.error(
+        `[storage] reject-as-teach compensation: failed to delete orphan ref image ${storagePath}:`,
+        error.message,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
     console.error(
-      `[storage] reject-as-teach compensation: failed to delete orphan ref image ${storagePath}:`,
-      error.message,
+      `[storage] reject-as-teach compensation: unexpected error deleting orphan ref image ${storagePath}:`,
+      err instanceof Error ? err.message : String(err),
     );
     return false;
   }
-  return true;
 }

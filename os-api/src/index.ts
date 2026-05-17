@@ -1685,14 +1685,37 @@ app.get("/api/rejection-categories", async (req: Request, res: Response) => {
 // ============ Asset Escalations ============
 
 // GET /api/escalations - List (filter by status, run, campaign, client)
+//
+// Tenant gate (PR #8 Karl review BLOCK #2): with JWT_AUTH_ENABLED=true a
+// missing/invalid token is 401, and the clientId filter is FORCED to the
+// caller's own clientId — a caller can never enumerate another tenant's
+// escalations by passing ?clientId=. JWT off → legacy query-param behavior
+// (anonymous-allowed dev parity, same pattern as accept/comment/reject).
 app.get("/api/escalations", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const { status, runId, campaignId, clientId } = req.query;
+    // When JWT is enforced the caller's clientId overrides any query param so
+    // tenant isolation cannot be bypassed; the listEscalations client_id
+    // filter is now real (db.ts post-migration-014 fix).
+    const scopedClientId =
+      jwtAuthEnabled && caller
+        ? caller.clientId
+        : typeof clientId === "string"
+          ? clientId
+          : undefined;
+
     const items = await listEscalations({
       status: typeof status === "string" ? (status as never) : undefined,
       runId: typeof runId === "string" ? runId : undefined,
       campaignId: typeof campaignId === "string" ? campaignId : undefined,
-      clientId: typeof clientId === "string" ? clientId : undefined,
+      clientId: scopedClientId,
     });
     res.json(items);
   } catch (err) {
@@ -1702,10 +1725,25 @@ app.get("/api/escalations", async (req: Request, res: Response) => {
 });
 
 // GET /api/escalations/:id - Get one with full orchestration_decisions history
+//
+// Tenant gate (PR #8 Karl review BLOCK #2): same scoped-lookup pattern as
+// PATCH /accept — JWT_AUTH_ENABLED=true + missing token → 401; the lookup is
+// scoped to the caller's clientId so a foreign-tenant id probe gets a uniform
+// 404 (no 404-vs-403 existence leak). JWT off → legacy unscoped read.
 app.get("/api/escalations/:id", async (req: Request, res: Response) => {
   try {
     const id = getParam(req, "id");
-    const escalation = await getEscalation(id);
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const escalation = jwtAuthEnabled && caller
+      ? await getEscalationForClient(id, caller.clientId)
+      : await getEscalation(id);
     if (!escalation) return res.status(404).json({ error: "Escalation not found" });
     const decisions = await getOrchestrationDecisions(id);
     res.json({ ...escalation, decisions });
@@ -1966,26 +2004,32 @@ app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
     const eventId = uuidv4();
     let refImagePath: string | null = null;
     let refImageSignedUrl: string | null = null;
-    if (typeof refImageData === "string" && refImageData.trim().length > 0) {
-      if (!existing.runId) {
-        res.status(400).json({ error: "Escalation is missing run_id required for ref image upload" });
-        return;
-      }
-      const uploaded = await uploadRejectionLearningReferenceImage({
-        clientId: existing.clientId ?? caller?.clientId ?? "unknown-client",
-        runId: existing.runId,
-        eventId,
-        refImageData,
-      });
-      refImagePath = uploaded.storagePath;
-      refImageSignedUrl = await createArtifactSignedUrl(uploaded.storagePath, 60 * 60);
-      if (!refImageSignedUrl) {
-        throw new Error("Failed to create signed URL for rejection learning reference image");
-      }
-    }
-
     let result;
+    // One compensation scope spanning upload + signing + reject RPC (PR #8
+    // Karl review Major #3). The ref image upload is NOT transactional, so any
+    // failure AFTER it lands — signed-URL creation OR the reject RPC — must
+    // delete the orphan object. Previously the try/catch wrapped only the RPC,
+    // so a post-upload createArtifactSignedUrl() failure threw past the
+    // compensation and leaked storage bytes.
     try {
+      if (typeof refImageData === "string" && refImageData.trim().length > 0) {
+        if (!existing.runId) {
+          res.status(400).json({ error: "Escalation is missing run_id required for ref image upload" });
+          return;
+        }
+        const uploaded = await uploadRejectionLearningReferenceImage({
+          clientId: existing.clientId ?? caller?.clientId ?? "unknown-client",
+          runId: existing.runId,
+          eventId,
+          refImageData,
+        });
+        refImagePath = uploaded.storagePath;
+        refImageSignedUrl = await createArtifactSignedUrl(uploaded.storagePath, 60 * 60);
+        if (!refImageSignedUrl) {
+          throw new Error("Failed to create signed URL for rejection learning reference image");
+        }
+      }
+
       result = await rejectReviewGateEscalation(id, {
         eventId,
         categoryId,
@@ -1995,15 +2039,15 @@ app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
         refImagePath,
         rejectedBy: typeof rejectedBy === "string" ? rejectedBy : caller?.clientId ?? "review-gate",
       });
-    } catch (rpcErr) {
-      // Compensation: the migration 022 RPC rolls back the DB writes atomically,
-      // but a ref image uploaded above is not transactional. Remove the orphan
-      // image so storage doesn't accumulate dead bytes on retry. Resolves
-      // CodeRabbit PR #8 finding (db.ts:3552).
+    } catch (opErr) {
+      // The migration 022/023 RPC rolls back its DB writes atomically; this
+      // catch handles the non-transactional storage object. Best-effort delete
+      // (swallow secondary failure) then rethrow the original error so the
+      // outer handler maps the status code.
       if (refImagePath) {
         await deleteRejectionLearningReferenceImage(refImagePath).catch(() => false);
       }
-      throw rpcErr;
+      throw opErr;
     }
 
     if (result.escalation.runId) {
@@ -2041,9 +2085,24 @@ app.post("/api/escalations/:id/reject", async (req: Request, res: Response) => {
 });
 
 // PATCH /api/escalations/:id/resolve - Operator resolves an open escalation.
+//
+// Legacy accept path (PR #8 superseded it with PATCH /accept; no live HUD
+// caller — resolveEscalationAccept in src/api.ts is dead code). Kept
+// functional but tenant-gated (PR #8 Karl review BLOCK #2): same scoped
+// pattern as /accept — 401 when JWT-on + no token, scoped lookup so a
+// cross-tenant id probe gets a uniform 404 and the write can only touch the
+// caller's own escalation. JWT off → legacy unscoped behavior.
 app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) => {
   try {
     const id = getParam(req, "id");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const body = req.body as {
       status?: unknown;
       resolution_path?: unknown;
@@ -2073,7 +2132,9 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
       return;
     }
 
-    const existing = await getEscalation(id);
+    const existing = jwtAuthEnabled && caller
+      ? await getEscalationForClient(id, caller.clientId)
+      : await getEscalation(id);
     if (!existing) {
       res.status(404).json({ error: "Escalation not found" });
       return;

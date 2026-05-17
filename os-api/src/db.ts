@@ -3848,8 +3848,15 @@ export async function listEscalations(filters?: {
     .order("created_at", { ascending: false });
   if (filters?.status) q = q.eq("status", filters.status);
   if (filters?.runId) q = q.eq("run_id", filters.runId);
-  // Campaign/client filters need a join through deliverables; defer to a view or
-  // two-step query. For now, accept that campaignId and clientId require join.
+  // client_id is a direct denormalized column since Phase 7 migration 014
+  // (asset_escalations.client_id TEXT NOT NULL) — filter it directly. This is
+  // tenant-isolation-critical: the GET /api/escalations route forces this to
+  // the JWT caller's clientId when JWT_AUTH_ENABLED=true (PR #8 Karl review
+  // BLOCK #2). The prior "defer to join" comment was stale pre-014 and meant
+  // this filter was silently dropped, leaking cross-tenant rows.
+  if (filters?.clientId) q = q.eq("client_id", filters.clientId);
+  // campaignId still requires a join through deliverables (no direct column on
+  // asset_escalations); unchanged here — not a tenant-isolation boundary.
   const { data, error } = await q;
   if (error) throw new Error(`Failed to list escalations: ${error.message}`);
   let items = (data as DbAssetEscalation[]).map(mapAssetEscalation);
