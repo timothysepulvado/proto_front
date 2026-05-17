@@ -2184,11 +2184,29 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
 });
 
 // GET /api/artifacts/:id/escalation - Get escalation for an artifact (null if none)
+//
+// Tenant gate (PR #8 Karl re-review BLOCK — escalation-adjacent surface):
+// JWT_AUTH_ENABLED=true + missing/invalid token → 401. A foreign-tenant
+// artifact's escalation returns the SAME 404 as "none" — no 404-vs-403
+// existence leak, mirroring GET /api/escalations/:id. JWT off → legacy read.
 app.get("/api/artifacts/:id/escalation", async (req: Request, res: Response) => {
   try {
     const id = getParam(req, "id");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const escalation = await getEscalationByArtifact(id);
-    if (!escalation) return res.status(404).json({ error: "No escalation for this artifact" });
+    if (
+      !escalation ||
+      (jwtAuthEnabled && caller && escalation.clientId && caller.clientId !== escalation.clientId)
+    ) {
+      return res.status(404).json({ error: "No escalation for this artifact" });
+    }
     res.json(escalation);
   } catch (err) {
     console.error("GET /api/artifacts/:id/escalation error:", err);
@@ -2197,10 +2215,27 @@ app.get("/api/artifacts/:id/escalation", async (req: Request, res: Response) => 
 });
 
 // GET /api/campaigns/:campaignId/escalations - Campaign-level dashboard
+//
+// Tenant gate (PR #8 Karl re-review BLOCK — escalation-adjacent surface):
+// JWT_AUTH_ENABLED=true + missing token → 401; the listEscalations clientId
+// filter is FORCED to the caller's own clientId so a cross-tenant campaignId
+// cannot enumerate another tenant's escalations (mirrors GET /api/escalations).
+// JWT off → legacy unscoped behavior.
 app.get("/api/campaigns/:campaignId/escalations", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
-    const items = await listEscalations({ campaignId });
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const items = await listEscalations({
+      campaignId,
+      clientId: jwtAuthEnabled && caller ? caller.clientId : undefined,
+    });
     res.json(items);
   } catch (err) {
     console.error("GET /api/campaigns/:campaignId/escalations error:", err);
@@ -2211,11 +2246,31 @@ app.get("/api/campaigns/:campaignId/escalations", async (req: Request, res: Resp
 // ============ Run Escalation Report (Final HITL surface) ============
 
 // GET /api/runs/:runId/escalation-report - Full report for final HITL
+//
+// Tenant gate (PR #8 Karl re-review BLOCK — escalation-adjacent surface):
+// JWT_AUTH_ENABLED=true + missing token → 401. This surface aggregates
+// escalation + orchestration-decision data, so a foreign-tenant runId returns
+// the SAME 404 as a non-existent run (no-existence-leak / uniform 404, the
+// pattern used across escalation routes — stricter than the 403 used by
+// non-escalation run routes). JWT off → legacy unscoped read.
 app.get("/api/runs/:runId/escalation-report", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
-    if (!run) return res.status(404).json({ error: "Run not found" });
+    if (
+      !run ||
+      (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId)
+    ) {
+      return res.status(404).json({ error: "Run not found" });
+    }
 
     const escalations = await listEscalationsByRun(runId);
     const decisions = await getOrchestrationDecisionsByRun(runId);
@@ -2333,9 +2388,29 @@ app.post("/api/runs/:runId/final-hitl/reject", async (req: Request, res: Respons
 // ============ Orchestrator (introspection + dev replay) ============
 
 // GET /api/orchestrator/decisions/:escalationId - Full decision history
+//
+// Tenant gate (PR #8 Karl re-review BLOCK — escalation-adjacent surface):
+// JWT_AUTH_ENABLED=true + missing token → 401. Ownership is resolved through
+// the parent escalation via the scoped getEscalationForClient lookup — a
+// foreign-tenant escalationId is a scoped-lookup miss → uniform 404,
+// mirroring GET /api/escalations/:id. JWT off → legacy unscoped read.
 app.get("/api/orchestrator/decisions/:escalationId", async (req: Request, res: Response) => {
   try {
     const escalationId = getParam(req, "escalationId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const owned = await getEscalationForClient(escalationId, caller.clientId);
+      if (!owned) {
+        return res.status(404).json({ error: "Escalation not found" });
+      }
+    }
+
     const decisions = await getOrchestrationDecisions(escalationId);
     res.json(decisions);
   } catch (err) {

@@ -70,6 +70,26 @@ async function requestJson(
   return { status: resp.status, body: parsed };
 }
 
+// GET variant — for the escalation-adjacent read routes gated in the PR #8
+// Karl re-review BLOCK (artifact escalation / campaign escalations / run
+// escalation-report / orchestrator decisions). Returns parsed body as unknown
+// since these routes return arrays and objects, not the mutation envelope.
+async function requestGet(
+  path: string,
+  token: string | undefined,
+): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}${path}`, { method: "GET", headers });
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    // leave null
+  }
+  return { status: resp.status, body: parsed };
+}
+
 async function seedTenant(clientId: string): Promise<SeededTenant> {
   await expectMutation(
     await serviceClient.from("clients").insert({
@@ -254,6 +274,56 @@ async function main(): Promise<void> {
       {},
     );
     check("accept endpoint returns 401 when JWT missing", missingAccept.status === 401);
+
+    // ── PR #8 Karl re-review BLOCK: escalation-adjacent READ routes ──
+    // These 4 GET routes leaked cross-tenant escalation/orchestration data
+    // unauthenticated under JWT_AUTH_ENABLED=true. Karl found them by manual
+    // whole-file grep (twice) because the harness was blind to read routes —
+    // this block makes the gate a permanent merge-gate regression. Pattern:
+    // no-auth → 401; single-resource cross-tenant → uniform 404 (no existence
+    // leak); list cross-tenant → 200 + empty (scoped, no leak); own-tenant
+    // → 200 (positive control proving the gate doesn't break legit access).
+
+    // 1. GET /api/artifacts/:id/escalation (single resource → uniform 404)
+    const artEscNoAuth = await requestGet(`/api/artifacts/${seededA.shot1.artifactId}/escalation`, undefined);
+    check("artifact-escalation returns 401 when JWT missing", artEscNoAuth.status === 401);
+    const artEscCross = await requestGet(`/api/artifacts/${seededB.shot1.artifactId}/escalation`, tokenA);
+    check("artifact-escalation returns 404 cross-tenant (no existence leak)", artEscCross.status === 404);
+    const artEscOwn = await requestGet(`/api/artifacts/${seededA.shot1.artifactId}/escalation`, tokenA);
+    check("artifact-escalation returns 200 own-tenant", artEscOwn.status === 200);
+
+    // 2. GET /api/campaigns/:campaignId/escalations (list → scoped, empty not leak)
+    const campEscNoAuth = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/escalations`, undefined);
+    check("campaign-escalations returns 401 when JWT missing", campEscNoAuth.status === 401);
+    const campEscCross = await requestGet(`/api/campaigns/${seededB.shot1.campaignId}/escalations`, tokenA);
+    check(
+      "campaign-escalations returns 200 + empty cross-tenant (scoped, no leak)",
+      campEscCross.status === 200 && Array.isArray(campEscCross.body) && campEscCross.body.length === 0,
+    );
+    const campEscOwn = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/escalations`, tokenA);
+    check(
+      "campaign-escalations returns 200 + own rows own-tenant",
+      campEscOwn.status === 200 && Array.isArray(campEscOwn.body) && campEscOwn.body.length >= 1,
+    );
+
+    // 3. GET /api/runs/:runId/escalation-report (aggregate → uniform 404)
+    const runRepNoAuth = await requestGet(`/api/runs/${seededA.shot1.runId}/escalation-report`, undefined);
+    check("run-escalation-report returns 401 when JWT missing", runRepNoAuth.status === 401);
+    const runRepCross = await requestGet(`/api/runs/${seededB.shot1.runId}/escalation-report`, tokenA);
+    check("run-escalation-report returns 404 cross-tenant (no existence leak)", runRepCross.status === 404);
+    const runRepOwn = await requestGet(`/api/runs/${seededA.shot1.runId}/escalation-report`, tokenA);
+    check("run-escalation-report returns 200 own-tenant", runRepOwn.status === 200);
+
+    // 4. GET /api/orchestrator/decisions/:escalationId (scoped via parent → uniform 404)
+    const orchNoAuth = await requestGet(`/api/orchestrator/decisions/${seededA.shot1.escalationId}`, undefined);
+    check("orchestrator-decisions returns 401 when JWT missing", orchNoAuth.status === 401);
+    const orchCross = await requestGet(`/api/orchestrator/decisions/${seededB.shot1.escalationId}`, tokenA);
+    check("orchestrator-decisions returns 404 cross-tenant (no existence leak)", orchCross.status === 404);
+    const orchOwn = await requestGet(`/api/orchestrator/decisions/${seededA.shot1.escalationId}`, tokenA);
+    check(
+      "orchestrator-decisions returns 200 + array own-tenant",
+      orchOwn.status === 200 && Array.isArray(orchOwn.body),
+    );
 
     // Resource-existence-leak fix (CodeRabbit PR #8). Cross-tenant probes now
     // return a uniform 404 because the scoped DB lookup returns null for both
