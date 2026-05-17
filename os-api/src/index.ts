@@ -836,9 +836,31 @@ app.get("/api/runs/:runId/artifacts", async (req: Request, res: Response) => {
 });
 
 // GET /api/deliverables/:deliverableId/iterations - Regen artifacts + critic verdicts
+// Tenant gate (PR #8 Brandy data-flow sweep — escalation-CONSUMING aggregate):
+// getArtifactsForDeliverableWithVerdicts reads asset_escalations to attach
+// per-iteration verdict state. Ownership is resolved through the parent
+// campaign (Campaign.clientId is NOT NULL; CampaignDeliverable.clientId is a
+// nullable denormalized column so the campaign is the bulletproof anchor).
+// JWT_AUTH_ENABLED=true + missing token → 401; missing deliverable/campaign
+// OR foreign tenant → uniform 404 (no existence leak). JWT off → legacy.
 app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res: Response) => {
   try {
     const deliverableId = getParam(req, "deliverableId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const deliverable = await getDeliverable(deliverableId);
+      const campaign = deliverable ? await getCampaign(deliverable.campaignId) : null;
+      if (!deliverable || !campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Deliverable not found" });
+      }
+    }
+
     const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId);
     res.json(iterations);
   } catch (err) {
@@ -1270,9 +1292,29 @@ app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Resp
 });
 
 // GET /api/campaigns/:campaignId/motion-phase-gate - Stills → Veo handoff state
+//
+// Tenant gate (PR #8 Karl re-review #2 BLOCK — escalation-CONSUMING aggregate):
+// getMotionPhaseGateState reads asset_escalations and returns escalation /
+// operator-review-derived state. JWT_AUTH_ENABLED=true + missing token → 401;
+// a missing OR foreign-tenant campaign → uniform 404 (no existence leak,
+// matching the POST-deliverables campaign-404 convention). JWT off → legacy.
 app.get("/api/campaigns/:campaignId/motion-phase-gate", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const state = await getMotionPhaseGateState(campaignId);
     res.json(state);
   } catch (err) {
@@ -1282,9 +1324,31 @@ app.get("/api/campaigns/:campaignId/motion-phase-gate", async (req: Request, res
 });
 
 // GET /api/campaigns/:campaignId/direction-drift - Per-shot direction drift badges
+//
+// Tenant gate (PR #8 Brandy data-flow sweep — escalation-CONSUMING aggregate):
+// the route NAME reads like the Brand Drift pillar, but
+// getDirectionDriftIndicatorsByCampaign actually reads asset_escalations and
+// returns escalation-derived per-shot indicators — same security class as
+// motion-phase-gate / shot-summaries (NOT a deferred drift_metrics route).
+// JWT_AUTH_ENABLED=true + missing token → 401; missing OR foreign-tenant
+// campaign → uniform 404 (no existence leak). JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/direction-drift", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const indicatorMap = await getDirectionDriftIndicatorsByCampaign(campaignId);
     res.json(Object.fromEntries(indicatorMap.entries()));
   } catch (err) {
@@ -1315,10 +1379,29 @@ app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Res
 //
 // Optional ?run_id=<uuid> filter narrows artifacts / escalations / decisions
 // to that run so a live regrade's metrics don't bleed across prior runs.
+//
+// Tenant gate (PR #8 Karl re-review #2 BLOCK — escalation-CONSUMING aggregate):
+// getShotSummaries aggregates asset_escalations + orchestration_decisions.
+// JWT_AUTH_ENABLED=true + missing token → 401; missing OR foreign-tenant
+// campaign → uniform 404 (no existence leak). JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/shot-summaries", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
     const runId = typeof req.query.run_id === "string" ? req.query.run_id : undefined;
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const summaries = await getShotSummaries(campaignId, runId);
     res.json(summaries);
   } catch (err) {

@@ -325,6 +325,53 @@ async function main(): Promise<void> {
       orchOwn.status === 200 && Array.isArray(orchOwn.body),
     );
 
+    // ── PR #8 Karl re-review #2 + Brandy data-flow sweep: escalation-
+    // CONSUMING aggregate routes. These don't have "escalation" in the path
+    // (route-name grep missed them — found via tracing which handlers READ
+    // asset_escalations/orchestration_decisions). Campaign-keyed → uniform
+    // 404 cross-tenant; deliverable-keyed (iterations) resolves through the
+    // parent campaign (Campaign.clientId NOT NULL). Same 3-case contract.
+
+    // 5. GET /api/campaigns/:campaignId/motion-phase-gate (reads asset_escalations)
+    const mpgNoAuth = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/motion-phase-gate`, undefined);
+    check("motion-phase-gate returns 401 when JWT missing", mpgNoAuth.status === 401);
+    const mpgCross = await requestGet(`/api/campaigns/${seededB.shot1.campaignId}/motion-phase-gate`, tokenA);
+    check("motion-phase-gate returns 404 cross-tenant (no existence leak)", mpgCross.status === 404);
+    const mpgOwn = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/motion-phase-gate`, tokenA);
+    check("motion-phase-gate returns 200 own-tenant", mpgOwn.status === 200);
+
+    // 6. GET /api/campaigns/:campaignId/shot-summaries (aggregates escalations+decisions)
+    const ssNoAuth = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/shot-summaries`, undefined);
+    check("shot-summaries returns 401 when JWT missing", ssNoAuth.status === 401);
+    const ssCross = await requestGet(`/api/campaigns/${seededB.shot1.campaignId}/shot-summaries`, tokenA);
+    check("shot-summaries returns 404 cross-tenant (no existence leak)", ssCross.status === 404);
+    const ssOwn = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/shot-summaries`, tokenA);
+    check("shot-summaries returns 200 own-tenant", ssOwn.status === 200 && Array.isArray(ssOwn.body));
+
+    // 7. GET /api/campaigns/:campaignId/direction-drift (reads asset_escalations)
+    const ddNoAuth = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/direction-drift`, undefined);
+    check("direction-drift returns 401 when JWT missing", ddNoAuth.status === 401);
+    const ddCross = await requestGet(`/api/campaigns/${seededB.shot1.campaignId}/direction-drift`, tokenA);
+    check("direction-drift returns 404 cross-tenant (no existence leak)", ddCross.status === 404);
+    const ddOwn = await requestGet(`/api/campaigns/${seededA.shot1.campaignId}/direction-drift`, tokenA);
+    check("direction-drift returns 200 own-tenant", ddOwn.status === 200);
+
+    // 8. GET /api/deliverables/:deliverableId/iterations (reads asset_escalations)
+    const itNoAuth = await requestGet(`/api/deliverables/${seededA.shot1.deliverableId}/iterations`, undefined);
+    check("iterations returns 401 when JWT missing", itNoAuth.status === 401);
+    const itCross = await requestGet(`/api/deliverables/${seededB.shot1.deliverableId}/iterations`, tokenA);
+    check("iterations returns 404 cross-tenant (no existence leak)", itCross.status === 404);
+    const itOwn = await requestGet(`/api/deliverables/${seededA.shot1.deliverableId}/iterations`, tokenA);
+    const itBody = itOwn.body as { deliverableId?: string; rows?: unknown } | null;
+    check(
+      "iterations returns 200 own-tenant with own deliverable's rows",
+      itOwn.status === 200 &&
+        !!itBody &&
+        typeof itBody === "object" &&
+        itBody.deliverableId === seededA.shot1.deliverableId &&
+        Array.isArray(itBody.rows),
+    );
+
     // Resource-existence-leak fix (CodeRabbit PR #8). Cross-tenant probes now
     // return a uniform 404 because the scoped DB lookup returns null for both
     // "not found" and "exists but foreign tenant" — the outsider cannot
