@@ -372,6 +372,21 @@ async function main(): Promise<void> {
         Array.isArray(itBody.rows),
     );
 
+    // 9. GET /api/runs/:runId/detail — TRANSITIVE escalation consumer
+    // (getRunDetail → getOrchestrationDecisionsByRun). The one-level sweep
+    // missed it; transitive-closure sweep caught it (Karl re-review #3 BLOCK).
+    // Run-keyed → uniform 404 cross-tenant (same as escalation-report).
+    const rdNoAuth = await requestGet(`/api/runs/${seededA.shot1.runId}/detail`, undefined);
+    check("run-detail returns 401 when JWT missing", rdNoAuth.status === 401);
+    const rdCross = await requestGet(`/api/runs/${seededB.shot1.runId}/detail`, tokenA);
+    check("run-detail returns 404 cross-tenant (no existence leak)", rdCross.status === 404);
+    const rdOwn = await requestGet(`/api/runs/${seededA.shot1.runId}/detail`, tokenA);
+    const rdBody = rdOwn.body as { runId?: string } | null;
+    check(
+      "run-detail returns 200 own-tenant with own run",
+      rdOwn.status === 200 && !!rdBody && typeof rdBody === "object",
+    );
+
     // Resource-existence-leak fix (CodeRabbit PR #8). Cross-tenant probes now
     // return a uniform 404 because the scoped DB lookup returns null for both
     // "not found" and "exists but foreign tenant" — the outsider cannot

@@ -397,9 +397,30 @@ app.get("/api/runs/:runId", async (req: Request, res: Response) => {
 });
 
 // GET /api/runs/:runId/detail - Run drawer payload for HUD operators
+// Tenant gate (PR #8 Karl re-review #3 BLOCK — TRANSITIVE escalation consumer):
+// getRunDetail calls getOrchestrationDecisionsByRun, so it exposes
+// orchestration-decision cost/count per run. The one-level data-flow sweep
+// missed it (getRunDetail's own body has no asset_escalations/
+// orchestration_decisions query — the read is one call deep). JWT_AUTH_ENABLED
+// =true + missing token → 401; missing OR foreign-tenant run → uniform 404
+// (no existence leak, same as /escalation-report). JWT off → legacy unscoped.
 app.get("/api/runs/:runId/detail", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const run = await getRun(runId);
+      if (!run || (run.clientId && caller.clientId !== run.clientId)) {
+        return res.status(404).json({ error: "Run not found" });
+      }
+    }
+
     const detail = await getRunDetail(runId);
     if (!detail) {
       res.status(404).json({ error: "Run not found" });
