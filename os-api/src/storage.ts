@@ -158,3 +158,114 @@ export async function createArtifactSignedUrl(
     return null;
   }
 }
+
+// Defensive ceiling for Reject-as-Teach reference images (operator-supplied
+// PNG screenshots). 15 MB is generous for a UI capture and bounds the
+// allocation below (PR #8 Karl review Minor #7 — size is now estimated from
+// the base64 length BEFORE Buffer.from() so a pathological payload is rejected
+// without first materializing a giant Buffer).
+const MAX_REF_IMAGE_BYTES = 15 * 1024 * 1024;
+
+function decodePngDataUrl(value: string): Buffer {
+  const trimmed = value.trim();
+  const dataUrlMatch = /^data:(image\/png);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(trimmed);
+  const rawBase64 = dataUrlMatch ? dataUrlMatch[2] : trimmed;
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(rawBase64)) {
+    throw new Error("ref_image_data must be PNG base64 or a data:image/png;base64 URL");
+  }
+  const cleaned = rawBase64.replace(/\s+/g, "");
+  // Estimate decoded byte length from the base64 string before allocating:
+  // 4 base64 chars → 3 bytes, minus 1 byte per '=' pad char.
+  const padding = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0;
+  const estimatedBytes = Math.floor((cleaned.length * 3) / 4) - padding;
+  if (estimatedBytes > MAX_REF_IMAGE_BYTES) {
+    throw new Error(
+      `ref_image_data exceeds the ${MAX_REF_IMAGE_BYTES} byte limit (estimated ${estimatedBytes} bytes)`,
+    );
+  }
+  const buffer = Buffer.from(cleaned, "base64");
+  if (buffer.length === 0) {
+    throw new Error("ref_image_data decoded to an empty file");
+  }
+  // PNG signature: 89 50 4E 47 0D 0A 1A 0A.
+  if (
+    buffer.length < 8 ||
+    buffer[0] !== 0x89 ||
+    buffer[1] !== 0x50 ||
+    buffer[2] !== 0x4e ||
+    buffer[3] !== 0x47 ||
+    buffer[4] !== 0x0d ||
+    buffer[5] !== 0x0a ||
+    buffer[6] !== 0x1a ||
+    buffer[7] !== 0x0a
+  ) {
+    throw new Error("ref_image_data must decode to a PNG image");
+  }
+  return buffer;
+}
+
+export function buildRejectionLearningRefImagePath(
+  clientId: string,
+  runId: string,
+  eventId: string,
+): string {
+  return `${clientId}/${runId}/learning/${eventId}.png`;
+}
+
+export async function uploadRejectionLearningReferenceImage(params: {
+  clientId: string;
+  runId: string;
+  eventId: string;
+  refImageData: string;
+}): Promise<{ storagePath: string; size: number }> {
+  const storagePath = buildRejectionLearningRefImagePath(params.clientId, params.runId, params.eventId);
+  const buffer = decodePngDataUrl(params.refImageData);
+
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(storagePath, buffer, {
+      contentType: "image/png",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`Failed to upload rejection learning reference image: ${error.message}`);
+  }
+
+  return { storagePath, size: buffer.length };
+}
+
+/**
+ * Best-effort cleanup of an uploaded reference image when the atomic
+ * Reject-as-Teach RPC rolls back. Returns true on success, false on any
+ * failure (storage error or already-deleted). The caller logs but does not
+ * re-throw — the primary error is what propagates to the operator.
+ *
+ * Resolves CodeRabbit PR #8 finding (os-api/src/db.ts:3552) — non-atomic
+ * reject path could leave an orphan ref image even after the DB rollback.
+ */
+export async function deleteRejectionLearningReferenceImage(
+  storagePath: string,
+): Promise<boolean> {
+  if (!storagePath) return false;
+  // remove() can throw (network/transport) before it ever returns { error },
+  // which would break the documented "false on any failure" contract and let
+  // the throw escape the compensation path (PR #8 Karl review Minor #6).
+  try {
+    const { error } = await supabase.storage.from(BUCKET).remove([storagePath]);
+    if (error) {
+      console.error(
+        `[storage] reject-as-teach compensation: failed to delete orphan ref image ${storagePath}:`,
+        error.message,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(
+      `[storage] reject-as-teach compensation: unexpected error deleting orphan ref image ${storagePath}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+}

@@ -769,6 +769,23 @@ export async function getArtifacts(runId: string): Promise<Artifact[]> {
   return (data as DbArtifact[]).map(mapDbArtifactToArtifact);
 }
 
+export async function getLatestVideoArtifactForCampaign(campaignId: string): Promise<Artifact | null> {
+  const { data, error } = await supabase
+    .from("artifacts")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .eq("type", "video")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to get latest campaign video artifact: ${error.message}`);
+  }
+
+  return data ? mapDbArtifactToArtifact(data as DbArtifact) : null;
+}
+
 // Create artifact
 export async function createArtifact(
   runId: string,
@@ -1158,16 +1175,12 @@ function mapDbRejectionCategory(d: DbRejectionCategory): RejectionCategory {
 
 // Get rejection categories taxonomy
 export async function getRejectionCategories(): Promise<RejectionCategory[]> {
-  // Live proto_front has shipped with both historical shapes:
-  //   migration shape: { id UUID, name, description, ... }
-  //   seeded demo shape: { id text, label, ... }
-  // Select all and sort client-side so Review Gate does not 400 on either.
-  const { data, error } = await supabase
-    .from("rejection_categories")
-    .select("*");
-
-  if (error) throw new Error(`Failed to get rejection categories: ${error.message}`);
-  return (data as DbRejectionCategory[])
+  const resp = await fetch(`${OS_API_URL}/api/rejection-categories`, {
+    headers: getAuthHeaders(),
+  });
+  if (!resp.ok) throw await parseOsApiError(resp);
+  const body = await resp.json() as { categories?: DbRejectionCategory[] };
+  return (body.categories ?? [])
     .map(mapDbRejectionCategory)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1824,6 +1837,7 @@ export interface Campaign {
   maxRetries: number;
   referenceImages?: string[];
   guardrails?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -1863,6 +1877,7 @@ interface DbCampaign {
   max_retries: number;
   reference_images?: string[] | null;
   guardrails?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -1904,6 +1919,7 @@ function mapDbCampaignToCampaign(db: DbCampaign): Campaign {
     maxRetries: db.max_retries,
     referenceImages: db.reference_images ?? undefined,
     guardrails: db.guardrails ?? undefined,
+    metadata: db.metadata ?? undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
@@ -1994,7 +2010,9 @@ export type EscalationStatus =
   | "accepted"
   | "redesigned"
   | "replaced"
-  | "hitl_required";
+  | "hitl_required"
+  | "rejected_soft"
+  | "rejected_terminal";
 export type EscalationAction =
   | "prompt_fix"
   | "approach_change"
@@ -2016,6 +2034,7 @@ export interface AssetEscalation {
   resolutionPath?: EscalationAction;
   resolutionNotes?: string;
   finalArtifactId?: string;
+  learningEventId?: string;
   resolvedAt?: string;
   createdAt: string;
   updatedAt: string;
@@ -2034,6 +2053,7 @@ interface DbAssetEscalation {
   resolution_path: string | null;
   resolution_notes: string | null;
   final_artifact_id: string | null;
+  learning_event_id: string | null;
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
@@ -2053,6 +2073,7 @@ function mapDbAssetEscalation(db: DbAssetEscalation): AssetEscalation {
     resolutionPath: (db.resolution_path ?? undefined) as EscalationAction | undefined,
     resolutionNotes: db.resolution_notes ?? undefined,
     finalArtifactId: db.final_artifact_id ?? undefined,
+    learningEventId: db.learning_event_id ?? undefined,
     resolvedAt: db.resolved_at ?? undefined,
     createdAt: db.created_at,
     updatedAt: db.updated_at,
@@ -2149,6 +2170,78 @@ export interface ResolveEscalationResponse {
   runHitlCleared: boolean;
 }
 
+export interface AcceptReviewGateEscalationResponse extends ResolveEscalationResponse {
+  shotNumber: number | null;
+  operatorOverride: Record<string, unknown> | null;
+}
+
+export type ReviewGateCommentScope = "shot" | "campaign";
+
+export interface ReviewGateCommentResponse {
+  escalation: AssetEscalation;
+  sourceRun: Run;
+  regenRun: Run | null;
+  newRunId: string | null;
+  eventName: string | null;
+  scope: ReviewGateCommentScope;
+  targetShotIds: number[];
+  targetDeliverableIds: string[];
+  regenPayload: {
+    sourceRunId: string | null;
+    regenRunId: string;
+    escalationId: string;
+    clientId: string;
+    campaignId: string;
+    scope: ReviewGateCommentScope;
+    comment: string;
+    targetShotIds: number[];
+    targetDeliverableIds: string[];
+    submittedAt: string;
+  } | null;
+  campaignDirection?: {
+    previousMantra?: string;
+    currentMantra: string;
+    abandonedCount: number;
+  };
+}
+
+export type RejectionLearningBlockMode = "soft" | "terminal";
+
+export interface RejectionLearningEvent {
+  id: string;
+  clientId: string;
+  campaignId?: string;
+  shotId?: number;
+  assetId?: string;
+  categoryId?: string;
+  categoryLabel?: string;
+  whatWrong: string;
+  correction: string;
+  refImagePath?: string;
+  blockMode: RejectionLearningBlockMode;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface RejectReviewGateEscalationPayload {
+  categoryId: string;
+  whatWrong: string;
+  correction: string;
+  refImageData?: string;
+  blockMode: RejectionLearningBlockMode;
+}
+
+export interface RejectReviewGateEscalationResponse {
+  escalation: AssetEscalation;
+  learningEvent: RejectionLearningEvent;
+  runHitlCleared: boolean;
+  shotNumber: number | null;
+  blockMode: RejectionLearningBlockMode;
+  refImagePath: string | null;
+  refImageSignedUrl: string | null;
+  eventId: string;
+}
+
 export async function resolveEscalationAccept(
   escalationId: string,
   resolutionNotes: string,
@@ -2165,6 +2258,56 @@ export async function resolveEscalationAccept(
 
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ResolveEscalationResponse;
+}
+
+export async function acceptReviewGateEscalation(
+  escalationId: string,
+  resolutionNotes?: string,
+): Promise<AcceptReviewGateEscalationResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/accept`, {
+    method: "PATCH",
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(resolutionNotes ? { resolution_notes: resolutionNotes } : {}),
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as AcceptReviewGateEscalationResponse;
+}
+
+export async function commentReviewGateEscalation(
+  escalationId: string,
+  payload: { text: string; scope: ReviewGateCommentScope },
+): Promise<ReviewGateCommentResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/comment`, {
+    method: "PATCH",
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as ReviewGateCommentResponse;
+}
+
+export async function rejectReviewGateEscalation(
+  escalationId: string,
+  payload: RejectReviewGateEscalationPayload,
+): Promise<RejectReviewGateEscalationResponse> {
+  const resp = await fetch(`${OS_API_URL}/api/escalations/${escalationId}/reject`, {
+    method: "POST",
+    headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      category_id: payload.categoryId,
+      what_wrong: payload.whatWrong,
+      correction: payload.correction,
+      ...(payload.refImageData ? { ref_image_data: payload.refImageData } : {}),
+      block_mode: payload.blockMode,
+    }),
+  });
+
+  if (!resp.ok) throw await parseOsApiError(resp);
+  return (await resp.json()) as RejectReviewGateEscalationResponse;
 }
 
 export function subscribeToAssetEscalations(

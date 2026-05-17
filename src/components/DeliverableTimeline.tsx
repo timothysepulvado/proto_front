@@ -129,7 +129,7 @@ export default function DeliverableTimeline({ productionSlug = "drift-mv" }: Del
   if (isLoading) return <TimelineSkeleton />;
 
   return (
-    <section className="mt-3 rounded-2xl border border-cyan-500/15 bg-black/25 p-4 shadow-[0_0_30px_rgba(34,211,238,0.04)]">
+    <section className="mt-3 rounded-2xl border border-cyan-500/15 bg-black/25 p-4 shadow-[0_0_30px_rgba(73,157,216,0.04)]">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 text-[9px] font-mono uppercase tracking-[0.28em] text-cyan-300/75">

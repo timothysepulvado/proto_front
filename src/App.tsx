@@ -37,6 +37,8 @@ import ActiveClientBadge from "./components/ActiveClientBadge";
 import CampaignDashboard from "./components/CampaignDashboard";
 import AuditTriageTable from "./components/AuditTriageTable";
 import ReviewGateEscalationSurface from "./components/ReviewGateEscalationSurface";
+import PillarPlaceholder from "./components/PillarPlaceholder";
+import CurrentCutPreview from "./components/CurrentCutPreview";
 import type { AuditReportShot } from "./lib/auditReport";
 import { applyClientJwt, isJwtAuthEnabled, subscribeToClientAuthEvents } from "./lib/clientAuth";
 import {
@@ -202,7 +204,7 @@ const PancakeCore = ({ active, isDragging }: { active: boolean; isDragging: bool
             i === 1 ? "w-10" : i === 2 ? "w-14" : i === 3 ? "w-16" : "w-12"
           } ${
             active
-              ? "bg-cyan-400 border-white shadow-[0_0_25px_rgba(34,211,238,0.8)]"
+              ? "bg-cyan-400 border-white shadow-[0_0_25px_rgba(73,157,216,0.8)]"
               : "bg-gradient-to-r from-cyan-900 via-cyan-600 to-cyan-900 border-cyan-400/30 group-hover:border-cyan-400/60 shadow-lg"
           }`}
           style={{
@@ -226,7 +228,7 @@ const CircularTelemetry = ({ percent, label, color = "cyan" }: { percent: number
 
   return (
     <div className="relative w-28 h-28 flex items-center justify-center">
-      <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_8px_rgba(34,211,238,0.4)]">
+      <svg className="w-full h-full -rotate-90 drop-shadow-[0_0_8px_rgba(73,157,216,0.4)]">
         <circle cx="56" cy="56" r="48" stroke="currentColor" strokeWidth="1" fill="transparent" className="text-white/5" />
         <circle
           cx="56"
@@ -348,6 +350,7 @@ export default function App() {
   const hasMovedRef = useRef(false);
   const [activePillar, setActivePillar] = useState<PillarId>("creative");
   const [creativeSubtab, setCreativeSubtab] = useState<CreativeSubtab>("deliverables");
+  const [isAuditPanelOpen, setIsAuditPanelOpen] = useState(false);
   const [showRunMenu, setShowRunMenu] = useState(false);
   const [showReviewPanel, setShowReviewPanel] = useState(false);
   const [finalHitlShotNumber, setFinalHitlShotNumber] = useState<number | null>(null);
@@ -570,6 +573,7 @@ export default function App() {
     { id: "creative" as const, label: "Creative Studio", description: "Generate images and video" },
     { id: "drift" as const, label: "Brand Drift", description: "Brand compliance scoring and drift metrics" },
     { id: "review" as const, label: "Review Gate", description: "Human-in-the-loop review and approval" },
+    { id: "insight" as const, label: "Insight Loop", description: "External performance intelligence and engagement feedback" },
   ];
 
   const currentClient = clients.find((client) => client.id === activeClient) ?? null;
@@ -658,6 +662,7 @@ export default function App() {
     setLogs(seedLogs);
     setShowRunMenu(false);
     setCreativeSubtab("deliverables");
+    setIsAuditPanelOpen(false);
     setActivePillar(pillarForClient(nextClient));
     setIsClientDetailOpen(true);
 
@@ -678,6 +683,7 @@ export default function App() {
     setCurrentStage(null);
     setShowRunMenu(false);
     setCreativeSubtab("deliverables");
+    setIsAuditPanelOpen(false);
     setActivePillar("creative");
   }, [teardownRunSubscriptions]);
 
@@ -911,7 +917,7 @@ export default function App() {
   }, [currentRun, teardownRunSubscriptions]);
 
   return (
-    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-cyan-500/40 bg-[#141821]">
+    <div className="h-screen w-screen text-cyan-50 font-sans overflow-hidden flex relative selection:bg-orange-500/30 bg-brand-primary">
       <div
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -974,7 +980,7 @@ export default function App() {
                   <div
                     className={`w-8 h-8 rounded-lg flex items-center justify-center border transition-all ${
                       activeClient === client.id
-                        ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.4)]"
+                        ? "bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(73,157,216,0.4)]"
                         : "bg-white/5 border-white/10"
                     }`}
                   >
@@ -1051,7 +1057,7 @@ export default function App() {
                     <div
                       key={i}
                       className={`h-1 w-1 rounded-full ${
-                        i < 5 ? "bg-cyan-400 shadow-[0_0_5px_cyan]" : "bg-white/10"
+                        i < 5 ? "bg-cyan-400 shadow-[0_0_5px_var(--blue)]" : "bg-white/10"
                       }`}
                     />
                   ))}
@@ -1130,7 +1136,7 @@ export default function App() {
             {currentClient && isClientDetailOpen && canReadSupabase && (
               <div key={`${currentClient.id}:${authEpoch}`} className={`w-full min-w-0 z-10 space-y-4 ml-0 md:ml-4 ${workspaceMaxClass}`}>
                 <div className="flex items-end space-x-6 md:space-x-8 fade-slide-in">
-                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_cyan]" />
+                  <div className="h-20 md:h-24 w-1.5 bg-gradient-to-b from-cyan-400 to-transparent shadow-[0_0_30px_var(--blue)]" />
                   <div className="space-y-2">
                     <h1 className="text-3xl sm:text-4xl md:text-5xl xl:text-6xl font-black italic tracking-tighter uppercase leading-none text-white drop-shadow-2xl break-words sm:whitespace-nowrap">
                       {currentClient.displayName}
@@ -1192,7 +1198,7 @@ export default function App() {
 
                 <ActiveClientBadge client={currentClient} />
 
-                {/* Four Pillars Tabs */}
+                {/* Five Pillars Tabs */}
                 <div className="flex space-x-1 bg-black/20 p-1 rounded-xl border border-white/5">
                   {pillars.map((pillar) => (
 	                    <button
@@ -1215,8 +1221,13 @@ export default function App() {
                     {pillars.find(p => p.id === activePillar)?.description}
                   </p>
 
-                  {/* Review Gate: show escalation-level HITL plus legacy run queue */}
-                  {activePillar === "review" ? (
+                  {activePillar === "memory" ? (
+                    <PillarPlaceholder
+                      title="Brand Memory — coming in Phase 8"
+                      body="Ingest, index, and retrieve brand assets will get a dedicated command surface in Phase 8. For now, this pillar stays visible so the HUD accounts for the full operating model without pretending the workflow is already built."
+                      accent="cyan"
+                    />
+                  ) : activePillar === "review" ? (
                     <div className="space-y-3">
                       <ReviewGateEscalationSurface
                         clientId={activeClient}
@@ -1272,36 +1283,58 @@ export default function App() {
                         </p>
                       ) : null}
                     </div>
-	                  ) : activePillar === "creative" && activeClient ? (
-	                    <>
-                        {currentRun?.campaignId && (
+                  ) : activePillar === "creative" && activeClient ? (
+                    <>
+                      {currentRun?.campaignId && selectedCampaign ? (
+                        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] xl:items-start">
+                          <div className="min-w-0 space-y-3">
+                            <CurrentCutPreview
+                              campaign={selectedCampaign}
+                              campaignId={currentRun.campaignId}
+                              currentRun={currentRun}
+                            />
+                            {isFeaturedClient && <DeliverableTimeline productionSlug={currentClient.productionSlug} />}
+                            {isFeaturedClient && (
+                              <MotionPhaseGate
+                                clientId={activeClient}
+                                campaignId={currentRun.campaignId}
+                                onReviewGateClick={() => setActivePillar("review")}
+                                onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
+                              />
+                            )}
+                          </div>
+
                           <RecentRunsPanel
                             clientId={activeClient}
                             campaignId={currentRun.campaignId}
                             onRunClick={setSelectedRunDetailId}
                           />
-                        )}
-                        {isFeaturedClient && currentRun?.campaignId && (
-                          <MotionPhaseGate
-                            clientId={activeClient}
-                            campaignId={currentRun.campaignId}
-                            onReviewGateClick={() => setActivePillar("review")}
-                            onRunStarted={(run) => setSelectedRunDetailId(run.runId)}
-                          />
-                        )}
-	                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
-	                        {[
-	                          { id: "deliverables" as const, label: "Deliverables" },
-	                          ...(isFeaturedClient ? [
-                              { id: "reshoots" as const, label: "Reshoots" },
-                              { id: "stills" as const, label: "Stills + Anchors" },
-                            ] : []),
-	                        ].map((tab) => (
+                        </div>
+                      ) : isFeaturedClient ? (
+                        <div className="flex flex-col items-center justify-center py-8">
+                          <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
+                          <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
+                            {/* Reads the HUD-backed campaign name so the loader copy
+                                stays correct when other featured productions land
+                                (CodeRabbit PR #8 finding — was hard-coded "Drift MV"). */}
+                            Loading {selectedCampaignName || "campaign"} run
+                          </span>
+                        </div>
+                      ) : null}
+
+                      <div className="mt-3 mb-2 flex rounded-xl border border-white/10 bg-black/20 p-1">
+                        {[
+                          { id: "deliverables" as const, label: "Deliverables" },
+                          ...(isFeaturedClient ? [
+                            { id: "reshoots" as const, label: "Reshoots" },
+                            { id: "stills" as const, label: "Stills + Anchors" },
+                          ] : []),
+                        ].map((tab) => (
                           <button
                             key={tab.id}
                             type="button"
                             onClick={() => setCreativeSubtab(tab.id)}
-	                            className={`min-w-0 flex-1 truncate rounded-lg px-2 sm:px-3 py-2 text-[7px] sm:text-[8px] font-mono uppercase tracking-[0.18em] sm:tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
+                            className={`min-w-0 flex-1 truncate rounded-lg px-2 sm:px-3 py-2 text-[7px] sm:text-[8px] font-mono uppercase tracking-[0.18em] sm:tracking-[0.24em] transition-all focus:outline-none focus:ring-2 focus:ring-cyan-400/40 ${
                               creativeSubtab === tab.id
                                 ? "border border-cyan-500/30 bg-cyan-500/15 text-cyan-300"
                                 : "border border-transparent text-white/35 hover:bg-white/5 hover:text-white/65"
@@ -1311,87 +1344,103 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-	                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
-	                        <ReshootPanel showRenderControls={false} />
-	                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
-                          <div className="space-y-3">
-                            <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
-                              <p className="text-[9px] font-mono uppercase tracking-[0.24em] text-cyan-100/70">
-                                Stills + Anchors
-                              </p>
-                              <p className="mt-1 text-[9px] leading-relaxed text-white/35">
-                                Select a shot on the left to curate the campaign anchor still, reject starting frames, snapshot a new frame, or replace the hero visual.
-                              </p>
-                            </div>
-	                          <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
-                              <div className="order-2 min-w-0 lg:order-1">
-	                              <ReshootPanel
-	                                onShotSelect={setSelectedAnchorShot}
-	                                activeShotNumber={selectedAnchorShot}
-	                                openDrawerOnSelect={false}
-                                  showRenderControls={false}
-	                              />
-                              </div>
-                              <div className="order-1 min-w-0 lg:order-2">
-		                              {selectedAnchorShot != null ? (
-		                                <AnchorStillPanel
-		                                  productionSlug={currentClient.productionSlug}
-		                                  shotNumber={selectedAnchorShot}
-		                                  campaignId={currentRun?.campaignId}
-		                                />
-	                              ) : (
-	                                <EmptyAnchorState />
-	                              )}
-                              </div>
-	                          </div>
+
+                      {creativeSubtab === "reshoots" && isFeaturedClient ? (
+                        <ReshootPanel showRenderControls={false} />
+                      ) : creativeSubtab === "stills" && isFeaturedClient ? (
+                        <div className="space-y-3">
+                          <div className="rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
+                            <p className="text-[9px] font-mono uppercase tracking-[0.24em] text-cyan-100/70">
+                              Stills + Anchors
+                            </p>
+                            <p className="mt-1 text-[9px] leading-relaxed text-white/35">
+                              Select a shot on the left to curate the campaign anchor still, reject starting frames, snapshot a new frame, or replace the hero visual.
+                            </p>
                           </div>
-	                      ) : (
-                        <>
-                          {isFeaturedClient && !currentRun?.campaignId ? (
-                            <div className="flex flex-col items-center justify-center py-8">
-                              <Loader2 size={18} className="text-cyan-400/50 animate-spin" />
-                              <span className="mt-3 text-[9px] font-mono uppercase tracking-widest text-white/30">
-                                Loading Drift MV run
-                              </span>
-                            </div>
-                          ) : !currentRun?.campaignId ? (
-                            <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
-                          ) : (
-                            <>
-                              {isFeaturedClient && (
-                                <AuditTriageTable
-                                  key={`audit:${activeClient}:${currentRun.campaignId}`}
-                                  clientId={currentClient.id}
-                                  campaignId={currentRun.campaignId}
-                                  campaignName={selectedCampaignName}
-                                  onAuditRunStarted={handleAuditRunStarted}
-                                  onAuditRunSettled={handleAuditRunSettled}
-                                  onAuditLog={handleAuditLog}
-                                  onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
-                                    n: shotNumber,
-                                    id: deliverableId,
-                                    runId,
-                                    auditShot,
-                                    initialTab: "critic",
-                                  })}
-                                />
-                              )}
-                              {isFeaturedClient && <DeliverableTimeline />}
-                              <DeliverableTracker
-                                key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
-                                campaignId={currentRun.campaignId}
-                                runId={currentRun.runId}
-                                onShotClick={(n, id, options) => setSelectedShot({
-                                  n,
-                                  id,
-                                  runId: options?.runId,
-                                  initialTab: options?.initialTab,
-                                  pinnedTimelineEventId: options?.pinnedTimelineEventId,
-                                })}
+                          <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(360px,2fr)]">
+                            <div className="order-2 min-w-0 lg:order-1">
+                              <ReshootPanel
+                                onShotSelect={setSelectedAnchorShot}
+                                activeShotNumber={selectedAnchorShot}
+                                openDrawerOnSelect={false}
+                                showRenderControls={false}
                               />
-                            </>
+                            </div>
+                            <div className="order-1 min-w-0 lg:order-2">
+                              {selectedAnchorShot != null ? (
+                                <AnchorStillPanel
+                                  productionSlug={currentClient.productionSlug}
+                                  shotNumber={selectedAnchorShot}
+                                  campaignId={currentRun?.campaignId}
+                                />
+                              ) : (
+                                <EmptyAnchorState />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : !currentRun?.campaignId ? (
+                        <PromptEvolutionPanel key={activeClient} clientId={activeClient} />
+                      ) : (
+                        <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,380px)] xl:items-start">
+                          <DeliverableTracker
+                            key={`${activeClient}:${currentRun.campaignId}:${currentRun.runId}`}
+                            campaignId={currentRun.campaignId}
+                            runId={currentRun.runId}
+                            onShotClick={(n, id, options) => setSelectedShot({
+                              n,
+                              id,
+                              runId: options?.runId,
+                              initialTab: options?.initialTab,
+                              pinnedTimelineEventId: options?.pinnedTimelineEventId,
+                            })}
+                          />
+
+                          {isFeaturedClient && (
+                            <aside className="rounded-2xl border border-amber-400/15 bg-black/25 p-3 shadow-[0_0_30px_rgba(237,76,20,0.05)]">
+                              <button
+                                type="button"
+                                onClick={() => setIsAuditPanelOpen((value) => !value)}
+                                aria-expanded={isAuditPanelOpen}
+                                className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-left transition-all hover:border-amber-300/35 hover:bg-amber-300/10 focus:outline-none focus:ring-2 focus:ring-amber-300/40"
+                              >
+                                <span className="min-w-0">
+                                  <span className="block text-[8px] font-mono uppercase tracking-[0.24em] text-amber-100/75">
+                                    Audit triage filters
+                                  </span>
+                                  <span className="mt-1 block text-[8px] font-mono uppercase tracking-[0.16em] text-white/35">
+                                    Collapsible observability panel · Deliverables remain primary
+                                  </span>
+                                </span>
+                                <ChevronDown
+                                  size={14}
+                                  className={`shrink-0 text-white/35 transition-transform ${isAuditPanelOpen ? "" : "-rotate-90"}`}
+                                />
+                              </button>
+
+                              {isAuditPanelOpen && (
+                                <div className="mt-3 max-h-[720px] overflow-auto rounded-2xl border border-white/10 bg-black/20 p-2">
+                                  <AuditTriageTable
+                                    key={`audit:${activeClient}:${currentRun.campaignId}`}
+                                    clientId={currentClient.id}
+                                    campaignId={currentRun.campaignId}
+                                    campaignName={selectedCampaignName}
+                                    onAuditRunStarted={handleAuditRunStarted}
+                                    onAuditRunSettled={handleAuditRunSettled}
+                                    onAuditLog={handleAuditLog}
+                                    onAuditShotClick={({ shotNumber, deliverableId, auditShot, runId }) => setSelectedShot({
+                                      n: shotNumber,
+                                      id: deliverableId,
+                                      runId,
+                                      auditShot,
+                                      initialTab: "critic",
+                                    })}
+                                  />
+                                </div>
+                              )}
+                            </aside>
                           )}
-                        </>
+                        </div>
                       )}
                     </>
                   ) : activePillar === "creative" ? (
@@ -1408,14 +1457,11 @@ export default function App() {
                       Select a BrandStudios workspace to view drift alerts
                     </p>
                   ) : activePillar === "insight" ? (
-                    <div className="mt-3 rounded-2xl border border-[#ED4C14]/25 bg-[#ED4C14]/10 px-4 py-5">
-                      <p className="text-[10px] font-mono uppercase tracking-[0.24em] text-orange-200/80">
-                        Insight Loop coming soon
-                      </p>
-                      <p className="mt-2 text-[9px] leading-relaxed text-white/35">
-                        External asset performance and engagement tracking will appear here once Phase 8 starts.
-                      </p>
-                    </div>
+                    <PillarPlaceholder
+                      title="Insight Loop — coming in Phase 8"
+                      body="External asset performance, audience response, and in-the-wild creative intelligence will land here in Phase 8. The placeholder keeps the fifth pillar accountable while data integration remains intentionally out of scope for Phase 4.A."
+                      accent="orange"
+                    />
                   ) : (
                     <p className="text-[9px] font-mono text-white/20 mt-2 uppercase">
                       Select a pillar to continue
@@ -1433,27 +1479,12 @@ export default function App() {
                       <Radar size={16} className="text-cyan-400 animate-pulse" />
                     </div>
 
-                    <div className="flex justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
+                    <div className="flex flex-1 items-center justify-center my-2 transform group-hover:scale-105 transition-transform duration-500">
                       <CircularTelemetry
                         percent={currentClient.health}
                         label="Sync"
                         color={currentClient.health < 50 ? "amber" : "cyan"}
                       />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2.5 mt-3">
-                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Agents</span>
-                        <span className="text-2xl font-bold font-mono tracking-tighter">
-                          {currentClient.runsLabel}
-                        </span>
-                      </div>
-                      <div className="bg-white/5 p-3 rounded-2xl border border-white/5 flex flex-col items-center">
-                        <span className="text-[8px] opacity-40 uppercase font-mono mb-1">Health</span>
-                        <span className="text-2xl font-bold font-mono tracking-tighter text-cyan-400">
-                          Normal
-                        </span>
-                      </div>
                     </div>
                     <OverlayEffects className="rounded-[2rem]" />
                   </div>
@@ -1461,7 +1492,7 @@ export default function App() {
                   <div className="bg-black/10 border border-white/5 backdrop-blur-xl rounded-[2rem] p-5 flex flex-col shadow-2xl relative overflow-hidden">
                     <div className="flex justify-between items-center mb-4">
                       <div className="flex items-center space-x-3">
-                        <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_cyan] ${isRunning ? "bg-amber-400 animate-pulse" : "bg-cyan-400"}`} />
+                        <div className={`w-2 h-2 rounded-full shadow-[0_0_10px_var(--blue)] ${isRunning ? "bg-amber-400 animate-pulse" : "bg-cyan-400"}`} />
                         <span className="text-[10px] font-mono opacity-60 uppercase tracking-widest">
                           Run Feed
                         </span>
@@ -1577,7 +1608,7 @@ export default function App() {
                                 setIsExpanded(true);
                               }
                             }}
-                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(245,158,11,0.3)] animate-pulse"
+                            className="px-6 py-3 bg-amber-500 text-black font-black uppercase text-xs rounded-2xl hover:bg-amber-400 transition-all active:scale-95 flex items-center justify-center shadow-[0_0_20px_rgba(237,76,20,0.3)] animate-pulse"
                           >
                             <Eye size={14} className="mr-2" /> Review
                             {reviewAttentionCount > 0 && (
@@ -1723,7 +1754,7 @@ export default function App() {
                 ))}
               </div>
 
-              <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(34,211,238,0.3)] hover:bg-white transition-all active:scale-95">
+              <button className="w-full py-6 bg-cyan-500 text-black font-black uppercase tracking-[0.4em] rounded-3xl shadow-[0_0_50px_rgba(73,157,216,0.3)] hover:bg-white transition-all active:scale-95">
 	                Create BrandStudios Workspace
               </button>
             </div>

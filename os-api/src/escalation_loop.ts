@@ -30,6 +30,7 @@ import {
   getLimitationByFailureMode,
   createKnownLimitation,
   listKnownLimitations,
+  getRecentRejectionLearnings,
   getPromptHistoryForDeliverable,
   getDeliverable,
   getCampaign,
@@ -202,9 +203,10 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
     return { outcome: "failed", escalation, decision: _nullDecision(), newPrompts: null };
   }
 
+  const effectiveCampaignId = ctx.campaignId ?? artifact.campaignId ?? deliverable.campaignId;
   let campaign: Campaign | null = null;
-  if (ctx.campaignId) {
-    campaign = await getCampaign(ctx.campaignId);
+  if (effectiveCampaignId) {
+    campaign = await getCampaign(effectiveCampaignId);
   }
   const brandSlug = ctx.clientId.replace("client_", "");
 
@@ -303,12 +305,18 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
   // iteration 2+ — matching the gap closed for the critic in chunk 3.
   const narrativeContext = _resolveNarrativeContext(ctx);
   const musicVideoContext = _extractMusicVideoContext(campaign);
+  const recentLearnings = effectiveCampaignId
+    ? await getRecentRejectionLearnings(clientId, effectiveCampaignId, 10)
+    : [];
   if (narrativeContext) {
     await logger(
       "info",
       `Narrative envelope present: shot ${narrativeContext.shot_number} (${narrativeContext.beat_name}), ` +
         `allowances=${narrativeContext.stylization_allowances.length}`,
     );
+  }
+  if (recentLearnings.length > 0) {
+    await logger("info", `Rejection learning axioms present: ${recentLearnings.length} recent event(s)`);
   }
 
   // ── Chunk 3 follow-up: per-production QA threshold short-circuit ────────
@@ -403,6 +411,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       consensusResolved,
       narrativeContext,
       musicVideoContext,
+      recentLearnings,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -442,6 +451,7 @@ export async function handleQAFailure(ctx: QAFailureContext): Promise<QAFailureR
       escalationLevel: escalation.currentLevel,
       qaVerdict,
       promptHistoryLength: promptHistory.length,
+      recentRejectionLearningIds: recentLearnings.map((learning) => learning.id),
     },
     decision: decision as unknown as Record<string, unknown>,
     model: decisionResult.model,

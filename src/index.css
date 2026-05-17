@@ -1,9 +1,47 @@
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
 @import "tailwindcss";
 
 :root {
+  --primary: #15217C;
+  --cream: #EFECEB;
+  --accent: #ED4C14;
+  --blue: #499DD8;
+  --white: #FFFFFF;
   color-scheme: dark;
-  background-color: #080a0c;
+  background-color: var(--primary);
+}
+
+@theme {
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Manrope", ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-primary: var(--primary);
+  --color-brand-cream: var(--cream);
+  --color-brand-accent: var(--accent);
+  --color-brand-blue: var(--blue);
+  --color-brand-white: var(--white);
+
+  --color-cyan-50: var(--cream);
+  --color-cyan-100: var(--cream);
+  --color-cyan-200: var(--blue);
+  --color-cyan-300: var(--blue);
+  --color-cyan-400: var(--blue);
+  --color-cyan-500: var(--blue);
+  --color-cyan-600: var(--primary);
+  --color-cyan-700: var(--primary);
+  --color-cyan-800: var(--primary);
+  --color-cyan-900: var(--primary);
+
+  --color-amber-100: var(--cream);
+  --color-amber-200: var(--cream);
+  --color-amber-300: var(--accent);
+  --color-amber-400: var(--accent);
+  --color-amber-500: var(--accent);
+
+  --color-orange-100: var(--cream);
+  --color-orange-200: var(--cream);
+  --color-orange-300: var(--accent);
+  --color-orange-400: var(--accent);
+  --color-orange-500: var(--accent);
 }
 
 * {
@@ -13,8 +51,25 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: #080a0c;
-  font-family: "Space Grotesk", "Manrope", sans-serif;
+  background-color: var(--primary);
+  color: var(--cream);
+  font-family: "Manrope", ui-sans-serif, system-ui, sans-serif;
+}
+
+body,
+button,
+input,
+textarea,
+select,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.font-sans,
+.font-mono {
+  font-family: "Manrope", ui-sans-serif, system-ui, sans-serif !important;
 }
 
 #root {

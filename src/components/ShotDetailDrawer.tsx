@@ -1351,7 +1351,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
                         tabIndex={-1}
                         className={`rounded-2xl border p-3 transition-all ${
                           selected
-                            ? "border-cyan-300/50 bg-cyan-300/10 shadow-[0_0_22px_rgba(34,211,238,0.12)]"
+                            ? "border-cyan-300/50 bg-cyan-300/10 shadow-[0_0_22px_rgba(73,157,216,0.12)]"
                             : "border-white/10 bg-white/[0.02]"
                         }`}
                       >
