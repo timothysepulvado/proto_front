@@ -832,7 +832,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           runId ? fetchTrail(runId, currentDeliverableId) : Promise.resolve<DeliverableTrail | null>(null),
           api.getDeliverable(currentDeliverableId).catch(() => null),
           api.getProductionShots(productionSlug).then((response) => response.shots).catch(() => []),
-          api.getArtifactIterationsForDeliverable(currentDeliverableId).catch((err) => {
+          api.getArtifactIterationsForDeliverable(currentDeliverableId, runId).catch((err) => {
             nextIterationError = err instanceof Error ? err.message : "Couldn't load regen iterations.";
             return emptyIterations;
           }),

@@ -1534,8 +1534,13 @@ export async function getDirectionDriftIndicators(
 
 export async function getArtifactIterationsForDeliverable(
   deliverableId: string,
+  runId?: string,
 ): Promise<ArtifactIterationsResponse> {
-  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations`, { headers: getAuthHeaders() });
+  // S6 (Jackie RCA 2026-05-17): pass the active run so the Iterations view is
+  // scoped to it and cannot render another run's creative. Optional — callers
+  // without run context keep the legacy full-history behavior.
+  const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  const resp = await fetch(`${OS_API_URL}/api/deliverables/${deliverableId}/iterations${query}`, { headers: getAuthHeaders() });
   if (!resp.ok) throw await parseOsApiError(resp);
   return (await resp.json()) as ArtifactIterationsResponse;
 }

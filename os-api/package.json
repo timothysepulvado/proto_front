@@ -14,7 +14,8 @@
     "test:phase4-reject-race": "tsx tests/_phase4-reject-race.ts",
     "test:phase7-multi-tenant-isolation": "tsx tests/_phase7-multi-tenant-isolation.ts",
     "test:pr4-storage-and-ledger": "tsx tests/_pr4-storage-and-ledger.ts",
-    "test:merge-gate": "npm run test:phase4-cache-stability && npm run test:phase4-review-gate-card && npm run test:phase4-reject-teach && npm run test:phase4-reject-race && npm run test:phase7-multi-tenant-isolation && npm run test:pr4-storage-and-ledger"
+    "test:asset-integrity": "tsx tests/_asset-integrity.ts",
+    "test:merge-gate": "npm run test:phase4-cache-stability && npm run test:phase4-review-gate-card && npm run test:phase4-reject-teach && npm run test:phase4-reject-race && npm run test:phase7-multi-tenant-isolation && npm run test:pr4-storage-and-ledger && npm run test:asset-integrity"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",

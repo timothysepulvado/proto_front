@@ -1841,16 +1841,24 @@ function readOperatorOverride(
 
 export async function getArtifactsForDeliverableWithVerdicts(
   deliverableId: string,
+  runId?: string,
 ): Promise<ArtifactIterationsResponse> {
   const deliverable = await getDeliverable(deliverableId);
   if (!deliverable) throw new Error(`Deliverable ${deliverableId} not found`);
   const shotNumber = deriveDeliverableShotNumber(deliverable, 0);
 
-  const { data: artifactData, error: artifactError } = await supabase
+  // Asset-integrity S6 fix (Jackie RCA 2026-05-17): when a run is in scope the
+  // Iterations view MUST be scoped to that run. Without this filter the query
+  // mixes artifacts across every run that ever touched the deliverable, so the
+  // HUD renders a different run's creative. runId optional → internal callers
+  // (regen loop) keep the full-history behavior unchanged (back-compat).
+  let artifactQuery = supabase
     .from("artifacts")
     .select("*")
     .eq("deliverable_id", deliverableId)
-    .eq("type", "image")
+    .eq("type", "image");
+  if (runId) artifactQuery = artifactQuery.eq("run_id", runId);
+  const { data: artifactData, error: artifactError } = await artifactQuery
     .order("created_at", { ascending: true })
     .limit(500);
   if (artifactError) throw new Error(`Failed to get deliverable artifacts: ${artifactError.message}`);
@@ -1859,11 +1867,15 @@ export async function getArtifactsForDeliverableWithVerdicts(
   const runIds = [...new Set(artifacts.map((artifact) => artifact.runId))];
   const [runRows, logRows, escalationRows] = await Promise.all([
     (async () => {
-      const { data, error } = await supabase
+      let runsQuery = supabase
         .from("runs")
         .select("*")
         .eq("campaign_id", deliverable.campaignId)
-        .eq("mode", "stills")
+        .eq("mode", "stills");
+      // S6: when run-scoped, only the in-scope run's metadata (operator
+      // overrides etc.) is relevant; campaign-wide otherwise (back-compat).
+      if (runId) runsQuery = runsQuery.eq("id", runId);
+      const { data, error } = await runsQuery
         .order("created_at", { ascending: true })
         .limit(250);
       if (error) throw new Error(`Failed to get stills runs for iteration browser: ${error.message}`);
@@ -1881,10 +1893,14 @@ export async function getArtifactsForDeliverableWithVerdicts(
       return (data as DbRunLog[] | null ?? []).map(mapDbLogToRunLog);
     })(),
     (async () => {
-      const { data, error } = await supabase
+      let escalationQuery = supabase
         .from("asset_escalations")
         .select("*")
-        .eq("deliverable_id", deliverableId)
+        .eq("deliverable_id", deliverableId);
+      // S6: scope escalation/decision trail to the in-scope run so the
+      // Iterations verdict column does not bleed across runs.
+      if (runId) escalationQuery = escalationQuery.eq("run_id", runId);
+      const { data, error } = await escalationQuery
         .order("created_at", { ascending: true })
         .limit(1000);
       if (error) throw new Error(`Failed to get escalations for iteration browser: ${error.message}`);

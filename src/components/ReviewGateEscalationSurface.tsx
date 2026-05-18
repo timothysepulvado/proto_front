@@ -76,7 +76,9 @@ export default function ReviewGateEscalationSurface({
         next.map(async (item): Promise<[string, ArtifactIterationRow[]]> => {
           if (!item.deliverable?.id) return [item.escalation.id, []];
           try {
-            const response = await getArtifactIterationsForDeliverable(item.deliverable.id);
+            // S6 (Jackie RCA 2026-05-17): scope iterations to this escalation's
+            // run so the surface cannot show another run's creative.
+            const response = await getArtifactIterationsForDeliverable(item.deliverable.id, item.escalation.runId);
             return [item.escalation.id, response.rows];
           } catch {
             return [item.escalation.id, []];

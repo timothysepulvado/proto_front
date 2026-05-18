@@ -868,6 +868,16 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
   try {
     const deliverableId = getParam(req, "deliverableId");
 
+    // Asset-integrity S6 (Jackie RCA 2026-05-17): optional run scope. Absent →
+    // legacy full-history (internal callers); present-but-malformed → 400 (fail
+    // closed, explicit contract — never silently widen to all runs).
+    const rawRunId = typeof req.query.run_id === "string" ? req.query.run_id.trim() : undefined;
+    const runId = rawRunId && rawRunId.length > 0 ? rawRunId : undefined;
+    if (runId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) {
+      res.status(400).json({ error: "Invalid run_id" });
+      return;
+    }
+
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
     if (jwtAuthEnabled && !caller) {
@@ -882,7 +892,7 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
       }
     }
 
-    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId);
+    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId, runId);
     res.json(iterations);
   } catch (err) {
     console.error("GET /api/deliverables/:deliverableId/iterations error:", err);
