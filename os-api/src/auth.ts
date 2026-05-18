@@ -79,6 +79,32 @@ export async function mintClientJwt(clientId: string): Promise<string> {
  * endpoints typically permit null while the flag is off (no enforcement) and
  * enforce match when the flag is on.
  */
+/**
+ * Verify a raw client-scoped JWT string. Shared core for both the
+ * Authorization-header path and the SSE `?access_token=` query-param path.
+ * Same null-on-any-failure contract as verifyClientJwtFromRequest.
+ */
+export function verifyClientJwtToken(
+  token: string | undefined | null,
+): { clientId: string } | null {
+  if (!JWT_AUTH_ENABLED) return null;
+  if (!JWT_SECRET) return null;
+  if (!token) return null;
+  const trimmed = token.trim();
+  if (!trimmed) return null;
+
+  try {
+    const decoded = jwt.verify(trimmed, JWT_SECRET, { algorithms: ["HS256"] }) as ClientJwtPayload;
+    const clientId = typeof decoded.client_id === "string" ? decoded.client_id.trim() : "";
+    if (!clientId) return null;
+    return { clientId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[auth] JWT verification failed: ${message}`);
+    return null;
+  }
+}
+
 export function verifyClientJwtFromRequest(req: Request): { clientId: string } | null {
   if (!JWT_AUTH_ENABLED) return null;
   if (!JWT_SECRET) return null;
@@ -88,17 +114,30 @@ export function verifyClientJwtFromRequest(req: Request): { clientId: string } |
 
   const match = header.match(/^Bearer\s+(.+)$/i);
   if (!match) return null;
-  const token = match[1].trim();
-  if (!token) return null;
+  return verifyClientJwtToken(match[1]);
+}
 
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as ClientJwtPayload;
-    const clientId = typeof decoded.client_id === "string" ? decoded.client_id.trim() : "";
-    if (!clientId) return null;
-    return { clientId };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[auth] JWT verification failed: ${message}`);
-    return null;
-  }
+/**
+ * SSE-friendly verifier. Native EventSource cannot set an Authorization
+ * header, so streaming endpoints (`GET /api/runs/:runId/logs`) accept the
+ * same client JWT as a `?access_token=` query param. Header takes precedence
+ * (normal fetch callers unaffected); the query param is the EventSource-only
+ * fallback. Identical verification + null-on-failure contract. The token in a
+ * URL is acceptable here because it is the same short-lived (1h) client JWT,
+ * os-api access logs are not third-party-shared, and the alternative (a
+ * fetch-stream rewrite) has a far larger blast radius on the runner SSE path.
+ */
+export function verifyClientJwtFromRequestOrQuery(
+  req: Request,
+): { clientId: string } | null {
+  const fromHeader = verifyClientJwtFromRequest(req);
+  if (fromHeader) return fromHeader;
+  const qp = req.query?.access_token;
+  const token =
+    typeof qp === "string"
+      ? qp
+      : Array.isArray(qp) && typeof qp[0] === "string"
+        ? qp[0]
+        : undefined;
+  return verifyClientJwtToken(token);
 }

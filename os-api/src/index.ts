@@ -75,7 +75,7 @@ import { createProductionsRouter } from "./productions.js";
 import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
-import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest } from "./auth.js";
+import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest, verifyClientJwtFromRequestOrQuery } from "./auth.js";
 import {
   createArtifactSignedUrl,
   deleteRejectionLearningReferenceImage,
@@ -639,13 +639,29 @@ app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Respons
 });
 
 // GET /api/runs/:runId/logs - SSE stream for logs
+// Tenant gate (fullsweep A4 / B3 — SSE auth): native EventSource cannot set an
+// Authorization header, so the client JWT rides as `?access_token=` (header
+// still honored for fetch callers). Verify + run-ownership BEFORE flushHeaders
+// so a rejected caller gets a real 401/404 HTTP response, not a half-open SSE
+// stream. Same uniform-404 run contract as /detail. JWT off → legacy unscoped.
 app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequestOrQuery(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     // Set up SSE
@@ -714,13 +730,28 @@ app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
 });
 
 // POST /api/runs/:runId/cancel - Cancel a run
+// Tenant gate (fullsweep B4 — WRITE-side hole, treated as BLOCK): a cross-
+// tenant caller could previously cancel another client's in-flight run. Same
+// uniform-404 run-ownership contract as the GET run routes; the verifier reads
+// the Authorization header (fetch POST, not EventSource). JWT off → legacy.
 app.post("/api/runs/:runId/cancel", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const cancelled = await cancelRun(runId);
@@ -737,7 +768,6 @@ app.post("/api/runs/:runId/cancel", async (req: Request, res: Response) => {
 
 // ============ HITL Routes ============
 
-// GET /api/runs/:runId/review - Get review status
 // GET /api/runs/:runId/review - HITL review payload (artifacts + decisions)
 // Tenant gate (fullsweep A5 — run-scoped, same contract as /detail):
 // JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404.

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2, Radar, ShieldX } from "lucide-react";
 import * as api from "../api";
 import type { RunStatus } from "../api";
+import { getAuthHeaders } from "../lib/apiAuth";
+import { getCurrentClientToken } from "../lib/supabase";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -93,7 +95,12 @@ function parseEscalationUpdate(payload: unknown): EscalationUpdate | null {
 }
 
 async function cancelRunViaApi(runId: string) {
-  const response = await fetch(`${OS_API_URL}/api/runs/${runId}/cancel`, { method: "POST" });
+  // Fullsweep B4: /api/runs/:runId/cancel is tenant-gated (write-side) —
+  // forward the client JWT or a JWT-on operator can't cancel their own run.
+  const response = await fetch(`${OS_API_URL}/api/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
     throw new Error(body.error || `HTTP ${response.status}`);
@@ -143,7 +150,15 @@ export default function WatcherSignalsPanel({ runId, runStatus, onCancelled }: W
   }, [runId]);
 
   useEffect(() => {
-    const source = new EventSource(`${OS_API_URL}/api/runs/${runId}/logs`);
+    // Fullsweep B3: /api/runs/:runId/logs is tenant-gated. Native EventSource
+    // cannot set an Authorization header, so the client JWT rides as a
+    // ?access_token= query param (server: verifyClientJwtFromRequestOrQuery).
+    // When no token (JWT-off bootstrap) the param is omitted → legacy stream.
+    const sseToken = getCurrentClientToken();
+    const sseUrl = sseToken
+      ? `${OS_API_URL}/api/runs/${runId}/logs?access_token=${encodeURIComponent(sseToken)}`
+      : `${OS_API_URL}/api/runs/${runId}/logs`;
+    const source = new EventSource(sseUrl);
 
     source.onmessage = (event) => {
       try {

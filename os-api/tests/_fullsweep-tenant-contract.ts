@@ -72,6 +72,45 @@ async function requestGet(
   return { status: resp.status, body: parsed };
 }
 
+async function requestPost(
+  path: string,
+  token: string | undefined,
+): Promise<{ status: number; body: unknown }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}${path}`, { method: "POST", headers });
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    // Empty bodies are not JSON.
+  }
+  return { status: resp.status, body: parsed };
+}
+
+// SSE-aware probe: a successful /logs response is an OPEN text/event-stream
+// (never ends), so we must NOT await resp.json(). Read status + content-type
+// then abort immediately. Rejected callers get a normal ended JSON 401/404
+// before flushHeaders, which is also captured here.
+async function requestSse(
+  path: string,
+): Promise<{ status: number; contentType: string }> {
+  const ctrl = new AbortController();
+  try {
+    const resp = await fetch(`${OS_API_URL}${path}`, {
+      method: "GET",
+      signal: ctrl.signal,
+    });
+    const status = resp.status;
+    const contentType = resp.headers.get("content-type") ?? "";
+    ctrl.abort();
+    return { status, contentType };
+  } catch (err) {
+    ctrl.abort();
+    throw err;
+  }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -252,23 +291,26 @@ async function main(): Promise<void> {
   const health = await fetch(`${OS_API_URL}/api/health`);
   check("os-api health endpoint responds", health.ok);
 
-  // Phase 2 (fullsweep fix branch): A1-A3,A5-A9,A12-A16 + MINOR known-
-  // limitations are now gated and UN-SKIPPED into the active no-auth (401) /
-  // cross-tenant (404) / own-tenant (200) contract below. The only A-findings
-  // still GAP-skipped are the ones whose fix lands in a later phase:
-  //   A4  → Phase 3 (SSE auth via ?access_token=)
+  // Phase 2-3 (fullsweep fix branch): A1-A9,A12-A16 + MINOR known-limitations
+  // are now gated and UN-SKIPPED into the active no-auth (401) / cross-tenant
+  // (404) / own-tenant (200) contract below (A4 = SSE: +text/event-stream +
+  // bad-token-401 query-param assertions). Still GAP-skipped (later phases):
   //   A10 → Phase 4 (drift-route reconcile — schema-broken)
   //   A11 → Phase 4 (drift-route reconcile — schema-broken)
-  skipGap("A4", "GET /api/runs/:runId/logs streams run_logs no-auth — Phase 3 SSE-auth");
   skipGap("A10", "GET /api/runs/:runId/drift-alerts ungated + schema-broken — Phase 4 drift reconcile");
   skipGap("A11", "GET /api/runs/:runId/drift-metrics ungated + schema-broken — Phase 4 drift reconcile");
 
-  // GAP: B1-B4 — frontend/backend contract skips. These are static source
-  // checks to unskip after the source callers/routes are fixed.
-  skipGap("B1", "ShotDetailDrawer fetches gated /api/runs/:runId/escalation-report without auth headers");
-  skipGap("B2", "WatcherSignalsPanel uses EventSource /api/runs/:runId/logs; native EventSource cannot send Authorization");
-  skipGap("B3", "PromptEvolutionPanel/src/api.ts reference prompt_* tables absent from live DB");
-  skipGap("B4", "Drift run routes expect run_id/artifact_id/fused_z columns absent from live drift tables");
+  // Frontend/backend contract skips. B2 (EventSource auth) is RESOLVED in
+  // Phase 3 via the ?access_token= query-param mechanism — proven by the A4
+  // SSE own-tenant/bad-token assertions below — so it is no longer skipped.
+  // B1 source caller was fixed in Phase 2 (ShotDetailDrawer now sends
+  // getAuthHeaders()); the route-level 401/404/200 contract for
+  // /api/runs/:runId/escalation-report is ALREADY actively asserted below.
+  // B1 is retained as a static-source marker only (this harness has no
+  // source-AST assertion; tsc/build is the gate for the caller fix).
+  skipGap("B1", "ShotDetailDrawer escalation-report caller — source fixed Phase 2 (getAuthHeaders); route 401/404/200 actively asserted; static-source marker only");
+  skipGap("B3", "PromptEvolutionPanel/src/api.ts reference prompt_* tables absent from live DB — Phase 5");
+  skipGap("B4", "Drift run routes expect run_id/artifact_id/fused_z columns absent from live drift tables — Phase 4");
 
   const seededA = await seedTenant(CLIENT_A_ID);
   const seededB = await seedTenant(CLIENT_B_ID);
@@ -306,6 +348,9 @@ async function main(): Promise<void> {
       ["A15 campaign-deliverables", `/api/campaigns/${seededA.campaignId}/deliverables`],
       ["A16 deliverable-detail", `/api/deliverables/${seededA.deliverableId}`],
       ["MINOR known-limitations", "/api/known-limitations"],
+      // Phase 3 — A4 SSE logs: no token + no ?access_token → 401 (gate fires
+      // before flushHeaders, so this is a normal ended JSON response).
+      ["A4 run-logs", `/api/runs/${seededA.runId}/logs`],
     ];
     for (const [label, path] of activeNoAuthRoutes) {
       const resp = await requestGet(path, undefined);
@@ -339,6 +384,9 @@ async function main(): Promise<void> {
       ["A14 campaign-recent-runs", `/api/campaigns/${seededB.campaignId}/recent-runs`, 404],
       ["A15 campaign-deliverables", `/api/campaigns/${seededB.campaignId}/deliverables`, 404],
       ["A16 deliverable-detail", `/api/deliverables/${seededB.deliverableId}`, 404],
+      // Phase 3 — A4 SSE logs cross-tenant via Authorization header (verifier
+      // tries header first): caller A on run B → uniform 404 before stream.
+      ["A4 run-logs", `/api/runs/${seededB.runId}/logs`, 404],
     ];
     for (const [label, path, expected] of crossExpectations) {
       const resp = await requestGet(path, tokenA);
@@ -543,6 +591,52 @@ async function main(): Promise<void> {
     check(
       "MINOR known-limitations own-tenant (shared catalog) returns 200",
       knownLimits.status === 200,
+    );
+
+    // ===== Phase 3 — A4 SSE-auth (?access_token=) + harness B2 + B4 cancel =====
+    // A4 own-tenant via query param (the EventSource-auth mechanism = harness
+    // B2): no Authorization header, JWT in ?access_token= → 200 + SSE stream.
+    const sseOwn = await requestSse(
+      `/api/runs/${seededA.runId}/logs?access_token=${encodeURIComponent(tokenA)}`,
+    );
+    check(
+      "A4/B2 SSE own-tenant via ?access_token= returns 200 text/event-stream",
+      sseOwn.status === 200 && sseOwn.contentType.includes("text/event-stream"),
+    );
+
+    // A4 bad token in query param → 401 (query path actually verifies, not
+    // just presence-checks).
+    const sseBadToken = await requestSse(
+      `/api/runs/${seededA.runId}/logs?access_token=not-a-real-jwt`,
+    );
+    check(
+      "A4 SSE bad ?access_token= returns 401 (query path verifies signature)",
+      sseBadToken.status === 401,
+    );
+
+    // A4 cross-tenant via query param: caller A token on run B → uniform 404.
+    const sseCross = await requestSse(
+      `/api/runs/${seededB.runId}/logs?access_token=${encodeURIComponent(tokenA)}`,
+    );
+    check(
+      "A4 SSE cross-tenant via ?access_token= returns 404",
+      sseCross.status === 404,
+    );
+
+    // B4 write-side cancel gate.
+    const cancelNoAuth = await requestPost(`/api/runs/${seededA.runId}/cancel`, undefined);
+    check("B4 cancel no-auth returns 401", cancelNoAuth.status === 401);
+
+    const cancelCross = await requestPost(`/api/runs/${seededB.runId}/cancel`, tokenA);
+    check("B4 cancel cross-tenant returns 404", cancelCross.status === 404);
+
+    // Own-tenant cancel: the gate must let the owner through. The seeded run
+    // is status=needs_review so cancelRun no-ops → 400 "not active"; a 200 is
+    // also acceptable. The point: NOT 401 and NOT 404 (gate passed).
+    const cancelOwn = await requestPost(`/api/runs/${seededA.runId}/cancel`, tokenA);
+    check(
+      "B4 cancel own-tenant passes gate (status not 401/404)",
+      cancelOwn.status !== 401 && cancelOwn.status !== 404,
     );
 
     console.log(`\n${assertions}/${assertions} active assertions passed; ${skipped} GAP-skipped findings remain`);
