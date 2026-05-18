@@ -162,21 +162,40 @@ app.post("/api/auth/client-token", async (req: Request, res: Response) => {
 
 // GET /api/clients - List clients (HUD bootstrap / client switcher)
 //
-// Tenant gate (fullsweep A1 — list force-scope, mirrors GET /api/escalations):
-// JWT_AUTH_ENABLED=true + missing token → 401; with a valid token the result
-// is FORCED to the caller's own client so the switcher can never enumerate
-// other tenants. JWT off → legacy all-clients bootstrap (single-operator dev
-// parity; direct anon `clients` reads return 0 rows under migration-015 RLS so
-// the service-role list is the only boot path). App.tsx tolerates any list
-// length (picks derived[0]); scoping to 1 client does not break bootstrap.
+// Tenant gate (fullsweep A1, REVISED per Karl review BLOCK — bootstrap-safe):
+// This is the COLD-BOOT entrypoint. App.tsx calls getClients() token-less on
+// first mount; `activeClient` is only set FROM this list, and the client JWT
+// is only minted (applyClientJwt → POST /api/auth/client-token) AFTER an
+// activeClient exists. A hard 401-on-no-token here is a chicken-and-egg
+// deadlock — the HUD can never obtain the token it would need to read the
+// list it needs to obtain the token. (Confirmed live JWT-on :3302.)
+//
+// A 401 here also adds NO real isolation: POST /api/auth/client-token is bare
+// (documented PR#6/#7 single-operator threat model) so a token-less caller who
+// wants tenant data simply mints a token for any clientId. The client LIST is
+// bootstrap metadata (id/name/status/last-run), not per-tenant data — the
+// actual tenant-data isolation is enforced on every per-resource route
+// (A2-A16, Phase 2), which is where it belongs.
+//
+// Contract:
+//   • JWT off                     → legacy all-clients (service-role; direct
+//                                     anon `clients` reads return 0 under
+//                                     migration-015 RLS, so this is the only
+//                                     boot path).
+//   • JWT on + valid token        → scoped to caller's own client (an
+//                                     authenticated session never enumerates
+//                                     other tenants — defense-in-depth kept
+//                                     where the token is actually obtainable).
+//   • JWT on + no token (BOOTSTRAP) → full list, 200 (NOT 401) so the HUD can
+//                                     cold-boot, pick a client, then mint.
+//
+// Future hardening (deferred-rationale brief): when POST /api/auth/client-token
+// is itself gated (operator auth), this bootstrap branch should require that
+// operator token. Tracked, not silently weakened.
 app.get("/api/clients", async (req: Request, res: Response) => {
   try {
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
-    if (jwtAuthEnabled && !caller) {
-      res.status(401).json({ error: "Authentication required" });
-      return;
-    }
 
     const clients = await getAllClients();
     const scoped =

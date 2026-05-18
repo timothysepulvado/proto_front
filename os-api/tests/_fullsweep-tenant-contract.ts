@@ -346,9 +346,11 @@ async function main(): Promise<void> {
       ["campaign-escalations", `/api/campaigns/${seededA.campaignId}/escalations`],
       ["run-escalation-report", `/api/runs/${seededA.runId}/escalation-report`],
       ["orchestrator-decisions", `/api/orchestrator/decisions/${seededA.escalationId}`],
-      // Phase 2 fullsweep — newly gated per-tenant GET surfaces (A1-A3,A5-A9,
+      // Phase 2 fullsweep — newly gated per-tenant GET surfaces (A2-A3,A5-A9,
       // A12-A16) + MINOR shared catalog. All return 401 when JWT missing.
-      ["A1 clients-list", "/api/clients"],
+      // NOTE: A1 /api/clients is NOT here — it is the bootstrap entrypoint and
+      // is intentionally bootstrap-safe (Karl review BLOCK fix): no-token →
+      // 200 list (not 401), asserted separately in the own-tenant block.
       ["A2 client-detail", `/api/clients/${seededA.clientId}`],
       ["A3 run", `/api/runs/${seededA.runId}`],
       ["A5 run-review", `/api/runs/${seededA.runId}/review`],
@@ -507,13 +509,27 @@ async function main(): Promise<void> {
     // ===== Phase 2 fullsweep — own-tenant (caller A, resource A) → 200 =====
     // A1 is forced-scope: caller A sees ONLY its own client, never B's row
     // (no-leak contract identical to the escalations-list assertion).
+    // A1 (bootstrap-safe, Karl review BLOCK fix): with a valid token an
+    // authenticated session is scoped to its own client (no cross-tenant
+    // enumeration — defense-in-depth where the token is obtainable).
     const clientsList = await requestGet("/api/clients", tokenA);
     check(
-      "A1 clients-list own-tenant returns 200 scoped to caller (no B leak)",
+      "A1 clients-list authed returns 200 scoped to caller (no B leak)",
       clientsList.status === 200 &&
         Array.isArray(clientsList.body) &&
         clientsList.body.some((row) => isObject(row) && row.id === seededA.clientId) &&
         !clientsList.body.some((row) => isObject(row) && row.id === seededB.clientId),
+    );
+
+    // A1 BOOTSTRAP path: JWT-on + NO token must return 200 + the list (NOT
+    // 401) or the HUD deadlocks (getClients() is token-less on cold mount;
+    // the token is minted only AFTER a client is picked from this list).
+    const clientsBootstrap = await requestGet("/api/clients", undefined);
+    check(
+      "A1 clients-list bootstrap (no token) returns 200 list, not 401",
+      clientsBootstrap.status === 200 &&
+        Array.isArray(clientsBootstrap.body) &&
+        clientsBootstrap.body.some((row) => isObject(row) && row.id === seededA.clientId),
     );
 
     const clientDetail = await requestGet(`/api/clients/${seededA.clientId}`, tokenA);
