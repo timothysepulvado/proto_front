@@ -291,26 +291,19 @@ async function main(): Promise<void> {
   const health = await fetch(`${OS_API_URL}/api/health`);
   check("os-api health endpoint responds", health.ok);
 
-  // Phase 2-3 (fullsweep fix branch): A1-A9,A12-A16 + MINOR known-limitations
-  // are now gated and UN-SKIPPED into the active no-auth (401) / cross-tenant
-  // (404) / own-tenant (200) contract below (A4 = SSE: +text/event-stream +
-  // bad-token-401 query-param assertions). Still GAP-skipped (later phases):
-  //   A10 → Phase 4 (drift-route reconcile — schema-broken)
-  //   A11 → Phase 4 (drift-route reconcile — schema-broken)
-  skipGap("A10", "GET /api/runs/:runId/drift-alerts ungated + schema-broken — Phase 4 drift reconcile");
-  skipGap("A11", "GET /api/runs/:runId/drift-metrics ungated + schema-broken — Phase 4 drift reconcile");
-
-  // Frontend/backend contract skips. B2 (EventSource auth) is RESOLVED in
-  // Phase 3 via the ?access_token= query-param mechanism — proven by the A4
-  // SSE own-tenant/bad-token assertions below — so it is no longer skipped.
-  // B1 source caller was fixed in Phase 2 (ShotDetailDrawer now sends
-  // getAuthHeaders()); the route-level 401/404/200 contract for
-  // /api/runs/:runId/escalation-report is ALREADY actively asserted below.
-  // B1 is retained as a static-source marker only (this harness has no
-  // source-AST assertion; tsc/build is the gate for the caller fix).
+  // Phase 2-4 (fullsweep fix branch): A1-A9,A12-A16 + MINOR known-limitations
+  // gated and active below. A4 = SSE (text/event-stream + bad-token-401
+  // query-param). A10/A11 + harness-B4 RESOLVED in Phase 4 by ROUTE REMOVAL:
+  // /api/runs/:runId/drift-{alerts,metrics} queried a non-existent run_id
+  // (live drift schema is client/campaign-keyed; verified 2026-05-17), had
+  // zero frontend callers, and the route names encoded the wrong model (C1).
+  // They now 404 — asserted in the active block below. Still GAP-skipped:
+  //   B3 → Phase 5 (prompt_* tables absent from live DB)
+  //   B1 → static-source marker only (caller fixed Phase 2; route-level
+  //        401/404/200 for escalation-report ALREADY actively asserted;
+  //        this harness has no source-AST assertion — tsc/build is the gate)
   skipGap("B1", "ShotDetailDrawer escalation-report caller — source fixed Phase 2 (getAuthHeaders); route 401/404/200 actively asserted; static-source marker only");
   skipGap("B3", "PromptEvolutionPanel/src/api.ts reference prompt_* tables absent from live DB — Phase 5");
-  skipGap("B4", "Drift run routes expect run_id/artifact_id/fused_z columns absent from live drift tables — Phase 4");
 
   const seededA = await seedTenant(CLIENT_A_ID);
   const seededB = await seedTenant(CLIENT_B_ID);
@@ -638,6 +631,23 @@ async function main(): Promise<void> {
       "B4 cancel own-tenant passes gate (status not 401/404)",
       cancelOwn.status !== 401 && cancelOwn.status !== 404,
     );
+
+    // ===== Phase 4 — A10/A11 + C1 + harness-B4: drift-route REMOVAL =====
+    // The schema-broken run-keyed drift routes are gone (live drift schema is
+    // client/campaign-keyed). Request with a valid own-tenant token: a removed
+    // route has no handler → 404 (not 200, not 500). Proves the routes can no
+    // longer 500 on the absent run_id column nor leak.
+    const driftAlertsGone = await requestGet(`/api/runs/${seededA.runId}/drift-alerts`, tokenA);
+    check("A10/C1 GET /api/runs/:runId/drift-alerts removed → 404", driftAlertsGone.status === 404);
+
+    const driftMetricsGone = await requestGet(`/api/runs/${seededA.runId}/drift-metrics`, tokenA);
+    check("A11/C1 GET /api/runs/:runId/drift-metrics removed → 404", driftMetricsGone.status === 404);
+
+    // C2 — artifact escalation route param standardized :id → :artifactId.
+    // URL path unchanged, so the existing artifact-escalation own/cross/no-auth
+    // assertions above still pass; this re-confirms own-tenant 200 post-rename.
+    const c2Escalation = await requestGet(`/api/artifacts/${seededA.artifactId}/escalation`, tokenA);
+    check("C2 artifact-escalation (:artifactId) own-tenant still 200", c2Escalation.status === 200);
 
     console.log(`\n${assertions}/${assertions} active assertions passed; ${skipped} GAP-skipped findings remain`);
   } finally {

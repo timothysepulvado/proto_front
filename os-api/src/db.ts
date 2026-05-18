@@ -2166,19 +2166,9 @@ export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> 
   return mapDbDriftMetricToDriftMetric(data as DbDriftMetric);
 }
 
-export async function getDriftMetricsByRun(runId: string): Promise<DriftMetric[]> {
-  const { data, error } = await supabase
-    .from("drift_metrics")
-    .select("*")
-    .eq("run_id", runId)
-    .order("created_at", { ascending: true });
-
-  if (error) {
-    throw new Error(`Failed to get drift metrics: ${error.message}`);
-  }
-
-  return (data as DbDriftMetric[]).map(mapDbDriftMetricToDriftMetric);
-}
+// REMOVED (fullsweep Phase 4): getDriftMetricsByRun — queried the non-existent
+// drift_metrics.run_id (live schema is client_id + campaign_id keyed; verified
+// 2026-05-17). Sole caller was the removed GET /api/runs/:runId/drift-metrics.
 
 // ============ Drift Alert Operations ============
 
@@ -2218,19 +2208,11 @@ export async function getDriftAlertsByClient(clientId: string): Promise<DriftAle
   return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
 }
 
-export async function getDriftAlertsByRun(runId: string): Promise<DriftAlert[]> {
-  const { data, error } = await supabase
-    .from("drift_alerts")
-    .select("*")
-    .eq("run_id", runId)
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error(`Failed to get drift alerts by run: ${error.message}`);
-  }
-
-  return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
-}
+// REMOVED (fullsweep Phase 4): getDriftAlertsByRun — queried the non-existent
+// drift_alerts.run_id (live schema is client_id + drift_metric_id keyed;
+// verified 2026-05-17). Sole caller was the removed
+// GET /api/runs/:runId/drift-alerts. Client-scoped reads use
+// getDriftAlertsByClient (still present, A9 — verified live-schema-correct).
 
 export async function acknowledgeDriftAlert(alertId: string, resolutionNotes?: string): Promise<DriftAlert> {
   const updateData: Record<string, unknown> = {

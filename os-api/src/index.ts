@@ -33,9 +33,7 @@ import {
   createDeliverable,
   updateDeliverableStatus,
   incrementDeliverableRetry,
-  getDriftMetricsByRun,
   getDriftAlertsByClient,
-  getDriftAlertsByRun,
   acknowledgeDriftAlert,
   createBaseline,
   deactivateBaselines,
@@ -1269,29 +1267,19 @@ app.get("/api/clients/:clientId/drift-alerts", async (req: Request, res: Respons
   }
 });
 
-// GET /api/runs/:runId/drift-alerts - Get drift alerts for a run
-app.get("/api/runs/:runId/drift-alerts", async (req: Request, res: Response) => {
-  try {
-    const runId = getParam(req, "runId");
-    const alerts = await getDriftAlertsByRun(runId);
-    res.json(alerts);
-  } catch (err) {
-    console.error("GET /api/runs/:runId/drift-alerts error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// GET /api/runs/:runId/drift-metrics - Get drift metrics for a run
-app.get("/api/runs/:runId/drift-metrics", async (req: Request, res: Response) => {
-  try {
-    const runId = getParam(req, "runId");
-    const metrics = await getDriftMetricsByRun(runId);
-    res.json(metrics);
-  } catch (err) {
-    console.error("GET /api/runs/:runId/drift-metrics error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+// REMOVED (fullsweep Phase 4 — A10/A11 + C1 drift-route reconcile):
+//   GET /api/runs/:runId/drift-alerts   (was getDriftAlertsByRun)
+//   GET /api/runs/:runId/drift-metrics  (was getDriftMetricsByRun)
+// Both queried `drift_alerts.run_id` / `drift_metrics.run_id`. Verified
+// against the live schema (project tfbfzepaccvklpabllao, AGENTS.md PAT path
+// 2026-05-17): the drift tables are CLIENT/CAMPAIGN-keyed — drift_alerts has
+// no run_id (client_id + drift_metric_id), drift_metrics has client_id +
+// campaign_id, neither has run_id. The routes 500'd on every call, had ZERO
+// frontend callers (verified across src/), and the route name itself encoded
+// the wrong data model (C1). No speculative run_id migration is warranted
+// (0 live rows; client/campaign scoping is the real schema). Client-scoped
+// drift remains served by GET /api/clients/:clientId/drift-alerts (A9,
+// gated Phase 2). Removal also resolves harness B2/B4 (schema-broken).
 
 // POST /api/drift-alerts/:alertId/acknowledge - Acknowledge a drift alert
 app.post("/api/drift-alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
@@ -2559,9 +2547,12 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
 // JWT_AUTH_ENABLED=true + missing/invalid token → 401. A foreign-tenant
 // artifact's escalation returns the SAME 404 as "none" — no 404-vs-403
 // existence leak, mirroring GET /api/escalations/:id. JWT off → legacy read.
-app.get("/api/artifacts/:id/escalation", async (req: Request, res: Response) => {
+// C2 (fullsweep Phase 4): param standardized `:id` → `:artifactId` to match
+// the artifact-route convention (/file, /signed-url, /platforms). URL path is
+// unchanged — server-internal param name only; no frontend change.
+app.get("/api/artifacts/:artifactId/escalation", async (req: Request, res: Response) => {
   try {
-    const id = getParam(req, "id");
+    const id = getParam(req, "artifactId");
 
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
