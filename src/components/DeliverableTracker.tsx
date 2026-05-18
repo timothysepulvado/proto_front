@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ChevronRight, Layers, RefreshCw, ShieldCheck } from "lucide-react";
 import * as api from "../api";
 import { supabase } from "../lib/supabase";
+import { getAuthHeaders } from "../lib/apiAuth";
 import type { CampaignDeliverable, DeliverableStatus, DirectionDriftIndicator, OperatorOverrideDecision } from "../api";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
@@ -151,7 +152,11 @@ async function loadShotSummaries(
     }
 
     const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
-    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`);
+    // Fullsweep B6: shot-summaries is tenant-gated (PR #8) — forward the client
+    // JWT so this fallback path doesn't 401 and silently stub the tracker.
+    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`, {
+      headers: getAuthHeaders(),
+    });
     if (response.ok) {
       const summaries = (await response.json()) as ShotSummary[];
       if (Array.isArray(summaries)) {

@@ -161,11 +161,30 @@ app.post("/api/auth/client-token", async (req: Request, res: Response) => {
 
 // ============ Client Routes ============
 
-// GET /api/clients - List all clients
-app.get("/api/clients", async (_req: Request, res: Response) => {
+// GET /api/clients - List clients (HUD bootstrap / client switcher)
+//
+// Tenant gate (fullsweep A1 — list force-scope, mirrors GET /api/escalations):
+// JWT_AUTH_ENABLED=true + missing token → 401; with a valid token the result
+// is FORCED to the caller's own client so the switcher can never enumerate
+// other tenants. JWT off → legacy all-clients bootstrap (single-operator dev
+// parity; direct anon `clients` reads return 0 rows under migration-015 RLS so
+// the service-role list is the only boot path). App.tsx tolerates any list
+// length (picks derived[0]); scoping to 1 client does not break bootstrap.
+app.get("/api/clients", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const clients = await getAllClients();
-    res.json(clients);
+    const scoped =
+      jwtAuthEnabled && caller
+        ? clients.filter((c) => c.id === caller.clientId)
+        : clients;
+    res.json(scoped);
   } catch (err) {
     console.error("GET /api/clients error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -173,9 +192,25 @@ app.get("/api/clients", async (_req: Request, res: Response) => {
 });
 
 // GET /api/clients/:clientId - Get client details
+//
+// Tenant gate (fullsweep A2): JWT_AUTH_ENABLED=true + missing token → 401;
+// a caller requesting any clientId other than its own → uniform 404 (no
+// existence leak — same contract as a non-existent own client). JWT off →
+// legacy unscoped read.
 app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const client = await getClient(clientId);
     if (!client) {
       res.status(404).json({ error: "Client not found" });
@@ -381,13 +416,28 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
 // ============ Run Routes ============
 
 // GET /api/runs/:runId - Get run details
+// GET /api/runs/:runId - Run detail
+// Tenant gate (fullsweep A3 — same contract as /api/runs/:runId/detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404
+// (no existence leak). JWT off → legacy unscoped.
 app.get("/api/runs/:runId", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
     res.json(run);
   } catch (err) {
@@ -688,13 +738,28 @@ app.post("/api/runs/:runId/cancel", async (req: Request, res: Response) => {
 // ============ HITL Routes ============
 
 // GET /api/runs/:runId/review - Get review status
+// GET /api/runs/:runId/review - HITL review payload (artifacts + decisions)
+// Tenant gate (fullsweep A5 — run-scoped, same contract as /detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404.
+// JWT off → legacy unscoped.
 app.get("/api/runs/:runId/review", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const artifacts = await getArtifactsByRun(runId);
@@ -839,13 +904,28 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
 // ============ Artifact Routes ============
 
 // GET /api/runs/:runId/artifacts - Get artifacts for a run
+// GET /api/runs/:runId/artifacts - Artifact rows for a run
+// Tenant gate (fullsweep A6 — run-scoped, same contract as /detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404.
+// JWT off → legacy unscoped.
 app.get("/api/runs/:runId/artifacts", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const artifacts = await getArtifactsByRun(runId);
@@ -901,13 +981,30 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
 });
 
 // GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+// GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+// Tenant gate (fullsweep A7 — ownership enforced BEFORE any byte is streamed):
+// JWT on + missing token → 401; missing OR foreign-tenant artifact → uniform
+// 404. artifacts.client_id is NOT NULL post-migration-014 so strict equality
+// is correct (no legacy-null pass-through for the byte-stream path). JWT off →
+// legacy unscoped.
 app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) => {
   try {
     const artifactId = getParam(req, "artifactId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== artifact.clientId) {
+      return res.status(404).json({ error: "Artifact not found" });
     }
 
     const tempGenRoot = getTempGenDir();
@@ -1060,13 +1157,28 @@ app.post("/api/runs/:runId/export", async (req: Request, res: Response) => {
 // ============ Platform Variant Routes ============
 
 // GET /api/artifacts/:artifactId/platforms - Get platform-specific variant URLs
+// GET /api/artifacts/:artifactId/platforms - Cloudinary platform variants
+// Tenant gate (fullsweep A8 — same artifact-ownership contract as A7):
+// JWT on + missing token → 401 (before lookup); missing OR foreign-tenant
+// artifact → uniform 404. JWT off → legacy unscoped.
 app.get("/api/artifacts/:artifactId/platforms", async (req: Request, res: Response) => {
   try {
     const artifactId = getParam(req, "artifactId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== artifact.clientId) {
+      return res.status(404).json({ error: "Artifact not found" });
     }
 
     const cloudinaryPublicId = (artifact.metadata as Record<string, unknown> | undefined)?.cloudinaryPublicId as string | undefined;
@@ -1102,9 +1214,23 @@ app.get("/api/artifacts/:artifactId/platforms", async (req: Request, res: Respon
 // ============ Drift Routes ============
 
 // GET /api/clients/:clientId/drift-alerts - Get drift alerts for a client
+// Tenant gate (fullsweep A9 — clientId-keyed, same contract as A2):
+// JWT on + missing token → 401; caller requesting a foreign clientId →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/clients/:clientId/drift-alerts", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const alerts = await getDriftAlertsByClient(clientId);
     res.json(alerts);
   } catch (err) {
@@ -1254,9 +1380,23 @@ app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) =>
 // ============ Campaign Routes ============
 
 // GET /api/clients/:clientId/campaigns - List campaigns for client
+// Tenant gate (fullsweep A12 — clientId-keyed, same contract as A2):
+// JWT on + missing token → 401; caller requesting a foreign clientId →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/clients/:clientId/campaigns", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const campaigns = await getCampaignsByClient(clientId);
     res.json(campaigns);
   } catch (err) {
@@ -1266,11 +1406,22 @@ app.get("/api/clients/:clientId/campaigns", async (req: Request, res: Response) 
 });
 
 // GET /api/campaigns/:campaignId - Campaign detail with deliverables
+// Tenant gate (fullsweep A13 — same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const campaign = await getCampaign(campaignId);
-    if (!campaign) {
+    if (!campaign || (jwtAuthEnabled && caller && caller.clientId !== campaign.clientId)) {
       res.status(404).json({ error: "Campaign not found" });
       return;
     }
@@ -1309,9 +1460,26 @@ app.post("/api/clients/:clientId/campaigns", async (req: Request, res: Response)
 // ============ Deliverable Routes ============
 
 // GET /api/campaigns/:campaignId/recent-runs - Last N campaign runs for HUD workspace
+// Tenant gate (fullsweep A14 — campaign-scoped, same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 10;
     const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
     const runs = await getRecentRunsByCampaign(campaignId, limit);
@@ -1389,9 +1557,27 @@ app.get("/api/campaigns/:campaignId/direction-drift", async (req: Request, res: 
 });
 
 // GET /api/campaigns/:campaignId/deliverables - List deliverables
+// GET /api/campaigns/:campaignId/deliverables - List deliverables for campaign
+// Tenant gate (fullsweep A15 — campaign-scoped, same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const deliverables = await getDeliverablesByCampaign(campaignId);
     res.json(deliverables);
   } catch (err) {
@@ -1532,13 +1718,33 @@ app.post("/api/campaigns/:campaignId/estimate-cost", async (req: Request, res: R
 });
 
 // GET /api/deliverables/:deliverableId - Deliverable detail with linked artifacts
+// GET /api/deliverables/:deliverableId - Deliverable detail
+// Tenant gate (fullsweep A16 — same deliverable→campaign anchor as
+// /api/deliverables/:deliverableId/iterations): JWT on + missing token →
+// 401; missing deliverable/campaign OR foreign tenant → uniform 404
+// (CampaignDeliverable.clientId is nullable-denormalized so the parent
+// campaign is the bulletproof ownership anchor). JWT off → legacy unscoped.
 app.get("/api/deliverables/:deliverableId", async (req: Request, res: Response) => {
   try {
     const deliverableId = getParam(req, "deliverableId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const deliverable = await getDeliverable(deliverableId);
     if (!deliverable) {
       res.status(404).json({ error: "Deliverable not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(deliverable.campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Deliverable not found" });
+      }
     }
     res.json(deliverable);
   } catch (err) {
@@ -1698,8 +1904,18 @@ app.post("/api/clients/:clientId/baseline/calculate", async (req: Request, res: 
 // ============ Known Limitations (migration 007) ============
 
 // GET /api/known-limitations - List catalog (filter by model, category, severity)
+// Shared/global catalog (NOT per-tenant) — fullsweep MINOR: JWT-required-when-
+// enabled, NO tenant filter (mirrors GET /api/rejection-categories). JWT off →
+// legacy unauthenticated read.
 app.get("/api/known-limitations", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const { model, category, severity } = req.query;
     const limits = await listKnownLimitations({
       model: typeof model === "string" ? model : undefined,
@@ -1714,8 +1930,18 @@ app.get("/api/known-limitations", async (req: Request, res: Response) => {
 });
 
 // GET /api/known-limitations/:id - Get one
+// Shared/global catalog (NOT per-tenant) — fullsweep MINOR: JWT-required-when-
+// enabled, NO tenant filter (mirrors GET /api/rejection-categories). JWT off →
+// legacy unauthenticated read.
 app.get("/api/known-limitations/:id", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const id = getParam(req, "id");
     const limit = await getKnownLimitation(id);
     if (!limit) return res.status(404).json({ error: "Known limitation not found" });
