@@ -75,10 +75,16 @@ async function requestGet(
 async function requestPost(
   path: string,
   token: string | undefined,
+  body?: unknown,
 ): Promise<{ status: number; body: unknown }> {
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetch(`${OS_API_URL}${path}`, { method: "POST", headers });
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const resp = await fetch(`${OS_API_URL}${path}`, {
+    method: "POST",
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
   let parsed: unknown = null;
   try {
     parsed = await resp.json();
@@ -86,6 +92,23 @@ async function requestPost(
     // Empty bodies are not JSON.
   }
   return { status: resp.status, body: parsed };
+}
+
+// Header-aware GET (only needed for the B5 Deprecation-header assertion).
+async function requestGetHeaders(
+  path: string,
+  token: string | undefined,
+): Promise<{ status: number; body: unknown; deprecation: string | null }> {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${OS_API_URL}${path}`, { method: "GET", headers });
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    // non-JSON
+  }
+  return { status: resp.status, body: parsed, deprecation: resp.headers.get("deprecation") };
 }
 
 // SSE-aware probe: a successful /logs response is an OPEN text/event-stream
@@ -291,19 +314,17 @@ async function main(): Promise<void> {
   const health = await fetch(`${OS_API_URL}/api/health`);
   check("os-api health endpoint responds", health.ok);
 
-  // Phase 2-4 (fullsweep fix branch): A1-A9,A12-A16 + MINOR known-limitations
-  // gated and active below. A4 = SSE (text/event-stream + bad-token-401
-  // query-param). A10/A11 + harness-B4 RESOLVED in Phase 4 by ROUTE REMOVAL:
-  // /api/runs/:runId/drift-{alerts,metrics} queried a non-existent run_id
-  // (live drift schema is client/campaign-keyed; verified 2026-05-17), had
-  // zero frontend callers, and the route names encoded the wrong model (C1).
-  // They now 404 — asserted in the active block below. Still GAP-skipped:
-  //   B3 → Phase 5 (prompt_* tables absent from live DB)
-  //   B1 → static-source marker only (caller fixed Phase 2; route-level
-  //        401/404/200 for escalation-report ALREADY actively asserted;
-  //        this harness has no source-AST assertion — tsc/build is the gate)
+  // Phase 2-5 (fullsweep fix branch): every A-finding + B2/B3/B4 is now
+  // actively asserted below. A4 = SSE (text/event-stream + bad-token-401).
+  // A10/A11 + harness-B4 resolved Phase 4 by route removal (→404). B3
+  // (prompt_* absent) resolved Phase 5: deprecated routes return typed-empty
+  // GET / 410 POST + `Deprecation` header (no phantom schema, no migration) —
+  // asserted in the B5 block below. The ONLY remaining GAP-skip is B1, a
+  // static-source marker (ShotDetailDrawer caller fixed Phase 2; the
+  // /escalation-report route-level 401/404/200 contract IS actively asserted
+  // above — this harness has no source-AST assertion, so tsc/build is the
+  // gate for the caller change; the skip documents that boundary).
   skipGap("B1", "ShotDetailDrawer escalation-report caller — source fixed Phase 2 (getAuthHeaders); route 401/404/200 actively asserted; static-source marker only");
-  skipGap("B3", "PromptEvolutionPanel/src/api.ts reference prompt_* tables absent from live DB — Phase 5");
 
   const seededA = await seedTenant(CLIENT_A_ID);
   const seededB = await seedTenant(CLIENT_B_ID);
@@ -648,6 +669,65 @@ async function main(): Promise<void> {
     // assertions above still pass; this re-confirms own-tenant 200 post-rename.
     const c2Escalation = await requestGet(`/api/artifacts/${seededA.artifactId}/escalation`, tokenA);
     check("C2 artifact-escalation (:artifactId) own-tenant still 200", c2Escalation.status === 200);
+
+    // ===== Phase 5 — B3/B5: prompt_* DEPRECATED schema guard =====
+    // prompt_* tables are absent live. Guarded contract: GET → typed-empty
+    // 200 (or typed 404 for /active), NEVER 500; POST → 410 Gone; every
+    // response carries Deprecation: true. (Not tenant-gated by design — a
+    // permanently-empty deprecated surface has no data to leak; Karl's sweep
+    // classified these B5-contract, not A-tenant.)
+    const promptHistory = await requestGetHeaders(`/api/clients/${seededA.clientId}/prompts`, tokenA);
+    check(
+      "B5 GET /clients/:id/prompts → 200 typed-empty array (not 500) + Deprecation header",
+      promptHistory.status === 200 &&
+        Array.isArray(promptHistory.body) &&
+        promptHistory.body.length === 0 &&
+        promptHistory.deprecation === "true",
+    );
+
+    const promptActive = await requestGet(`/api/clients/${seededA.clientId}/prompts/active`, tokenA);
+    check(
+      "B5 GET /clients/:id/prompts/active → typed 404 (not 500)",
+      promptActive.status === 404,
+    );
+
+    const promptScores = await requestGet(
+      `/api/prompts/00000000-0000-4000-8000-000000000000/scores`,
+      tokenA,
+    );
+    check(
+      "B5 GET /prompts/:id/scores → 200 typed-empty array (not 500)",
+      promptScores.status === 200 && Array.isArray(promptScores.body) && promptScores.body.length === 0,
+    );
+
+    const promptLineage = await requestGet(
+      `/api/prompts/00000000-0000-4000-8000-000000000000/lineage`,
+      tokenA,
+    );
+    check(
+      "B5 GET /prompts/:id/lineage → 200 typed-empty array (not 500)",
+      promptLineage.status === 200 && Array.isArray(promptLineage.body) && promptLineage.body.length === 0,
+    );
+
+    const promptCreate = await requestPost(
+      `/api/clients/${seededA.clientId}/prompts`,
+      tokenA,
+      { promptText: "fullsweep B5 deprecated probe", stage: "generate" },
+    );
+    check(
+      "B5 POST /clients/:id/prompts → 410 Gone (no phantom insert)",
+      promptCreate.status === 410,
+    );
+
+    const scoreCreate = await requestPost(
+      `/api/prompts/00000000-0000-4000-8000-000000000000/scores`,
+      tokenA,
+      { runId: seededA.runId, score: 4.2 },
+    );
+    check(
+      "B5 POST /prompts/:id/scores → 410 Gone (no phantom insert)",
+      scoreCreate.status === 410,
+    );
 
     console.log(`\n${assertions}/${assertions} active assertions passed; ${skipped} GAP-skipped findings remain`);
   } finally {

@@ -984,6 +984,29 @@ function mapDbPromptToPrompt(d: DbPromptTemplate): PromptTemplate {
   };
 }
 
+// ===== Prompt schema guard — DEPRECATED surface (fullsweep Phase 5 / B5) =====
+// prompt_templates / prompt_scores / prompt_evolution_log are NOT provisioned
+// in the live schema (verified 2026-05-17). PromptEvolutionPanel is MOUNTED +
+// USED (Phase 4.G) and has its own empty-state UI, so the direct-Supabase READ
+// helpers degrade to typed-empty instead of throwing a confusing Postgrest
+// error (clean "No prompts yet", no console noise). Writes surface a clear
+// deprecation message. Specific undefined-table / schema-cache signatures only
+// so a genuine RLS/network error still surfaces. No phantom schema/migration.
+function isAbsentPromptRelation(
+  error: { code?: string; message?: string } | null,
+): boolean {
+  if (!error) return false;
+  const code = error.code ?? "";
+  const msg = (error.message ?? "").toLowerCase();
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    msg.includes("does not exist") ||
+    msg.includes("could not find the table") ||
+    msg.includes("schema cache")
+  );
+}
+
 // Get active prompt for a client/stage
 export async function getActivePrompt(clientId: string, stage: string = "generate"): Promise<PromptTemplate | null> {
   const { data, error } = await supabase
@@ -995,7 +1018,10 @@ export async function getActivePrompt(clientId: string, stage: string = "generat
     .order("version", { ascending: false })
     .limit(1);
 
-  if (error) throw new Error(`Failed to get active prompt: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return null; // B5 deprecated-schema guard
+    throw new Error(`Failed to get active prompt: ${error.message}`);
+  }
   if (!data || data.length === 0) return null;
   return mapDbPromptToPrompt(data[0] as DbPromptTemplate);
 }
@@ -1009,7 +1035,10 @@ export async function getPromptHistory(clientId: string, stage: string = "genera
     .eq("stage", stage)
     .order("version", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt history: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt history: ${error.message}`);
+  }
   return (data as DbPromptTemplate[]).map(mapDbPromptToPrompt);
 }
 
@@ -1021,7 +1050,10 @@ export async function getPromptScores(promptId: string): Promise<{ id: string; s
     .eq("prompt_id", promptId)
     .order("created_at", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt scores: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt scores: ${error.message}`);
+  }
   return (data ?? []).map((d: Record<string, unknown>) => ({
     id: d.id as string,
     score: d.score as number,
@@ -1038,7 +1070,10 @@ export async function getPromptLineage(promptId: string): Promise<Record<string,
     .or(`parent_prompt_id.eq.${promptId},child_prompt_id.eq.${promptId}`)
     .order("created_at", { ascending: true });
 
-  if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  }
   return data ?? [];
 }
 
@@ -1103,7 +1138,14 @@ export async function createPrompt(
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to create prompt: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) {
+      // B5: honest deprecation message — the panel's save handler catches this
+      // and surfaces it instead of a raw PostgREST "schema cache" error.
+      throw new Error("Prompt evolution is deprecated — prompt_* schema is not provisioned");
+    }
+    throw new Error(`Failed to create prompt: ${error.message}`);
+  }
   return mapDbPromptToPrompt(data as DbPromptTemplate);
 }
 

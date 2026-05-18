@@ -23,6 +23,7 @@ import {
   createPromptTemplate,
   getPromptHistory,
   addPromptScore,
+  PromptSchemaUnavailableError,
   getPromptScores,
   getPromptLineage,
   getCampaign,
@@ -1294,11 +1295,27 @@ app.post("/api/drift-alerts/:alertId/acknowledge", async (req: Request, res: Res
   }
 });
 
-// ============ Prompt Routes ============
+// ============ Prompt Routes — DEPRECATED (fullsweep Phase 5 / B5) ============
+//
+// The prompt_* tables (prompt_templates, prompt_scores, prompt_evolution_log)
+// are NOT provisioned in the live schema (verified 2026-05-17; AGENTS.md
+// forward-marks them non-existent). Per the fullsweep plan these routes are
+// guarded — NOT removed — because PromptEvolutionPanel is MOUNTED + USED
+// (Phase 4.G). Contract while the schema is absent:
+//   • GET  → 200 with typed-empty ([] / 404 "no active prompt") via the
+//            db-helper absent-relation guard — never 500.
+//   • POST → 410 Gone (no phantom insert into a non-existent table).
+// Every response carries `Deprecation: true`. No phantom schema, no migration.
+// If prompt_* is ever provisioned the guard is inert and these resume working.
+function markPromptDeprecated(res: Response): void {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</docs>; rel="deprecation"');
+}
 
-// GET /api/clients/:clientId/prompts - Get prompt history
+// GET /api/clients/:clientId/prompts - Get prompt history (DEPRECATED)
 app.get("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const stage = (req.query.stage as string) || "generate";
     const prompts = await getPromptHistory(clientId, stage);
@@ -1309,9 +1326,10 @@ app.get("/api/clients/:clientId/prompts", async (req: Request, res: Response) =>
   }
 });
 
-// GET /api/clients/:clientId/prompts/active - Get active prompt
+// GET /api/clients/:clientId/prompts/active - Get active prompt (DEPRECATED)
 app.get("/api/clients/:clientId/prompts/active", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const stage = (req.query.stage as string) || "generate";
     const campaignId = req.query.campaignId as string | undefined;
@@ -1327,9 +1345,10 @@ app.get("/api/clients/:clientId/prompts/active", async (req: Request, res: Respo
   }
 });
 
-// POST /api/clients/:clientId/prompts - Create prompt template
+// POST /api/clients/:clientId/prompts - Create prompt template (DEPRECATED → 410)
 app.post("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const { promptText, stage, campaignId, version } = req.body;
     if (!promptText) {
@@ -1347,14 +1366,19 @@ app.post("/api/clients/:clientId/prompts", async (req: Request, res: Response) =
     });
     res.status(201).json(template);
   } catch (err) {
+    if (err instanceof PromptSchemaUnavailableError) {
+      res.status(410).json({ error: "Prompt evolution is deprecated — prompt_* schema is not provisioned" });
+      return;
+    }
     console.error("POST /api/clients/:clientId/prompts error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /api/prompts/:promptId/scores - Get scores for a prompt
+// GET /api/prompts/:promptId/scores - Get scores for a prompt (DEPRECATED)
 app.get("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const scores = await getPromptScores(promptId);
     res.json(scores);
@@ -1364,9 +1388,10 @@ app.get("/api/prompts/:promptId/scores", async (req: Request, res: Response) => 
   }
 });
 
-// POST /api/prompts/:promptId/scores - Record a score
+// POST /api/prompts/:promptId/scores - Record a score (DEPRECATED → 410)
 app.post("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const { runId, score, gateDecision, artifactId, feedback } = req.body;
     if (!runId || score === undefined) {
@@ -1378,14 +1403,19 @@ app.post("/api/prompts/:promptId/scores", async (req: Request, res: Response) =>
     });
     res.status(201).json(result);
   } catch (err) {
+    if (err instanceof PromptSchemaUnavailableError) {
+      res.status(410).json({ error: "Prompt evolution is deprecated — prompt_* schema is not provisioned" });
+      return;
+    }
     console.error("POST /api/prompts/:promptId/scores error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /api/prompts/:promptId/lineage - Get evolution lineage
+// GET /api/prompts/:promptId/lineage - Get evolution lineage (DEPRECATED)
 app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const lineage = await getPromptLineage(promptId);
     res.json(lineage);

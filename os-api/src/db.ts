@@ -2541,6 +2541,40 @@ export async function incrementDeliverableRetry(deliverableId: string): Promise<
 
 // ============ Prompt Template Operations ============
 
+// ============ Prompt helpers — DEPRECATED schema guard (fullsweep Phase 5 / B5) ============
+//
+// prompt_templates / prompt_scores / prompt_evolution_log are NOT provisioned
+// in the live schema (verified 2026-05-17 via the AGENTS.md PAT path; AGENTS.md
+// already forward-marks them non-existent). PromptEvolutionPanel is MOUNTED +
+// USED (Phase 4.G) and has its own empty-state UI, so the READ helpers degrade
+// to typed-empty ([] / null) instead of throwing → the os-api routes return
+// 200-empty (not 500) and the panel renders "No prompts yet". WRITE helpers
+// fail fast with PromptSchemaUnavailableError so the routes can answer 410
+// Gone (no phantom insert into a non-existent table). No phantom schema, no
+// migration — guard only. The specific undefined-table / schema-cache-miss
+// signatures are matched so a genuine RLS/network error still surfaces.
+function isAbsentPromptRelation(
+  error: { code?: string; message?: string } | null,
+): boolean {
+  if (!error) return false;
+  const code = error.code ?? "";
+  const msg = (error.message ?? "").toLowerCase();
+  return (
+    code === "42P01" || // Postgres: undefined_table
+    code === "PGRST205" || // PostgREST: table not found in schema cache
+    msg.includes("does not exist") ||
+    msg.includes("could not find the table") ||
+    msg.includes("schema cache")
+  );
+}
+
+export class PromptSchemaUnavailableError extends Error {
+  constructor() {
+    super("prompt_* schema is not provisioned (deprecated surface — no live tables)");
+    this.name = "PromptSchemaUnavailableError";
+  }
+}
+
 export async function getActivePrompt(clientId: string, stage: string = "generate", campaignId?: string): Promise<PromptTemplate | null> {
   let query = supabase
     .from("prompt_templates")
@@ -2556,7 +2590,10 @@ export async function getActivePrompt(clientId: string, stage: string = "generat
   }
 
   const { data, error } = await query;
-  if (error) throw new Error(`Failed to get active prompt: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return null; // B5 deprecated-schema guard
+    throw new Error(`Failed to get active prompt: ${error.message}`);
+  }
   if (!data || data.length === 0) return null;
 
   const d = data[0];
@@ -2586,7 +2623,10 @@ export async function createPromptTemplate(template: Omit<PromptTemplate, "id" |
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to create prompt template: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) throw new PromptSchemaUnavailableError(); // B5
+    throw new Error(`Failed to create prompt template: ${error.message}`);
+  }
 
   return {
     id: data.id, clientId: data.client_id, campaignId: data.campaign_id ?? undefined,
@@ -2604,7 +2644,10 @@ export async function getPromptHistory(clientId: string, stage: string = "genera
     .eq("stage", stage)
     .order("version", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt history: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt history: ${error.message}`);
+  }
 
   return (data ?? []).map((d: Record<string, unknown>) => ({
     id: d.id as string, clientId: d.client_id as string,
@@ -2631,7 +2674,10 @@ export async function addPromptScore(score: Omit<PromptScore, "id" | "createdAt"
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to add prompt score: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) throw new PromptSchemaUnavailableError(); // B5
+    throw new Error(`Failed to add prompt score: ${error.message}`);
+  }
 
   return {
     id: data.id, promptId: data.prompt_id, runId: data.run_id,
@@ -2648,7 +2694,10 @@ export async function getPromptScores(promptId: string): Promise<PromptScore[]> 
     .eq("prompt_id", promptId)
     .order("created_at", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt scores: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt scores: ${error.message}`);
+  }
 
   return (data ?? []).map((d: Record<string, unknown>) => ({
     id: d.id as string, promptId: d.prompt_id as string, runId: d.run_id as string,
@@ -2665,7 +2714,10 @@ export async function getPromptLineage(promptId: string): Promise<Record<string,
     .or(`parent_prompt_id.eq.${promptId},child_prompt_id.eq.${promptId}`)
     .order("created_at", { ascending: true });
 
-  if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  }
   return data ?? [];
 }
 
