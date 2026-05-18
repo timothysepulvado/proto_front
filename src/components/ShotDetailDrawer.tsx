@@ -16,6 +16,7 @@ import * as api from "../api";
 import type { Artifact, ArtifactIterationRow, ArtifactIterationsResponse, CampaignDeliverable, DeliverableStatus, OperatorOverrideDecision, ProductionShotState, ProductionSlug, RunLog } from "../api";
 import type { AuditReportShot } from "../lib/auditReport";
 import { useSignedArtifactUrl } from "../hooks/useSignedArtifactUrl";
+import { getAuthHeaders } from "../lib/apiAuth";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
 
@@ -467,7 +468,11 @@ function buildTimelineEvents(
 }
 
 async function fetchTrail(runId: string, deliverableId: string): Promise<DeliverableTrail | null> {
-  const response = await fetch(`${OS_API_URL}/api/runs/${runId}/escalation-report`);
+  // Fullsweep B1: /api/runs/:runId/escalation-report is tenant-gated (PR #8) —
+  // forward the client JWT or the HUD trail silently nulls out under JWT-on.
+  const response = await fetch(`${OS_API_URL}/api/runs/${runId}/escalation-report`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) return null;
   const report = (await response.json()) as RunEscalationReport;
   return report.deliverables?.find((item) => item.deliverable?.id === deliverableId) ?? null;
@@ -832,7 +837,7 @@ export default function ShotDetailDrawer({ shotNumber, deliverableId, campaignId
           runId ? fetchTrail(runId, currentDeliverableId) : Promise.resolve<DeliverableTrail | null>(null),
           api.getDeliverable(currentDeliverableId).catch(() => null),
           api.getProductionShots(productionSlug).then((response) => response.shots).catch(() => []),
-          api.getArtifactIterationsForDeliverable(currentDeliverableId).catch((err) => {
+          api.getArtifactIterationsForDeliverable(currentDeliverableId, runId).catch((err) => {
             nextIterationError = err instanceof Error ? err.message : "Couldn't load regen iterations.";
             return emptyIterations;
           }),

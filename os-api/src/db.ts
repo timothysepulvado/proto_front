@@ -1841,16 +1841,24 @@ function readOperatorOverride(
 
 export async function getArtifactsForDeliverableWithVerdicts(
   deliverableId: string,
+  runId?: string,
 ): Promise<ArtifactIterationsResponse> {
   const deliverable = await getDeliverable(deliverableId);
   if (!deliverable) throw new Error(`Deliverable ${deliverableId} not found`);
   const shotNumber = deriveDeliverableShotNumber(deliverable, 0);
 
-  const { data: artifactData, error: artifactError } = await supabase
+  // Asset-integrity S6 fix (Jackie RCA 2026-05-17): when a run is in scope the
+  // Iterations view MUST be scoped to that run. Without this filter the query
+  // mixes artifacts across every run that ever touched the deliverable, so the
+  // HUD renders a different run's creative. runId optional → internal callers
+  // (regen loop) keep the full-history behavior unchanged (back-compat).
+  let artifactQuery = supabase
     .from("artifacts")
     .select("*")
     .eq("deliverable_id", deliverableId)
-    .eq("type", "image")
+    .eq("type", "image");
+  if (runId) artifactQuery = artifactQuery.eq("run_id", runId);
+  const { data: artifactData, error: artifactError } = await artifactQuery
     .order("created_at", { ascending: true })
     .limit(500);
   if (artifactError) throw new Error(`Failed to get deliverable artifacts: ${artifactError.message}`);
@@ -1859,11 +1867,15 @@ export async function getArtifactsForDeliverableWithVerdicts(
   const runIds = [...new Set(artifacts.map((artifact) => artifact.runId))];
   const [runRows, logRows, escalationRows] = await Promise.all([
     (async () => {
-      const { data, error } = await supabase
+      let runsQuery = supabase
         .from("runs")
         .select("*")
         .eq("campaign_id", deliverable.campaignId)
-        .eq("mode", "stills")
+        .eq("mode", "stills");
+      // S6: when run-scoped, only the in-scope run's metadata (operator
+      // overrides etc.) is relevant; campaign-wide otherwise (back-compat).
+      if (runId) runsQuery = runsQuery.eq("id", runId);
+      const { data, error } = await runsQuery
         .order("created_at", { ascending: true })
         .limit(250);
       if (error) throw new Error(`Failed to get stills runs for iteration browser: ${error.message}`);
@@ -1881,10 +1893,14 @@ export async function getArtifactsForDeliverableWithVerdicts(
       return (data as DbRunLog[] | null ?? []).map(mapDbLogToRunLog);
     })(),
     (async () => {
-      const { data, error } = await supabase
+      let escalationQuery = supabase
         .from("asset_escalations")
         .select("*")
-        .eq("deliverable_id", deliverableId)
+        .eq("deliverable_id", deliverableId);
+      // S6: scope escalation/decision trail to the in-scope run so the
+      // Iterations verdict column does not bleed across runs.
+      if (runId) escalationQuery = escalationQuery.eq("run_id", runId);
+      const { data, error } = await escalationQuery
         .order("created_at", { ascending: true })
         .limit(1000);
       if (error) throw new Error(`Failed to get escalations for iteration browser: ${error.message}`);
@@ -2150,19 +2166,9 @@ export async function addDriftMetric(metric: DriftMetric): Promise<DriftMetric> 
   return mapDbDriftMetricToDriftMetric(data as DbDriftMetric);
 }
 
-export async function getDriftMetricsByRun(runId: string): Promise<DriftMetric[]> {
-  const { data, error } = await supabase
-    .from("drift_metrics")
-    .select("*")
-    .eq("run_id", runId)
-    .order("created_at", { ascending: true });
-
-  if (error) {
-    throw new Error(`Failed to get drift metrics: ${error.message}`);
-  }
-
-  return (data as DbDriftMetric[]).map(mapDbDriftMetricToDriftMetric);
-}
+// REMOVED (fullsweep Phase 4): getDriftMetricsByRun — queried the non-existent
+// drift_metrics.run_id (live schema is client_id + campaign_id keyed; verified
+// 2026-05-17). Sole caller was the removed GET /api/runs/:runId/drift-metrics.
 
 // ============ Drift Alert Operations ============
 
@@ -2202,19 +2208,11 @@ export async function getDriftAlertsByClient(clientId: string): Promise<DriftAle
   return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
 }
 
-export async function getDriftAlertsByRun(runId: string): Promise<DriftAlert[]> {
-  const { data, error } = await supabase
-    .from("drift_alerts")
-    .select("*")
-    .eq("run_id", runId)
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error(`Failed to get drift alerts by run: ${error.message}`);
-  }
-
-  return (data as DbDriftAlert[]).map(mapDbDriftAlertToDriftAlert);
-}
+// REMOVED (fullsweep Phase 4): getDriftAlertsByRun — queried the non-existent
+// drift_alerts.run_id (live schema is client_id + drift_metric_id keyed;
+// verified 2026-05-17). Sole caller was the removed
+// GET /api/runs/:runId/drift-alerts. Client-scoped reads use
+// getDriftAlertsByClient (still present, A9 — verified live-schema-correct).
 
 export async function acknowledgeDriftAlert(alertId: string, resolutionNotes?: string): Promise<DriftAlert> {
   const updateData: Record<string, unknown> = {
@@ -2543,6 +2541,40 @@ export async function incrementDeliverableRetry(deliverableId: string): Promise<
 
 // ============ Prompt Template Operations ============
 
+// ============ Prompt helpers — DEPRECATED schema guard (fullsweep Phase 5 / B5) ============
+//
+// prompt_templates / prompt_scores / prompt_evolution_log are NOT provisioned
+// in the live schema (verified 2026-05-17 via the AGENTS.md PAT path; AGENTS.md
+// already forward-marks them non-existent). PromptEvolutionPanel is MOUNTED +
+// USED (Phase 4.G) and has its own empty-state UI, so the READ helpers degrade
+// to typed-empty ([] / null) instead of throwing → the os-api routes return
+// 200-empty (not 500) and the panel renders "No prompts yet". WRITE helpers
+// fail fast with PromptSchemaUnavailableError so the routes can answer 410
+// Gone (no phantom insert into a non-existent table). No phantom schema, no
+// migration — guard only. The specific undefined-table / schema-cache-miss
+// signatures are matched so a genuine RLS/network error still surfaces.
+function isAbsentPromptRelation(
+  error: { code?: string; message?: string } | null,
+): boolean {
+  if (!error) return false;
+  const code = error.code ?? "";
+  const msg = (error.message ?? "").toLowerCase();
+  return (
+    code === "42P01" || // Postgres: undefined_table
+    code === "PGRST205" || // PostgREST: table not found in schema cache
+    msg.includes("does not exist") ||
+    msg.includes("could not find the table") ||
+    msg.includes("schema cache")
+  );
+}
+
+export class PromptSchemaUnavailableError extends Error {
+  constructor() {
+    super("prompt_* schema is not provisioned (deprecated surface — no live tables)");
+    this.name = "PromptSchemaUnavailableError";
+  }
+}
+
 export async function getActivePrompt(clientId: string, stage: string = "generate", campaignId?: string): Promise<PromptTemplate | null> {
   let query = supabase
     .from("prompt_templates")
@@ -2558,7 +2590,10 @@ export async function getActivePrompt(clientId: string, stage: string = "generat
   }
 
   const { data, error } = await query;
-  if (error) throw new Error(`Failed to get active prompt: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return null; // B5 deprecated-schema guard
+    throw new Error(`Failed to get active prompt: ${error.message}`);
+  }
   if (!data || data.length === 0) return null;
 
   const d = data[0];
@@ -2588,7 +2623,10 @@ export async function createPromptTemplate(template: Omit<PromptTemplate, "id" |
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to create prompt template: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) throw new PromptSchemaUnavailableError(); // B5
+    throw new Error(`Failed to create prompt template: ${error.message}`);
+  }
 
   return {
     id: data.id, clientId: data.client_id, campaignId: data.campaign_id ?? undefined,
@@ -2606,7 +2644,10 @@ export async function getPromptHistory(clientId: string, stage: string = "genera
     .eq("stage", stage)
     .order("version", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt history: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt history: ${error.message}`);
+  }
 
   return (data ?? []).map((d: Record<string, unknown>) => ({
     id: d.id as string, clientId: d.client_id as string,
@@ -2633,7 +2674,10 @@ export async function addPromptScore(score: Omit<PromptScore, "id" | "createdAt"
     .select()
     .single();
 
-  if (error) throw new Error(`Failed to add prompt score: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) throw new PromptSchemaUnavailableError(); // B5
+    throw new Error(`Failed to add prompt score: ${error.message}`);
+  }
 
   return {
     id: data.id, promptId: data.prompt_id, runId: data.run_id,
@@ -2650,7 +2694,10 @@ export async function getPromptScores(promptId: string): Promise<PromptScore[]> 
     .eq("prompt_id", promptId)
     .order("created_at", { ascending: false });
 
-  if (error) throw new Error(`Failed to get prompt scores: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt scores: ${error.message}`);
+  }
 
   return (data ?? []).map((d: Record<string, unknown>) => ({
     id: d.id as string, promptId: d.prompt_id as string, runId: d.run_id as string,
@@ -2667,7 +2714,10 @@ export async function getPromptLineage(promptId: string): Promise<Record<string,
     .or(`parent_prompt_id.eq.${promptId},child_prompt_id.eq.${promptId}`)
     .order("created_at", { ascending: true });
 
-  if (error) throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  if (error) {
+    if (isAbsentPromptRelation(error)) return []; // B5 deprecated-schema guard
+    throw new Error(`Failed to get prompt lineage: ${error.message}`);
+  }
   return data ?? [];
 }
 

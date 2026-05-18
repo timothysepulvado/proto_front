@@ -23,6 +23,7 @@ import {
   createPromptTemplate,
   getPromptHistory,
   addPromptScore,
+  PromptSchemaUnavailableError,
   getPromptScores,
   getPromptLineage,
   getCampaign,
@@ -33,9 +34,7 @@ import {
   createDeliverable,
   updateDeliverableStatus,
   incrementDeliverableRetry,
-  getDriftMetricsByRun,
   getDriftAlertsByClient,
-  getDriftAlertsByRun,
   acknowledgeDriftAlert,
   createBaseline,
   deactivateBaselines,
@@ -75,7 +74,7 @@ import { createProductionsRouter } from "./productions.js";
 import { getTempGenDir } from "./temp-gen-env.js";
 import { ForbiddenPathError, PathNotFoundError, resolveExistingRealPathInsideAllowedRoots } from "./path-security.js";
 import { validateCampaignClientScope, validateRunModeFeatureFlag } from "./run-create-guards.js";
-import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest } from "./auth.js";
+import { CLIENT_JWT_EXPIRES_IN_SECONDS, mintClientJwt, verifyClientJwtFromRequest, verifyClientJwtFromRequestOrQuery } from "./auth.js";
 import {
   createArtifactSignedUrl,
   deleteRejectionLearningReferenceImage,
@@ -161,11 +160,49 @@ app.post("/api/auth/client-token", async (req: Request, res: Response) => {
 
 // ============ Client Routes ============
 
-// GET /api/clients - List all clients
-app.get("/api/clients", async (_req: Request, res: Response) => {
+// GET /api/clients - List clients (HUD bootstrap / client switcher)
+//
+// Tenant gate (fullsweep A1, REVISED per Karl review BLOCK — bootstrap-safe):
+// This is the COLD-BOOT entrypoint. App.tsx calls getClients() token-less on
+// first mount; `activeClient` is only set FROM this list, and the client JWT
+// is only minted (applyClientJwt → POST /api/auth/client-token) AFTER an
+// activeClient exists. A hard 401-on-no-token here is a chicken-and-egg
+// deadlock — the HUD can never obtain the token it would need to read the
+// list it needs to obtain the token. (Confirmed live JWT-on :3302.)
+//
+// A 401 here also adds NO real isolation: POST /api/auth/client-token is bare
+// (documented PR#6/#7 single-operator threat model) so a token-less caller who
+// wants tenant data simply mints a token for any clientId. The client LIST is
+// bootstrap metadata (id/name/status/last-run), not per-tenant data — the
+// actual tenant-data isolation is enforced on every per-resource route
+// (A2-A16, Phase 2), which is where it belongs.
+//
+// Contract:
+//   • JWT off                     → legacy all-clients (service-role; direct
+//                                     anon `clients` reads return 0 under
+//                                     migration-015 RLS, so this is the only
+//                                     boot path).
+//   • JWT on + valid token        → scoped to caller's own client (an
+//                                     authenticated session never enumerates
+//                                     other tenants — defense-in-depth kept
+//                                     where the token is actually obtainable).
+//   • JWT on + no token (BOOTSTRAP) → full list, 200 (NOT 401) so the HUD can
+//                                     cold-boot, pick a client, then mint.
+//
+// Future hardening (deferred-rationale brief): when POST /api/auth/client-token
+// is itself gated (operator auth), this bootstrap branch should require that
+// operator token. Tracked, not silently weakened.
+app.get("/api/clients", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+
     const clients = await getAllClients();
-    res.json(clients);
+    const scoped =
+      jwtAuthEnabled && caller
+        ? clients.filter((c) => c.id === caller.clientId)
+        : clients;
+    res.json(scoped);
   } catch (err) {
     console.error("GET /api/clients error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -173,9 +210,25 @@ app.get("/api/clients", async (_req: Request, res: Response) => {
 });
 
 // GET /api/clients/:clientId - Get client details
+//
+// Tenant gate (fullsweep A2): JWT_AUTH_ENABLED=true + missing token → 401;
+// a caller requesting any clientId other than its own → uniform 404 (no
+// existence leak — same contract as a non-existent own client). JWT off →
+// legacy unscoped read.
 app.get("/api/clients/:clientId", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const client = await getClient(clientId);
     if (!client) {
       res.status(404).json({ error: "Client not found" });
@@ -381,13 +434,28 @@ app.post("/api/clients/:clientId/runs", async (req: Request, res: Response) => {
 // ============ Run Routes ============
 
 // GET /api/runs/:runId - Get run details
+// GET /api/runs/:runId - Run detail
+// Tenant gate (fullsweep A3 — same contract as /api/runs/:runId/detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404
+// (no existence leak). JWT off → legacy unscoped.
 app.get("/api/runs/:runId", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
     res.json(run);
   } catch (err) {
@@ -589,13 +657,29 @@ app.get("/api/clients/:clientId/cost-summary", async (req: Request, res: Respons
 });
 
 // GET /api/runs/:runId/logs - SSE stream for logs
+// Tenant gate (fullsweep A4 / B3 — SSE auth): native EventSource cannot set an
+// Authorization header, so the client JWT rides as `?access_token=` (header
+// still honored for fetch callers). Verify + run-ownership BEFORE flushHeaders
+// so a rejected caller gets a real 401/404 HTTP response, not a half-open SSE
+// stream. Same uniform-404 run contract as /detail. JWT off → legacy unscoped.
 app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequestOrQuery(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     // Set up SSE
@@ -664,13 +748,28 @@ app.get("/api/runs/:runId/logs", async (req: Request, res: Response) => {
 });
 
 // POST /api/runs/:runId/cancel - Cancel a run
+// Tenant gate (fullsweep B4 — WRITE-side hole, treated as BLOCK): a cross-
+// tenant caller could previously cancel another client's in-flight run. Same
+// uniform-404 run-ownership contract as the GET run routes; the verifier reads
+// the Authorization header (fetch POST, not EventSource). JWT off → legacy.
 app.post("/api/runs/:runId/cancel", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const cancelled = await cancelRun(runId);
@@ -687,14 +786,28 @@ app.post("/api/runs/:runId/cancel", async (req: Request, res: Response) => {
 
 // ============ HITL Routes ============
 
-// GET /api/runs/:runId/review - Get review status
+// GET /api/runs/:runId/review - HITL review payload (artifacts + decisions)
+// Tenant gate (fullsweep A5 — run-scoped, same contract as /detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404.
+// JWT off → legacy unscoped.
 app.get("/api/runs/:runId/review", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const artifacts = await getArtifactsByRun(runId);
@@ -839,13 +952,28 @@ app.post("/api/runs/:runId/review/reject", async (req: Request, res: Response) =
 // ============ Artifact Routes ============
 
 // GET /api/runs/:runId/artifacts - Get artifacts for a run
+// GET /api/runs/:runId/artifacts - Artifact rows for a run
+// Tenant gate (fullsweep A6 — run-scoped, same contract as /detail):
+// JWT on + missing token → 401; missing OR foreign-tenant run → uniform 404.
+// JWT off → legacy unscoped.
 app.get("/api/runs/:runId/artifacts", async (req: Request, res: Response) => {
   try {
     const runId = getParam(req, "runId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const run = await getRun(runId);
     if (!run) {
       res.status(404).json({ error: "Run not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && run.clientId && caller.clientId !== run.clientId) {
+      return res.status(404).json({ error: "Run not found" });
     }
 
     const artifacts = await getArtifactsByRun(runId);
@@ -868,6 +996,16 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
   try {
     const deliverableId = getParam(req, "deliverableId");
 
+    // Asset-integrity S6 (Jackie RCA 2026-05-17): optional run scope. Absent →
+    // legacy full-history (internal callers); present-but-malformed → 400 (fail
+    // closed, explicit contract — never silently widen to all runs).
+    const rawRunId = typeof req.query.run_id === "string" ? req.query.run_id.trim() : undefined;
+    const runId = rawRunId && rawRunId.length > 0 ? rawRunId : undefined;
+    if (runId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) {
+      res.status(400).json({ error: "Invalid run_id" });
+      return;
+    }
+
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
     if (jwtAuthEnabled && !caller) {
@@ -882,7 +1020,7 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
       }
     }
 
-    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId);
+    const iterations = await getArtifactsForDeliverableWithVerdicts(deliverableId, runId);
     res.json(iterations);
   } catch (err) {
     console.error("GET /api/deliverables/:deliverableId/iterations error:", err);
@@ -891,13 +1029,30 @@ app.get("/api/deliverables/:deliverableId/iterations", async (req: Request, res:
 });
 
 // GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+// GET /api/artifacts/:artifactId/file - Stream trusted local artifact file fallback
+// Tenant gate (fullsweep A7 — ownership enforced BEFORE any byte is streamed):
+// JWT on + missing token → 401; missing OR foreign-tenant artifact → uniform
+// 404. artifacts.client_id is NOT NULL post-migration-014 so strict equality
+// is correct (no legacy-null pass-through for the byte-stream path). JWT off →
+// legacy unscoped.
 app.get("/api/artifacts/:artifactId/file", async (req: Request, res: Response) => {
   try {
     const artifactId = getParam(req, "artifactId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== artifact.clientId) {
+      return res.status(404).json({ error: "Artifact not found" });
     }
 
     const tempGenRoot = getTempGenDir();
@@ -1050,13 +1205,28 @@ app.post("/api/runs/:runId/export", async (req: Request, res: Response) => {
 // ============ Platform Variant Routes ============
 
 // GET /api/artifacts/:artifactId/platforms - Get platform-specific variant URLs
+// GET /api/artifacts/:artifactId/platforms - Cloudinary platform variants
+// Tenant gate (fullsweep A8 — same artifact-ownership contract as A7):
+// JWT on + missing token → 401 (before lookup); missing OR foreign-tenant
+// artifact → uniform 404. JWT off → legacy unscoped.
 app.get("/api/artifacts/:artifactId/platforms", async (req: Request, res: Response) => {
   try {
     const artifactId = getParam(req, "artifactId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const artifact = await getArtifactById(artifactId);
     if (!artifact) {
       res.status(404).json({ error: "Artifact not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== artifact.clientId) {
+      return res.status(404).json({ error: "Artifact not found" });
     }
 
     const cloudinaryPublicId = (artifact.metadata as Record<string, unknown> | undefined)?.cloudinaryPublicId as string | undefined;
@@ -1092,9 +1262,23 @@ app.get("/api/artifacts/:artifactId/platforms", async (req: Request, res: Respon
 // ============ Drift Routes ============
 
 // GET /api/clients/:clientId/drift-alerts - Get drift alerts for a client
+// Tenant gate (fullsweep A9 — clientId-keyed, same contract as A2):
+// JWT on + missing token → 401; caller requesting a foreign clientId →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/clients/:clientId/drift-alerts", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const alerts = await getDriftAlertsByClient(clientId);
     res.json(alerts);
   } catch (err) {
@@ -1103,29 +1287,19 @@ app.get("/api/clients/:clientId/drift-alerts", async (req: Request, res: Respons
   }
 });
 
-// GET /api/runs/:runId/drift-alerts - Get drift alerts for a run
-app.get("/api/runs/:runId/drift-alerts", async (req: Request, res: Response) => {
-  try {
-    const runId = getParam(req, "runId");
-    const alerts = await getDriftAlertsByRun(runId);
-    res.json(alerts);
-  } catch (err) {
-    console.error("GET /api/runs/:runId/drift-alerts error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// GET /api/runs/:runId/drift-metrics - Get drift metrics for a run
-app.get("/api/runs/:runId/drift-metrics", async (req: Request, res: Response) => {
-  try {
-    const runId = getParam(req, "runId");
-    const metrics = await getDriftMetricsByRun(runId);
-    res.json(metrics);
-  } catch (err) {
-    console.error("GET /api/runs/:runId/drift-metrics error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+// REMOVED (fullsweep Phase 4 — A10/A11 + C1 drift-route reconcile):
+//   GET /api/runs/:runId/drift-alerts   (was getDriftAlertsByRun)
+//   GET /api/runs/:runId/drift-metrics  (was getDriftMetricsByRun)
+// Both queried `drift_alerts.run_id` / `drift_metrics.run_id`. Verified
+// against the live schema (project tfbfzepaccvklpabllao, AGENTS.md PAT path
+// 2026-05-17): the drift tables are CLIENT/CAMPAIGN-keyed — drift_alerts has
+// no run_id (client_id + drift_metric_id), drift_metrics has client_id +
+// campaign_id, neither has run_id. The routes 500'd on every call, had ZERO
+// frontend callers (verified across src/), and the route name itself encoded
+// the wrong data model (C1). No speculative run_id migration is warranted
+// (0 live rows; client/campaign scoping is the real schema). Client-scoped
+// drift remains served by GET /api/clients/:clientId/drift-alerts (A9,
+// gated Phase 2). Removal also resolves harness B2/B4 (schema-broken).
 
 // POST /api/drift-alerts/:alertId/acknowledge - Acknowledge a drift alert
 app.post("/api/drift-alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
@@ -1140,11 +1314,27 @@ app.post("/api/drift-alerts/:alertId/acknowledge", async (req: Request, res: Res
   }
 });
 
-// ============ Prompt Routes ============
+// ============ Prompt Routes — DEPRECATED (fullsweep Phase 5 / B5) ============
+//
+// The prompt_* tables (prompt_templates, prompt_scores, prompt_evolution_log)
+// are NOT provisioned in the live schema (verified 2026-05-17; AGENTS.md
+// forward-marks them non-existent). Per the fullsweep plan these routes are
+// guarded — NOT removed — because PromptEvolutionPanel is MOUNTED + USED
+// (Phase 4.G). Contract while the schema is absent:
+//   • GET  → 200 with typed-empty ([] / 404 "no active prompt") via the
+//            db-helper absent-relation guard — never 500.
+//   • POST → 410 Gone (no phantom insert into a non-existent table).
+// Every response carries `Deprecation: true`. No phantom schema, no migration.
+// If prompt_* is ever provisioned the guard is inert and these resume working.
+function markPromptDeprecated(res: Response): void {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Link", '</docs>; rel="deprecation"');
+}
 
-// GET /api/clients/:clientId/prompts - Get prompt history
+// GET /api/clients/:clientId/prompts - Get prompt history (DEPRECATED)
 app.get("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const stage = (req.query.stage as string) || "generate";
     const prompts = await getPromptHistory(clientId, stage);
@@ -1155,9 +1345,10 @@ app.get("/api/clients/:clientId/prompts", async (req: Request, res: Response) =>
   }
 });
 
-// GET /api/clients/:clientId/prompts/active - Get active prompt
+// GET /api/clients/:clientId/prompts/active - Get active prompt (DEPRECATED)
 app.get("/api/clients/:clientId/prompts/active", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const stage = (req.query.stage as string) || "generate";
     const campaignId = req.query.campaignId as string | undefined;
@@ -1173,9 +1364,10 @@ app.get("/api/clients/:clientId/prompts/active", async (req: Request, res: Respo
   }
 });
 
-// POST /api/clients/:clientId/prompts - Create prompt template
+// POST /api/clients/:clientId/prompts - Create prompt template (DEPRECATED → 410)
 app.post("/api/clients/:clientId/prompts", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const clientId = getParam(req, "clientId");
     const { promptText, stage, campaignId, version } = req.body;
     if (!promptText) {
@@ -1193,14 +1385,19 @@ app.post("/api/clients/:clientId/prompts", async (req: Request, res: Response) =
     });
     res.status(201).json(template);
   } catch (err) {
+    if (err instanceof PromptSchemaUnavailableError) {
+      res.status(410).json({ error: "Prompt evolution is deprecated — prompt_* schema is not provisioned" });
+      return;
+    }
     console.error("POST /api/clients/:clientId/prompts error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /api/prompts/:promptId/scores - Get scores for a prompt
+// GET /api/prompts/:promptId/scores - Get scores for a prompt (DEPRECATED)
 app.get("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const scores = await getPromptScores(promptId);
     res.json(scores);
@@ -1210,9 +1407,10 @@ app.get("/api/prompts/:promptId/scores", async (req: Request, res: Response) => 
   }
 });
 
-// POST /api/prompts/:promptId/scores - Record a score
+// POST /api/prompts/:promptId/scores - Record a score (DEPRECATED → 410)
 app.post("/api/prompts/:promptId/scores", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const { runId, score, gateDecision, artifactId, feedback } = req.body;
     if (!runId || score === undefined) {
@@ -1224,14 +1422,19 @@ app.post("/api/prompts/:promptId/scores", async (req: Request, res: Response) =>
     });
     res.status(201).json(result);
   } catch (err) {
+    if (err instanceof PromptSchemaUnavailableError) {
+      res.status(410).json({ error: "Prompt evolution is deprecated — prompt_* schema is not provisioned" });
+      return;
+    }
     console.error("POST /api/prompts/:promptId/scores error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// GET /api/prompts/:promptId/lineage - Get evolution lineage
+// GET /api/prompts/:promptId/lineage - Get evolution lineage (DEPRECATED)
 app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) => {
   try {
+    markPromptDeprecated(res);
     const promptId = getParam(req, "promptId");
     const lineage = await getPromptLineage(promptId);
     res.json(lineage);
@@ -1244,9 +1447,23 @@ app.get("/api/prompts/:promptId/lineage", async (req: Request, res: Response) =>
 // ============ Campaign Routes ============
 
 // GET /api/clients/:clientId/campaigns - List campaigns for client
+// Tenant gate (fullsweep A12 — clientId-keyed, same contract as A2):
+// JWT on + missing token → 401; caller requesting a foreign clientId →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/clients/:clientId/campaigns", async (req: Request, res: Response) => {
   try {
     const clientId = getParam(req, "clientId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller && caller.clientId !== clientId) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
     const campaigns = await getCampaignsByClient(clientId);
     res.json(campaigns);
   } catch (err) {
@@ -1256,11 +1473,22 @@ app.get("/api/clients/:clientId/campaigns", async (req: Request, res: Response) 
 });
 
 // GET /api/campaigns/:campaignId - Campaign detail with deliverables
+// Tenant gate (fullsweep A13 — same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const campaign = await getCampaign(campaignId);
-    if (!campaign) {
+    if (!campaign || (jwtAuthEnabled && caller && caller.clientId !== campaign.clientId)) {
       res.status(404).json({ error: "Campaign not found" });
       return;
     }
@@ -1299,9 +1527,26 @@ app.post("/api/clients/:clientId/campaigns", async (req: Request, res: Response)
 // ============ Deliverable Routes ============
 
 // GET /api/campaigns/:campaignId/recent-runs - Last N campaign runs for HUD workspace
+// Tenant gate (fullsweep A14 — campaign-scoped, same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/recent-runs", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : 10;
     const limit = Number.isFinite(rawLimit) ? rawLimit : 10;
     const runs = await getRecentRunsByCampaign(campaignId, limit);
@@ -1379,9 +1624,27 @@ app.get("/api/campaigns/:campaignId/direction-drift", async (req: Request, res: 
 });
 
 // GET /api/campaigns/:campaignId/deliverables - List deliverables
+// GET /api/campaigns/:campaignId/deliverables - List deliverables for campaign
+// Tenant gate (fullsweep A15 — campaign-scoped, same contract as /shot-summaries):
+// JWT on + missing token → 401; missing OR foreign-tenant campaign →
+// uniform 404. JWT off → legacy unscoped.
 app.get("/api/campaigns/:campaignId/deliverables", async (req: Request, res: Response) => {
   try {
     const campaignId = getParam(req, "campaignId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+    }
+
     const deliverables = await getDeliverablesByCampaign(campaignId);
     res.json(deliverables);
   } catch (err) {
@@ -1522,13 +1785,33 @@ app.post("/api/campaigns/:campaignId/estimate-cost", async (req: Request, res: R
 });
 
 // GET /api/deliverables/:deliverableId - Deliverable detail with linked artifacts
+// GET /api/deliverables/:deliverableId - Deliverable detail
+// Tenant gate (fullsweep A16 — same deliverable→campaign anchor as
+// /api/deliverables/:deliverableId/iterations): JWT on + missing token →
+// 401; missing deliverable/campaign OR foreign tenant → uniform 404
+// (CampaignDeliverable.clientId is nullable-denormalized so the parent
+// campaign is the bulletproof ownership anchor). JWT off → legacy unscoped.
 app.get("/api/deliverables/:deliverableId", async (req: Request, res: Response) => {
   try {
     const deliverableId = getParam(req, "deliverableId");
+
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const deliverable = await getDeliverable(deliverableId);
     if (!deliverable) {
       res.status(404).json({ error: "Deliverable not found" });
       return;
+    }
+    if (jwtAuthEnabled && caller) {
+      const campaign = await getCampaign(deliverable.campaignId);
+      if (!campaign || caller.clientId !== campaign.clientId) {
+        return res.status(404).json({ error: "Deliverable not found" });
+      }
     }
     res.json(deliverable);
   } catch (err) {
@@ -1688,8 +1971,18 @@ app.post("/api/clients/:clientId/baseline/calculate", async (req: Request, res: 
 // ============ Known Limitations (migration 007) ============
 
 // GET /api/known-limitations - List catalog (filter by model, category, severity)
+// Shared/global catalog (NOT per-tenant) — fullsweep MINOR: JWT-required-when-
+// enabled, NO tenant filter (mirrors GET /api/rejection-categories). JWT off →
+// legacy unauthenticated read.
 app.get("/api/known-limitations", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const { model, category, severity } = req.query;
     const limits = await listKnownLimitations({
       model: typeof model === "string" ? model : undefined,
@@ -1704,8 +1997,18 @@ app.get("/api/known-limitations", async (req: Request, res: Response) => {
 });
 
 // GET /api/known-limitations/:id - Get one
+// Shared/global catalog (NOT per-tenant) — fullsweep MINOR: JWT-required-when-
+// enabled, NO tenant filter (mirrors GET /api/rejection-categories). JWT off →
+// legacy unauthenticated read.
 app.get("/api/known-limitations/:id", async (req: Request, res: Response) => {
   try {
+    const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
+    const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;
+    if (jwtAuthEnabled && !caller) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
     const id = getParam(req, "id");
     const limit = await getKnownLimitation(id);
     if (!limit) return res.status(404).json({ error: "Known limitation not found" });
@@ -2293,9 +2596,12 @@ app.patch("/api/escalations/:id/resolve", async (req: Request, res: Response) =>
 // JWT_AUTH_ENABLED=true + missing/invalid token → 401. A foreign-tenant
 // artifact's escalation returns the SAME 404 as "none" — no 404-vs-403
 // existence leak, mirroring GET /api/escalations/:id. JWT off → legacy read.
-app.get("/api/artifacts/:id/escalation", async (req: Request, res: Response) => {
+// C2 (fullsweep Phase 4): param standardized `:id` → `:artifactId` to match
+// the artifact-route convention (/file, /signed-url, /platforms). URL path is
+// unchanged — server-internal param name only; no frontend change.
+app.get("/api/artifacts/:artifactId/escalation", async (req: Request, res: Response) => {
   try {
-    const id = getParam(req, "id");
+    const id = getParam(req, "artifactId");
 
     const jwtAuthEnabled = process.env.JWT_AUTH_ENABLED === "true";
     const caller = jwtAuthEnabled ? verifyClientJwtFromRequest(req) : null;

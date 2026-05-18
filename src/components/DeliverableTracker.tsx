@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ChevronRight, Layers, RefreshCw, ShieldCheck } from "lucide-react";
 import * as api from "../api";
 import { supabase } from "../lib/supabase";
+import { getAuthHeaders } from "../lib/apiAuth";
 import type { CampaignDeliverable, DeliverableStatus, DirectionDriftIndicator, OperatorOverrideDecision } from "../api";
 
 const OS_API_URL = import.meta.env.VITE_OS_API_URL || "http://localhost:3001";
@@ -151,7 +152,11 @@ async function loadShotSummaries(
     }
 
     const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
-    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`);
+    // Fullsweep B6: shot-summaries is tenant-gated (PR #8) — forward the client
+    // JWT so this fallback path doesn't 401 and silently stub the tracker.
+    const response = await fetch(`${OS_API_URL}/api/campaigns/${campaignId}/shot-summaries${params}`, {
+      headers: getAuthHeaders(),
+    });
     if (response.ok) {
       const summaries = (await response.json()) as ShotSummary[];
       if (Array.isArray(summaries)) {
@@ -491,6 +496,29 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
       )
       .subscribe();
 
+    // Asset-integrity S4 fix (Jackie RCA 2026-05-17): without a Realtime
+    // subscription on `artifacts`, a regen that inserts a new artifact (the
+    // regen→artifact→regrade loop writes the artifact before any
+    // orchestration_decision) fires no event here, so the tracker keeps the
+    // stale latestArtifactId and serves the pre-regen image. Campaign-scoped
+    // (RLS already client-scopes the JWT supabase client) to catch every
+    // regen even when the runId prop is stale/absent.
+    const artifactsChannel = supabase
+      .channel(`artifacts:${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "artifacts",
+          filter: `campaign_id=eq.${campaignId}`,
+        },
+        () => {
+          void refreshShotSummaries();
+        },
+      )
+      .subscribe();
+
     const directionDriftRunLogsChannel = supabase
       .channel(`direction_drift_run_logs:${campaignId}`)
       .on(
@@ -543,6 +571,7 @@ export default function DeliverableTracker({ campaignId, runId, onShotClick }: D
         void supabase.removeChannel(decisionsChannel);
       }
       void supabase.removeChannel(runsChannel);
+      void supabase.removeChannel(artifactsChannel);
       void supabase.removeChannel(directionDriftRunLogsChannel);
       void supabase.removeChannel(directionDriftDecisionsChannel);
       void supabase.removeChannel(directionDriftEscalationsChannel);
